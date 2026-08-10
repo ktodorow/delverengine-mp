@@ -9,6 +9,8 @@ import com.interrupt.dungeoneer.game.Options;
 
 public class DesktopStarter {
     public static void main(String[] args) {
+        String startupLevelPath = null;
+
         if (args != null) {
             for (String arg : args) {
                 if (arg.toLowerCase().endsWith("debug=true")) {
@@ -21,11 +23,16 @@ public class DesktopStarter {
                     System.out.println(Game.VERSION);
                     System.exit(0);
                 }
+                else if (arg.equalsIgnoreCase("--test-level") || arg.equalsIgnoreCase("test-level=true")) {
+                    Game.isDebugMode = true;
+                    startupLevelPath = GameApplication.OPEN_SOURCE_TEST_LEVEL;
+                }
             }
         }
 
-        // We must call this first to get the correct display options
-        Options.loadOptions();
+        // Test content must not create or read a player profile in the source tree.
+        if(startupLevelPath == null) Options.loadOptions();
+        else Options.SetKeyboardBindings();
 
         DisplayMode defaultMode = LwjglApplicationConfiguration.getDesktopDisplayMode();
 
@@ -52,6 +59,9 @@ public class DesktopStarter {
         config.addIcon("icon-32.png", Files.FileType.Internal);  // 32x32 icon (Windows + Linux)
         config.addIcon("icon-16.png", Files.FileType.Internal);  // 16x16 icon (Windows)
 
-        new LwjglApplication(new GameApplication(), config);
+        GameApplication gameApplication = startupLevelPath == null
+                ? new GameApplication()
+                : new GameApplication(startupLevelPath);
+        new LwjglApplication(gameApplication, config);
     }
 }

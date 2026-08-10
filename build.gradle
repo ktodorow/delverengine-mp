@@ -61,3 +61,12 @@ project(":Dungeoneer") {
         api "com.bladecoder.ink:blade-ink:$inkVersion"
     }
 }
+
+task smokeTest {
+    group = "verification"
+    description = "Builds the prototype and verifies its open-source test-content baseline."
+    dependsOn ":DelvEdit:build"
+    dependsOn ":Dungeoneer:build"
+    dependsOn ":DungeoneerDesktop:build"
+    dependsOn ":DungeoneerDesktop:verifyOpenSourceDist"
+}

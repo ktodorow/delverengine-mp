@@ -14,6 +14,16 @@ task run(dependsOn: classes, type: JavaExec) {
     ignoreExitValue = true
 }
 
+task runTestLevel(dependsOn: classes, type: JavaExec) {
+    group = "application"
+    description = "Launches the repository-owned open-source test level."
+    main = project.mainClassName
+    classpath = sourceSets.main.runtimeClasspath
+    standardInput = System.in
+    workingDir = project.assetsDir
+    args "--test-level"
+}
+
 task debug(dependsOn: classes, type: JavaExec) {
     main = project.mainClassName
     classpath = sourceSets.main.runtimeClasspath
@@ -34,8 +44,91 @@ task dist(type: Jar) {
     from {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     }
-    from files(project.assetsDir)
+    from(project.assetsDir) {
+        exclude "packaged_files.txt"
+        exclude "save/**"
+    }
     with jar
 }
 
 dist.dependsOn classes
+
+def restrictedFileNames = [
+        "delver.jar",
+        "delver.exe",
+        "steam_api.dll",
+        "steam_api64.dll",
+        "steam_appid.txt"
+] as Set
+
+task verifyOpenSourceAssets {
+    group = "verification"
+    description = "Rejects asset changes and known commercial game files before creating build artifacts."
+
+    doLast {
+        def trackedOutput = new ByteArrayOutputStream()
+        exec {
+            workingDir rootProject.projectDir
+            commandLine "git", "ls-tree", "-r", "--name-only", "HEAD", "--", "Dungeoneer/assets"
+            standardOutput = trackedOutput
+        }
+
+        def trackedAssets = trackedOutput.toString("UTF-8")
+                .readLines()
+                .findAll { !it.isEmpty() }
+                .collect { rootProject.file(it).canonicalFile }
+                .toSet()
+
+        def currentAssets = fileTree(project.assetsDir)
+                .matching {
+                    exclude "packaged_files.txt"
+                    exclude "save/**"
+                }
+                .files
+                .collect { it.canonicalFile }
+                .toSet()
+        def unexpectedAssets = (currentAssets - trackedAssets).sort()
+        def missingAssets = (trackedAssets - currentAssets).sort()
+
+        if(!unexpectedAssets.isEmpty() || !missingAssets.isEmpty()) {
+            throw new GradleException("Assets must exactly match tracked source files. Added: "
+                    + unexpectedAssets + "; missing: " + missingAssets)
+        }
+
+        def changedOutput = new ByteArrayOutputStream()
+        exec {
+            workingDir rootProject.projectDir
+            commandLine "git", "diff", "--name-only", "HEAD", "--", "Dungeoneer/assets"
+            standardOutput = changedOutput
+        }
+
+        def changedAssets = changedOutput.toString("UTF-8").readLines().findAll { !it.isEmpty() }
+        if(!changedAssets.isEmpty()) {
+            throw new GradleException("Tracked assets differ from HEAD: " + changedAssets)
+        }
+
+        def restrictedAssets = currentAssets.findAll {
+            restrictedFileNames.contains(it.name.toLowerCase())
+        }
+        if(!restrictedAssets.isEmpty()) {
+            throw new GradleException("Restricted commercial files found in assets: " + restrictedAssets)
+        }
+    }
+}
+
+dist.dependsOn verifyOpenSourceAssets
+
+task verifyOpenSourceDist(dependsOn: dist) {
+    group = "verification"
+    description = "Checks the completed baseline distribution for known commercial game files."
+
+    doLast {
+        def restrictedEntries = zipTree(dist.archivePath).files.findAll {
+            restrictedFileNames.contains(it.name.toLowerCase())
+        }
+
+        if(!restrictedEntries.isEmpty()) {
+            throw new GradleException("Restricted commercial files found in distribution: " + restrictedEntries)
+        }
+    }
+}

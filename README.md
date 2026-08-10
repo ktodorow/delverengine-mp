@@ -7,7 +7,33 @@ Delver engine and editor source code release
 This source release does not contain or cover the game data from Delver, the game data remains subject to the original copyright and applicable law.
 
 ## Building
-To compile on your own ensure you have installed [JDK8](https://adoptopenjdk.net/) or higher. Open a terminal to the repo root and run the following commands:
+To compile on your own ensure you have installed [Temurin JDK 8](https://adoptium.net/temurin/releases/?version=8). Open a terminal to the repo root and run the following commands:
+
+### v1.08 multiplayer prototype baseline
+
+Prototype branch `mp-v108-prototype` starts at engine commit `9083f5e9c23b63fdc67ae2ce4cbeb374692d10be`. Keep modern `master` separate from prototype work.
+
+Windows x64 prerequisites:
+
+- 64-bit Git for Windows.
+- 64-bit JDK 8. `java -version` and `javac -version` must both report Java 8.
+- PowerShell or Command Prompt. Gradle 4.8.1 downloads through checked-in wrapper.
+- Drive-letter checkout path such as `C:\\src\\delverengine-mp-v108`. In a VM, prefer a guest-local clone; otherwise map shared folders first because `cmd.exe` cannot use UNC working directories.
+- No Delver installation or commercial game data. Baseline uses only repository-owned open-source assets.
+
+From clean checkout, build distribution and run automated smoke checks:
+
+```bat
+.\gradlew.bat clean smokeTest --no-daemon
+```
+
+Launch open-source test level directly; close game window to stop task:
+
+```bat
+.\gradlew.bat DungeoneerDesktop:runTestLevel --no-daemon
+```
+
+`smokeTest` loads `Dungeoneer/assets/levels/test-level.bin`, validates core open-source data, builds desktop JAR, rejects added, removed, or modified asset files before packaging, and rejects known commercial executable, archive, and Steam runtime filenames from artifact. Do not copy Owned Game Copy files into repository; later owned-data work will mount them read-only outside source tree.
 
 ### Game
  

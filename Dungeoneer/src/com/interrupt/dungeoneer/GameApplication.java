@@ -9,13 +9,17 @@ import com.interrupt.dungeoneer.entities.Stairs;
 import com.interrupt.dungeoneer.entities.triggers.TriggeredWarp;
 import com.interrupt.dungeoneer.game.GameData;
 import com.interrupt.dungeoneer.game.Level;
+import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.interrupt.dungeoneer.screens.*;
 import com.interrupt.utils.JsonUtil;
 
 public class GameApplication extends Game {
 
+    public static final String OPEN_SOURCE_TEST_LEVEL = "levels/test-level.bin";
+
 	protected GameManager gameManager = null;
 	public GameInput input = new GameInput();
+    private String startupLevelPath = null;
 
     public GameScreen mainScreen;
     public GameOverScreen gameoverScreen;
@@ -27,8 +31,25 @@ public class GameApplication extends Game {
     public static GameApplication instance;
     public static boolean editorRunning = false;
 
+    public GameApplication() { }
+
+    public GameApplication(String startupLevelPath) {
+        this.startupLevelPath = startupLevelPath;
+    }
+
 	@Override
 	public void create() {
+        if(startupLevelPath != null) {
+            Level startupLevel = KryoSerializer.loadLevel(Gdx.files.internal(startupLevelPath));
+            if(startupLevel == null) {
+                throw new IllegalStateException("Could not load startup level: " + startupLevelPath);
+            }
+
+            if(startupLevel.theme == null) startupLevel.theme = "TEST";
+            createFromEditor(startupLevel);
+            return;
+        }
+
 		instance = this;
 		Gdx.app.log("DelverLifeCycle", "LibGdx Create");
 
