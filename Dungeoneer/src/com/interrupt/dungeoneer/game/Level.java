@@ -31,6 +31,8 @@ import com.interrupt.dungeoneer.generator.GenTheme;
 import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.gfx.TextureAtlas;
 import com.interrupt.dungeoneer.gfx.drawables.DrawableMesh;
+import com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
 import com.interrupt.dungeoneer.partitioning.LightSpatialHash;
 import com.interrupt.dungeoneer.partitioning.SpatialHash;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
@@ -3541,12 +3543,26 @@ public class Level {
 
 	// trigger an entity by id
 	public void trigger(Entity instigator, String triggersId, String triggerValue) {
+		ParticipantContext participant = null;
+		if(Game.instance != null && Game.instance.player != null
+				&& Game.instance.progression != null) {
+			Player localPlayer = instigator instanceof Player
+					? (Player)instigator : Game.instance.player;
+			participant = LocalPlayerCompatibilityAdapter.adapt(
+					localPlayer, Game.instance.progression);
+		}
+		trigger(instigator, triggersId, triggerValue, participant);
+	}
+
+	// trigger an entity by id while retaining the initiating Participant
+	public void trigger(Entity instigator, String triggersId, String triggerValue,
+			ParticipantContext participant) {
 		if(triggersId == null || triggersId.equals("")) return;
 
 		try {
 			Array<Entity> matches = getEntitiesById(triggersId);
 			for(Entity e : matches) {
-				if(e != instigator) e.onTrigger(instigator, triggerValue);
+				if(e != instigator) e.onTrigger(instigator, triggerValue, participant);
 			}
 			matches.clear();
 		}

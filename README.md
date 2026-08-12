@@ -43,7 +43,7 @@ Run the focused authoritative-session scenarios on Windows:
 .\gradlew.bat Dungeoneer:test --tests com.interrupt.dungeoneer.multiplayer.host.HeadlessHostSessionHarnessTest --no-daemon
 ```
 
-The harness loads only repository-owned test-floor metadata, advances a controlled 60 Hz Host clock, sends synthetic commands through `HostSessionCommandGateway`, and captures snapshots, events, disconnects, transitions, and persisted state through in-memory adapters. It does not start graphics or audio and does not require an Owned Game Copy.
+The harness loads only repository-owned test-floor metadata, advances a controlled 60 Hz Host clock, sends synthetic commands through `HostSessionCommandGateway`, and captures snapshots, events, disconnects, transitions, and persisted state through in-memory adapters. Commands carry a stable `ParticipantId`; authoritative remote character state remains separate from original global `Player`, while local first-person play uses `LocalPlayerCompatibilityAdapter`. Participant-scoped teleports and shared Party progression are covered without graphics, audio, or an Owned Game Copy.
 
 ### Owned v1.08 tutorial
 

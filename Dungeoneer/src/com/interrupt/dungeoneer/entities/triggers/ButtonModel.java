@@ -14,6 +14,8 @@ import com.interrupt.dungeoneer.game.Level.Source;
 import com.interrupt.dungeoneer.input.Actions;
 import com.interrupt.dungeoneer.input.ReadableKeys;
 import com.interrupt.dungeoneer.input.Actions.Action;
+import com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
 import com.interrupt.managers.StringManager;
 
 import java.text.MessageFormat;
@@ -82,6 +84,9 @@ public class ButtonModel extends Model {
 	
 	private float animationTime = 0;
 	private boolean animating = false;
+	private transient ParticipantContext animatingParticipant;
+	private transient ParticipantContext triggeringParticipant;
+	private transient ParticipantContext propagatedParticipant;
 	
 	public ButtonModel() { meshFile = "meshes/obelisk.obj"; isSolid = true; }
 	
@@ -102,7 +107,8 @@ public class ButtonModel extends Model {
 			if(animationTime >= triggerAnimationTime) {
 				animating = false;
 				animationTime = triggerAnimationTime;
-				fire(null);
+				fire(animatingParticipant, null);
+				animatingParticipant = null;
 			}
 		}
 		
@@ -124,6 +130,7 @@ public class ButtonModel extends Model {
 			triggerTime-=delta;
 			if (triggerTime<=0){
 				doTriggerEvent(triggerValue); // fire!
+				triggeringParticipant = null;
 				if (triggerResets){
 					triggerStatus=TriggerStatus.RESETTING;
 					triggerTime=triggerResetTime;
@@ -145,14 +152,20 @@ public class ButtonModel extends Model {
 		if(animating == false && triggerStatus == TriggerStatus.WAITING) {
 			animating = true;
 			animationTime = 0;
+			animatingParticipant = localParticipant(p);
 		}
 	}
 	
 	public void fire(String value) {
+		fire(propagatedParticipant != null ? propagatedParticipant : localParticipant(null), value);
+	}
+
+	public void fire(ParticipantContext participant, String value) {
 		// Triggering an already triggered trigger will do nothing
 		if (triggerStatus==TriggerStatus.WAITING){
 			triggerStatus=TriggerStatus.TRIGGERED;
 			triggerTime=triggerDelay;
+			triggeringParticipant = participant;
 			
 			// update the value if one was given
 			if(value != null && !value.equals(""))
@@ -163,7 +176,7 @@ public class ButtonModel extends Model {
 	@Override
 	public void onTrigger(Entity instigator, String value) {
 		if(triggerPropogates) {
-			fire(value);
+			fire(propagatedParticipant != null ? propagatedParticipant : localParticipant(null), value);
 		}
 		else { 
 			// just update the value if one was given
@@ -171,12 +184,34 @@ public class ButtonModel extends Model {
 				triggerValue=value;
 		}
 	}
+
+	@Override
+	public void onTrigger(Entity instigator, String value, ParticipantContext participant) {
+		propagatedParticipant = participant;
+		try {
+			onTrigger(instigator, value);
+		}
+		finally {
+			propagatedParticipant = null;
+		}
+	}
 	
 	// triggers can be delayed, fire the actual trigger here
 	public void doTriggerEvent(String value) {
 		Audio.playPositionedSound(triggerSound, new Vector3((float)x,(float)y,(float)z), 0.8f, 11f);
-		Game.instance.level.trigger(this, triggersId, triggerValue);
+		Game.instance.level.trigger(this, triggersId, triggerValue, triggeringParticipant);
 		if(message != null && !message.equals("")) Game.ShowMessage(message, messageTime, messageSize);
+	}
+
+	protected ParticipantContext getTriggeringParticipantContext() {
+		return triggeringParticipant;
+	}
+
+	protected ParticipantContext localParticipant(Player player) {
+		if(Game.instance == null || Game.instance.progression == null) return null;
+		Player participantPlayer = player == null ? Game.instance.player : player;
+		if(participantPlayer == null) return null;
+		return LocalPlayerCompatibilityAdapter.adapt(participantPlayer, Game.instance.progression);
 	}
 	
 	@Override

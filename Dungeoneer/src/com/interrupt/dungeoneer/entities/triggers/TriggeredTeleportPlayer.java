@@ -7,12 +7,15 @@ import com.badlogic.gdx.math.Vector3;
 import com.interrupt.dungeoneer.Audio;
 import com.interrupt.dungeoneer.annotations.EditorProperty;
 import com.interrupt.dungeoneer.entities.DynamicLight;
+import com.interrupt.dungeoneer.entities.Entity;
 import com.interrupt.dungeoneer.entities.Particle;
-import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.entities.PositionedSound;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.Options;
+import com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantCharacter;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
 
 public class TriggeredTeleportPlayer extends Trigger {
 	public TriggeredTeleportPlayer() { hidden = true; spriteAtlas = "editor"; tex = 11; }
@@ -28,30 +31,51 @@ public class TriggeredTeleportPlayer extends Trigger {
 	
 	@Override
 	public void doTriggerEvent(String value) {
-		Player p = Game.instance.player;
+		ParticipantContext participant = getTriggeringParticipantContext();
+		if(participant == null) participant = LocalPlayerCompatibilityAdapter.fromGame();
+		teleportParticipant(participant, Game.GetLevel());
+	}
+
+	void teleportParticipant(ParticipantContext participant, Level level) {
+		ParticipantCharacter character = participant.getCharacter();
 
 		float xTarget = 0;
 		float yTarget = 0;
 		
 		if (useOffsets){
-			xTarget = Math.round(p.x)-p.x;
-			yTarget = Math.round(p.y)-p.y;
+			xTarget = Math.round(character.getX()) - character.getX();
+			yTarget = Math.round(character.getY()) - character.getY();
 		}
 
 		if(toWarpMarkerId != null) {
-			float playerRot = p.rot;
-			Game.instance.putPlayerAtWarpMarker(toWarpMarkerId);
+			float participantRotation = character.getRotation();
+			putParticipantAtWarpMarker(character, toWarpMarkerId, level);
 			if(useOffsets) {
-				p.rot = playerRot;
+				character.setRotation(participantRotation);
 			}
 		}
 
-		if (doEffects) doEffect(new Vector3((float)p.x+0.5f,(float)p.y+0.5f,(float)p.z), Game.GetLevel());
+		if (doEffects) doEffect(new Vector3(character.getX() + 0.5f,
+				character.getY() + 0.5f, character.getZ()), level);
 		
-		p.x -= xTarget;
-		p.y -= yTarget;
+		character.setPosition(character.getX() - xTarget,
+				character.getY() - yTarget, character.getZ());
 		
-		if (doEffects) doEffect(new Vector3((float)p.x+0.5f,(float)p.y+0.5f,(float)p.z), Game.GetLevel());
+		if (doEffects) doEffect(new Vector3(character.getX() + 0.5f,
+				character.getY() + 0.5f, character.getZ()), level);
+	}
+
+	private void putParticipantAtWarpMarker(ParticipantCharacter participant, String warpMarkerId,
+			Level level) {
+		if(warpMarkerId == null || level == null) return;
+
+		com.badlogic.gdx.utils.Array<Entity> found = level.getEntitiesById(warpMarkerId);
+		if(found.size == 0) found = level.getEntitiesLikeId(warpMarkerId);
+		if(found.size == 0) return;
+
+		Entity warpTo = found.first();
+		participant.setPosition(warpTo.x, warpTo.y, warpTo.z);
+		participant.setRotation((float)Math.toRadians(warpTo.getRotation().z + 90f));
 	}
 	
 	public void doEffect(Vector3 pos, Level level) {

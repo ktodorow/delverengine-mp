@@ -2,6 +2,11 @@ package com.interrupt.dungeoneer.multiplayer.host;
 
 import com.interrupt.dungeoneer.GameApplication;
 import com.interrupt.dungeoneer.game.Level;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantCharacter;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantCharacterState;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
+import com.interrupt.dungeoneer.multiplayer.participant.SharedPartyProgression;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -14,8 +19,9 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
     private final int floorHeight;
     private final int startX;
     private final int startY;
-    private final Map<String, MutableParticipant> participants =
-            new TreeMap<String, MutableParticipant>();
+    private final Map<ParticipantId, MutableParticipant> participants =
+            new TreeMap<ParticipantId, MutableParticipant>();
+    private final SharedPartyProgression partyProgression = new SharedPartyProgression();
     private String floorId = GameApplication.OPEN_SOURCE_TEST_LEVEL;
     private long simulationTicks = 0L;
     private float elapsedSeconds = 0f;
@@ -41,40 +47,58 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
         }
 
         SyntheticCommand synthetic = (SyntheticCommand)command;
+        ParticipantId participantId = synthetic.getParticipantId();
         switch(synthetic.kind) {
             case JOIN:
-                if(participants.containsKey(synthetic.participantId)) {
+                if(participants.containsKey(participantId)) {
                     throw new IllegalArgumentException("Participant already joined: "
-                            + synthetic.participantId);
+                            + participantId);
                 }
-                participants.put(synthetic.participantId,
-                        new MutableParticipant(startX, startY));
-                output.event(new TestEvent(synthetic.participantId, "joined"));
+                ParticipantCharacterState character =
+                        new ParticipantCharacterState(startX, startY, 0f, 0f);
+                participants.put(participantId, new MutableParticipant(
+                        new ParticipantContext(participantId, character, partyProgression)));
+                output.event(new TestEvent(participantId, "joined"));
                 break;
             case MOVE:
-                MutableParticipant moving = requireParticipant(synthetic.participantId);
+                MutableParticipant moving = requireParticipant(participantId);
                 moving.velocityX = synthetic.x;
                 moving.velocityY = synthetic.y;
                 break;
+            case SAME_FLOOR_TELEPORT:
+                ParticipantContext teleporting = requireParticipant(participantId).context;
+                ParticipantCharacter teleportingCharacter = teleporting.getCharacter();
+                teleportingCharacter.setPosition(
+                        clamp(synthetic.x, 0, floorWidth - 1),
+                        clamp(synthetic.y, 0, floorHeight - 1),
+                        teleportingCharacter.getZ());
+                output.event(new TestEvent(teleporting.getParticipantId(), "teleported"));
+                break;
+            case PARTY_MUTATION:
+                ParticipantContext mutating = requireParticipant(participantId).context;
+                mutating.getPartyProgression().putPersistent(synthetic.key, synthetic.value);
+                output.event(new TestEvent(mutating.getParticipantId(),
+                        "party-mutation:" + synthetic.key));
+                break;
             case EVENT:
-                requireParticipant(synthetic.participantId);
-                output.event(new TestEvent(synthetic.participantId, synthetic.value));
+                requireParticipant(participantId);
+                output.event(new TestEvent(participantId, synthetic.value));
                 break;
             case DISCONNECT:
-                requireParticipant(synthetic.participantId);
-                participants.remove(synthetic.participantId);
-                output.disconnect(new TestDisconnectOutcome(synthetic.participantId,
+                requireParticipant(participantId);
+                participants.remove(participantId);
+                output.disconnect(new TestDisconnectOutcome(participantId,
                         synthetic.value));
                 break;
             case TRANSITION:
-                requireParticipant(synthetic.participantId);
+                requireParticipant(participantId);
                 String previousFloor = floorId;
                 floorId = synthetic.value;
-                output.transition(new TestTransitionOutcome(synthetic.participantId,
+                output.transition(new TestTransitionOutcome(participantId,
                         previousFloor, floorId));
                 break;
             case PERSIST:
-                requireParticipant(synthetic.participantId);
+                requireParticipant(participantId);
                 output.persist(new TestPersistedState(canonicalState(hostTick)));
                 break;
             default:
@@ -89,19 +113,25 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
         elapsedSeconds += fixedDeltaSeconds;
         lastFixedDeltaSeconds = fixedDeltaSeconds;
         for(MutableParticipant participant : participants.values()) {
-            participant.x = clamp(participant.x + participant.velocityX, 0, floorWidth - 1);
-            participant.y = clamp(participant.y + participant.velocityY, 0, floorHeight - 1);
+            ParticipantCharacter character = participant.context.getCharacter();
+            character.setPosition(
+                    clamp(character.getX() + participant.velocityX, 0, floorWidth - 1),
+                    clamp(character.getY() + participant.velocityY, 0, floorHeight - 1),
+                    character.getZ());
         }
     }
 
     @Override
     public HostSessionSnapshot snapshot(long hostTick) {
-        Map<String, TestParticipantState> participantStates =
-                new LinkedHashMap<String, TestParticipantState>();
-        for(Map.Entry<String, MutableParticipant> entry : participants.entrySet()) {
+        Map<ParticipantId, TestParticipantState> participantStates =
+                new LinkedHashMap<ParticipantId, TestParticipantState>();
+        Map<String, String> visiblePartyProgression = partyProgression.snapshotPersistent();
+        for(Map.Entry<ParticipantId, MutableParticipant> entry : participants.entrySet()) {
             MutableParticipant participant = entry.getValue();
+            ParticipantCharacter character = participant.context.getCharacter();
             participantStates.put(entry.getKey(),
-                    new TestParticipantState(participant.x, participant.y));
+                    new TestParticipantState(character.getX(), character.getY(),
+                            visiblePartyProgression, partyProgression.getMutationCount()));
         }
         return new TestSnapshot(hostTick, floorId, floorWidth, floorHeight, participantStates);
     }
@@ -118,7 +148,11 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
         return lastFixedDeltaSeconds;
     }
 
-    private MutableParticipant requireParticipant(String participantId) {
+    ParticipantContext getParticipant(ParticipantId participantId) {
+        return requireParticipant(participantId).context;
+    }
+
+    private MutableParticipant requireParticipant(ParticipantId participantId) {
         MutableParticipant participant = participants.get(participantId);
         if(participant == null) {
             throw new IllegalArgumentException("Unknown synthetic Participant: " + participantId);
@@ -129,11 +163,13 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
     private String canonicalState(long hostTick) {
         StringBuilder state = new StringBuilder();
         state.append("tick=").append(hostTick).append(";floor=").append(floorId);
-        for(Map.Entry<String, MutableParticipant> entry : participants.entrySet()) {
+        for(Map.Entry<ParticipantId, MutableParticipant> entry : participants.entrySet()) {
             MutableParticipant participant = entry.getValue();
+            ParticipantCharacter character = participant.context.getCharacter();
             state.append(';').append(entry.getKey()).append('=')
-                    .append(participant.x).append(',').append(participant.y);
+                    .append(character.getX()).append(',').append(character.getY());
         }
+        state.append(";party=").append(partyProgression.snapshotPersistent());
         return state.toString();
     }
 
@@ -141,63 +177,80 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
         return Math.max(minimum, Math.min(maximum, value));
     }
 
+    private static float clamp(float value, float minimum, float maximum) {
+        return Math.max(minimum, Math.min(maximum, value));
+    }
+
     private static final class MutableParticipant {
-        private int x;
-        private int y;
+        private final ParticipantContext context;
         private int velocityX = 0;
         private int velocityY = 0;
 
-        private MutableParticipant(int x, int y) {
-            this.x = x;
-            this.y = y;
+        private MutableParticipant(ParticipantContext context) {
+            this.context = context;
         }
     }
 
     static final class SyntheticCommand implements HostSessionCommand {
         private final CommandKind kind;
-        private final String participantId;
+        private final ParticipantId participantId;
         private final int x;
         private final int y;
+        private final String key;
         private final String value;
 
-        private SyntheticCommand(CommandKind kind, String participantId, int x, int y,
+        private SyntheticCommand(CommandKind kind, String participantId, int x, int y, String key,
                 String value) {
-            if(participantId == null || participantId.trim().isEmpty()) {
-                throw new IllegalArgumentException("Synthetic Participant identity is required.");
-            }
             this.kind = kind;
-            this.participantId = participantId;
+            this.participantId = new ParticipantId(participantId);
             this.x = x;
             this.y = y;
+            this.key = key;
             this.value = value;
         }
 
         static SyntheticCommand join(String participantId) {
-            return new SyntheticCommand(CommandKind.JOIN, participantId, 0, 0, null);
+            return new SyntheticCommand(CommandKind.JOIN, participantId, 0, 0, null, null);
         }
 
         static SyntheticCommand move(String participantId, int velocityX, int velocityY) {
             return new SyntheticCommand(CommandKind.MOVE, participantId, velocityX, velocityY,
-                    null);
+                    null, null);
+        }
+
+        static SyntheticCommand teleportSameFloor(String participantId, int x, int y) {
+            return new SyntheticCommand(CommandKind.SAME_FLOOR_TELEPORT, participantId, x, y,
+                    null, null);
+        }
+
+        static SyntheticCommand mutateParty(String participantId, String key, String value) {
+            return new SyntheticCommand(CommandKind.PARTY_MUTATION, participantId, 0, 0,
+                    requireValue(key, "Party mutation key is required."),
+                    requireValue(value, "Party mutation value is required."));
         }
 
         static SyntheticCommand event(String participantId, String event) {
-            return new SyntheticCommand(CommandKind.EVENT, participantId, 0, 0,
+            return new SyntheticCommand(CommandKind.EVENT, participantId, 0, 0, null,
                     requireValue(event, "Synthetic event is required."));
         }
 
         static SyntheticCommand disconnect(String participantId, String reason) {
-            return new SyntheticCommand(CommandKind.DISCONNECT, participantId, 0, 0,
+            return new SyntheticCommand(CommandKind.DISCONNECT, participantId, 0, 0, null,
                     requireValue(reason, "Disconnect reason is required."));
         }
 
         static SyntheticCommand transition(String participantId, String floorId) {
-            return new SyntheticCommand(CommandKind.TRANSITION, participantId, 0, 0,
+            return new SyntheticCommand(CommandKind.TRANSITION, participantId, 0, 0, null,
                     requireValue(floorId, "Transition floor is required."));
         }
 
         static SyntheticCommand persist(String participantId) {
-            return new SyntheticCommand(CommandKind.PERSIST, participantId, 0, 0, null);
+            return new SyntheticCommand(CommandKind.PERSIST, participantId, 0, 0, null, null);
+        }
+
+        @Override
+        public ParticipantId getParticipantId() {
+            return participantId;
         }
 
         private static String requireValue(String value, String message) {
@@ -209,6 +262,8 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
     private enum CommandKind {
         JOIN,
         MOVE,
+        SAME_FLOOR_TELEPORT,
+        PARTY_MUTATION,
         EVENT,
         DISCONNECT,
         TRANSITION,
@@ -220,16 +275,16 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
         private final String floorId;
         private final int floorWidth;
         private final int floorHeight;
-        private final Map<String, TestParticipantState> participants;
+        private final Map<ParticipantId, TestParticipantState> participants;
 
         private TestSnapshot(long hostTick, String floorId, int floorWidth, int floorHeight,
-                Map<String, TestParticipantState> participants) {
+                Map<ParticipantId, TestParticipantState> participants) {
             this.hostTick = hostTick;
             this.floorId = floorId;
             this.floorWidth = floorWidth;
             this.floorHeight = floorHeight;
             this.participants = Collections.unmodifiableMap(
-                    new LinkedHashMap<String, TestParticipantState>(participants));
+                    new LinkedHashMap<ParticipantId, TestParticipantState>(participants));
         }
 
         long getHostTick() {
@@ -248,7 +303,7 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
             return floorHeight;
         }
 
-        Map<String, TestParticipantState> getParticipants() {
+        Map<ParticipantId, TestParticipantState> getParticipants() {
             return participants;
         }
 
@@ -278,12 +333,34 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
     }
 
     static final class TestParticipantState {
-        private final int x;
-        private final int y;
+        private final float x;
+        private final float y;
+        private final Map<String, String> partyProgression;
+        private final long partyMutationCount;
 
-        private TestParticipantState(int x, int y) {
+        private TestParticipantState(float x, float y, Map<String, String> partyProgression,
+                long partyMutationCount) {
             this.x = x;
             this.y = y;
+            this.partyProgression = Collections.unmodifiableMap(
+                    new LinkedHashMap<String, String>(partyProgression));
+            this.partyMutationCount = partyMutationCount;
+        }
+
+        float getX() {
+            return x;
+        }
+
+        float getY() {
+            return y;
+        }
+
+        Map<String, String> getPartyProgression() {
+            return partyProgression;
+        }
+
+        long getPartyMutationCount() {
+            return partyMutationCount;
         }
 
         @Override
@@ -291,25 +368,30 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
             if(this == other) return true;
             if(!(other instanceof TestParticipantState)) return false;
             TestParticipantState that = (TestParticipantState)other;
-            return x == that.x && y == that.y;
+            return Float.compare(x, that.x) == 0 && Float.compare(y, that.y) == 0
+                    && partyMutationCount == that.partyMutationCount
+                    && partyProgression.equals(that.partyProgression);
         }
 
         @Override
         public int hashCode() {
-            return 31 * x + y;
+            int result = Float.floatToIntBits(x);
+            result = 31 * result + Float.floatToIntBits(y);
+            result = 31 * result + partyProgression.hashCode();
+            return 31 * result + (int)(partyMutationCount ^ (partyMutationCount >>> 32));
         }
 
         @Override
         public String toString() {
-            return x + "," + y;
+            return x + "," + y + partyProgression;
         }
     }
 
     static final class TestEvent implements HostSessionEvent {
-        private final String participantId;
+        private final ParticipantId participantId;
         private final String event;
 
-        private TestEvent(String participantId, String event) {
+        private TestEvent(ParticipantId participantId, String event) {
             this.participantId = participantId;
             this.event = event;
         }
@@ -334,10 +416,10 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
     }
 
     static final class TestDisconnectOutcome implements HostDisconnectOutcome {
-        private final String participantId;
+        private final ParticipantId participantId;
         private final String reason;
 
-        private TestDisconnectOutcome(String participantId, String reason) {
+        private TestDisconnectOutcome(ParticipantId participantId, String reason) {
             this.participantId = participantId;
             this.reason = reason;
         }
@@ -362,11 +444,11 @@ final class OpenSourceTestHostSimulation implements AuthoritativeHostSimulation 
     }
 
     static final class TestTransitionOutcome implements HostTransitionOutcome {
-        private final String participantId;
+        private final ParticipantId participantId;
         private final String fromFloor;
         private final String toFloor;
 
-        private TestTransitionOutcome(String participantId, String fromFloor, String toFloor) {
+        private TestTransitionOutcome(ParticipantId participantId, String fromFloor, String toFloor) {
             this.participantId = participantId;
             this.fromFloor = fromFloor;
             this.toFloor = toFloor;

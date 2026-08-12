@@ -7,6 +7,8 @@ import com.interrupt.dungeoneer.entities.Entity;
 import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
+import com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
 
 public class BasicTrigger extends Entity {
     public enum TriggerStatus {WAITING, TRIGGERED, RESETTING, DESTROYED}
@@ -69,6 +71,8 @@ public class BasicTrigger extends Entity {
 
     protected Trigger.TriggerStatus triggerStatus= Trigger.TriggerStatus.WAITING;
     private float triggerTime = 0;
+    private transient ParticipantContext triggeringParticipant;
+    private transient ParticipantContext propagatedParticipant;
 
     public BasicTrigger() {
         hidden = true; spriteAtlas = "editor"; tex = 11; floating = true;
@@ -102,6 +106,7 @@ public class BasicTrigger extends Entity {
             triggerTime-=delta;
             if (triggerTime<=0){
                 doTriggerEvent(triggerValue); // fire!
+                triggeringParticipant = null;
                 if (triggerResets){
                     triggerStatus= Trigger.TriggerStatus.RESETTING;
                     triggerTime=triggerResetTime;
@@ -114,15 +119,21 @@ public class BasicTrigger extends Entity {
 
     @Override
     public void use(Player p, float projx, float projy) {
-        fire(null);
+        fire(localParticipant(p), null);
     }
 
     public void fire(String value) {
+        fire(propagatedParticipant != null ? propagatedParticipant : localParticipant(null), value);
+    }
+
+    public void fire(ParticipantContext participant, String value) {
 
         // Check if we can actually fire now
         if(triggersDuring != Trigger.GameTime.WHENEVER) {
-            if(Game.instance != null && Game.instance.player != null) {
-                boolean endgame = Game.instance.player.isHoldingOrb;
+            if(participant != null || (Game.instance != null && Game.instance.player != null)) {
+                boolean endgame = participant != null
+                        ? participant.getCharacter().isHoldingOrb()
+                        : Game.instance.player.isHoldingOrb;
                 if(triggersDuring == Trigger.GameTime.DESCENT && endgame) {
                     return;
                 }
@@ -142,6 +153,7 @@ public class BasicTrigger extends Entity {
         if (triggerStatus== Trigger.TriggerStatus.WAITING){
             triggerStatus= Trigger.TriggerStatus.TRIGGERED;
             triggerTime=triggerDelay;
+            triggeringParticipant = participant;
 
             // update the value if one was given
             if(value != null && !value.equals(""))
@@ -152,7 +164,7 @@ public class BasicTrigger extends Entity {
     @Override
     public void onTrigger(Entity instigator, String value) {
         if(triggerPropogates) {
-            fire(value);
+            fire(propagatedParticipant != null ? propagatedParticipant : localParticipant(null), value);
         }
         else {
             // just update the value if one was given
@@ -161,11 +173,33 @@ public class BasicTrigger extends Entity {
         }
     }
 
+    @Override
+    public void onTrigger(Entity instigator, String value, ParticipantContext participant) {
+        propagatedParticipant = participant;
+        try {
+            onTrigger(instigator, value);
+        }
+        finally {
+            propagatedParticipant = null;
+        }
+    }
+
     // triggers can be delayed, fire the actual trigger here
     public void doTriggerEvent(String value) {
         Audio.playPositionedSound(triggerSound, new Vector3((float)x,(float)y,(float)z), 0.8f, 11f);
-        Game.instance.level.trigger(this, triggersId, triggerValue);
+        Game.instance.level.trigger(this, triggersId, triggerValue, triggeringParticipant);
         if(message != null && !message.equals("")) Game.ShowMessage(message, messageTime, messageSize);
+    }
+
+    protected ParticipantContext getTriggeringParticipantContext() {
+        return triggeringParticipant;
+    }
+
+    protected ParticipantContext localParticipant(Player player) {
+        if(Game.instance == null || Game.instance.progression == null) return null;
+        Player participantPlayer = player == null ? Game.instance.player : player;
+        if(participantPlayer == null) return null;
+        return LocalPlayerCompatibilityAdapter.adapt(participantPlayer, Game.instance.progression);
     }
 
     @Override

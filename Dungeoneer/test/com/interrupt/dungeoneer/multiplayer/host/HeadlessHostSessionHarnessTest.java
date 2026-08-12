@@ -4,8 +4,12 @@ import com.badlogic.gdx.ApplicationAdapter;
 import com.badlogic.gdx.backends.headless.HeadlessApplication;
 import com.badlogic.gdx.files.FileHandle;
 import com.interrupt.dungeoneer.GameApplication;
+import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.multiplayer.host.HeadlessHostSessionHarness.ObservedValue;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantCharacterState;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -15,6 +19,7 @@ import java.io.File;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertTrue;
 
 public class HeadlessHostSessionHarnessTest {
@@ -84,8 +89,8 @@ public class HeadlessHostSessionHarnessTest {
         assertEquals("open-source-test-annex", snapshot.getFloorId());
         assertTrue(snapshot.getFloorWidth() > 0);
         assertTrue(snapshot.getFloorHeight() > 0);
-        assertTrue(snapshot.getParticipants().containsKey("alpha"));
-        assertFalse(snapshot.getParticipants().containsKey("beta"));
+        assertTrue(snapshot.getParticipants().containsKey(new ParticipantId("alpha")));
+        assertFalse(snapshot.getParticipants().containsKey(new ParticipantId("beta")));
 
         OpenSourceTestHostSimulation.TestPersistedState persisted =
                 (OpenSourceTestHostSimulation.TestPersistedState)
@@ -93,6 +98,89 @@ public class HeadlessHostSessionHarnessTest {
         assertTrue(persisted.getCanonicalState().contains("floor=open-source-test-annex"));
         assertTrue(persisted.getCanonicalState().contains("alpha="));
         assertTrue(persisted.getCanonicalState().contains("beta="));
+    }
+
+    @Test
+    public void keepsTwoParticipantIdentitiesAndCharacterStateDistinctWithoutAdditionalPlayers() {
+        OpenSourceTestHostSimulation simulation =
+                new OpenSourceTestHostSimulation(loadOpenSourceTestFloor());
+        HeadlessHostSessionHarness harness = new HeadlessHostSessionHarness(simulation);
+        HostSessionCommandGateway commands = harness.getCommandGateway();
+
+        commands.submit(OpenSourceTestHostSimulation.SyntheticCommand.join("alpha"));
+        commands.submit(OpenSourceTestHostSimulation.SyntheticCommand.join("beta"));
+        harness.advanceTicks(1L);
+
+        ParticipantContext alpha = simulation.getParticipant(new ParticipantId("alpha"));
+        ParticipantContext beta = simulation.getParticipant(new ParticipantId("beta"));
+        assertFalse(alpha.getParticipantId().equals(beta.getParticipantId()));
+        assertNotSame(alpha.getCharacter(), beta.getCharacter());
+        assertTrue(alpha.getCharacter() instanceof ParticipantCharacterState);
+        assertTrue(beta.getCharacter() instanceof ParticipantCharacterState);
+        assertFalse(Player.class.isAssignableFrom(alpha.getCharacter().getClass()));
+        assertFalse(Player.class.isAssignableFrom(beta.getCharacter().getClass()));
+    }
+
+    @Test
+    public void sameFloorTeleportMovesOnlyItsActivatingParticipant() {
+        OpenSourceTestHostSimulation simulation =
+                new OpenSourceTestHostSimulation(loadOpenSourceTestFloor());
+        HeadlessHostSessionHarness harness = new HeadlessHostSessionHarness(simulation);
+        HostSessionCommandGateway commands = harness.getCommandGateway();
+        ParticipantId alphaId = new ParticipantId("alpha");
+        ParticipantId betaId = new ParticipantId("beta");
+
+        commands.submit(OpenSourceTestHostSimulation.SyntheticCommand.join("alpha"));
+        commands.submit(OpenSourceTestHostSimulation.SyntheticCommand.join("beta"));
+        harness.advanceTicks(1L);
+        OpenSourceTestHostSimulation.TestSnapshot before =
+                (OpenSourceTestHostSimulation.TestSnapshot)harness.getSnapshots().get(0).getValue();
+        OpenSourceTestHostSimulation.TestParticipantState alphaBefore =
+                before.getParticipants().get(alphaId);
+        int targetX = alphaBefore.getX() == 0f ? before.getFloorWidth() - 1 : 0;
+        int targetY = alphaBefore.getY() == 0f ? before.getFloorHeight() - 1 : 0;
+
+        commands.submit(OpenSourceTestHostSimulation.SyntheticCommand.teleportSameFloor(
+                "beta", targetX, targetY));
+        harness.advanceTicks(1L);
+
+        OpenSourceTestHostSimulation.TestSnapshot after =
+                (OpenSourceTestHostSimulation.TestSnapshot)harness.getSnapshots().get(1).getValue();
+        assertEquals(alphaBefore.getX(), after.getParticipants().get(alphaId).getX(), 0f);
+        assertEquals(alphaBefore.getY(), after.getParticipants().get(alphaId).getY(), 0f);
+        assertEquals(targetX, after.getParticipants().get(betaId).getX(), 0f);
+        assertEquals(targetY, after.getParticipants().get(betaId).getY(), 0f);
+        assertEquals("beta:teleported", harness.getEvents().get(2).getValue().toString());
+    }
+
+    @Test
+    public void appliesPartyMutationOnceAndShowsItToBothParticipants() {
+        OpenSourceTestHostSimulation simulation =
+                new OpenSourceTestHostSimulation(loadOpenSourceTestFloor());
+        HeadlessHostSessionHarness harness = new HeadlessHostSessionHarness(simulation);
+        HostSessionCommandGateway commands = harness.getCommandGateway();
+        ParticipantId alphaId = new ParticipantId("alpha");
+        ParticipantId betaId = new ParticipantId("beta");
+
+        commands.submit(OpenSourceTestHostSimulation.SyntheticCommand.join("alpha"));
+        commands.submit(OpenSourceTestHostSimulation.SyntheticCommand.join("beta"));
+        harness.advanceTicks(1L);
+        commands.submit(OpenSourceTestHostSimulation.SyntheticCommand.mutateParty(
+                "alpha", "opened-test-door", "yes"));
+        harness.advanceTicks(1L);
+
+        OpenSourceTestHostSimulation.TestSnapshot snapshot =
+                (OpenSourceTestHostSimulation.TestSnapshot)harness.getSnapshots().get(1).getValue();
+        OpenSourceTestHostSimulation.TestParticipantState alpha =
+                snapshot.getParticipants().get(alphaId);
+        OpenSourceTestHostSimulation.TestParticipantState beta =
+                snapshot.getParticipants().get(betaId);
+        assertEquals("yes", alpha.getPartyProgression().get("opened-test-door"));
+        assertEquals(alpha.getPartyProgression(), beta.getPartyProgression());
+        assertEquals(1L, alpha.getPartyMutationCount());
+        assertEquals(1L, beta.getPartyMutationCount());
+        assertEquals("alpha:party-mutation:opened-test-door",
+                harness.getEvents().get(2).getValue().toString());
     }
 
     @Test

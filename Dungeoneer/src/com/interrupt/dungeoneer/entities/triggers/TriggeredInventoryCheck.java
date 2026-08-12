@@ -62,7 +62,8 @@ public class TriggeredInventoryCheck extends Trigger {
 				foundItems(foundItems, value);
 			}
 			else {
-				Game.instance.level.trigger(this, triggersOnFail, null);
+				Game.instance.level.trigger(this, triggersOnFail, null,
+						getTriggeringParticipantContext());
 				triggerStatus = TriggerStatus.RESETTING;
 			}
 		}
@@ -71,21 +72,24 @@ public class TriggeredInventoryCheck extends Trigger {
 			if(foundItems.size == 0)
 				foundItems(foundItems, value);
 			else
-				Game.instance.level.trigger(this, triggersOnFail, null);
+				Game.instance.level.trigger(this, triggersOnFail, null,
+						getTriggeringParticipantContext());
 		}
 
 		if(compareType == CompareType.HAS_AT_LEAST) {
 			if(foundItems.size >= compareAmount * itemNames.length && itemNames.length > 0)
 				foundItems(foundItems, value);
 			else
-				Game.instance.level.trigger(this, triggersOnFail, null);
+				Game.instance.level.trigger(this, triggersOnFail, null,
+						getTriggeringParticipantContext());
 		}
 
 		if(compareType == CompareType.HAS_LESS_THAN) {
 			if(foundItems.size < compareAmount * itemNames.length && itemNames.length > 0)
 				foundItems(foundItems, value);
 			else
-				Game.instance.level.trigger(this, triggersOnFail, null);
+				Game.instance.level.trigger(this, triggersOnFail, null,
+						getTriggeringParticipantContext());
 		}
 
 		if(compareType == CompareType.HAS_ROOM_IN_INVENTORY_FOR) {
@@ -93,7 +97,8 @@ public class TriggeredInventoryCheck extends Trigger {
 				super.doTriggerEvent(value);
 			}
 			else {
-				Game.instance.level.trigger(this, triggersOnFail, null);
+				Game.instance.level.trigger(this, triggersOnFail, null,
+						getTriggeringParticipantContext());
 			}
 		}
 

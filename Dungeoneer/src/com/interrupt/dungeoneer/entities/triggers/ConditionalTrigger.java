@@ -109,7 +109,8 @@ public class ConditionalTrigger extends Trigger {
 
 	private void failedCheck() {
 		if(triggersOnFail != null && !triggersOnFail.isEmpty())
-			Game.instance.level.trigger(this, triggersOnFail, triggerValue);
+			Game.instance.level.trigger(this, triggersOnFail, triggerValue,
+					getTriggeringParticipantContext());
 	}
 
 	@Override

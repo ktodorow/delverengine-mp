@@ -28,6 +28,9 @@ public final class AuthoritativeHostSession implements HostSessionCommandGateway
     @Override
     public synchronized void submit(HostSessionCommand command) {
         if(command == null) throw new IllegalArgumentException("Host command cannot be null.");
+        if(command.getParticipantId() == null) {
+            throw new IllegalArgumentException("Host command Participant identity cannot be null.");
+        }
         pendingCommands.add(command);
     }
 

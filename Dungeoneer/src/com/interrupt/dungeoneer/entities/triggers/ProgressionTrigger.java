@@ -1,8 +1,10 @@
 package com.interrupt.dungeoneer.entities.triggers;
 
-import com.badlogic.gdx.utils.ArrayMap;
 import com.interrupt.dungeoneer.annotations.EditorProperty;
 import com.interrupt.dungeoneer.game.Game;
+import com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyProgression;
 
 public class ProgressionTrigger extends Trigger {
 	
@@ -33,15 +35,18 @@ public class ProgressionTrigger extends Trigger {
 
 	@Override
 	public void doTriggerEvent(String value) {
+		ParticipantContext participant = getTriggeringParticipantContext();
+		if(participant == null) participant = LocalPlayerCompatibilityAdapter.fromGame();
+		PartyProgression progression = participant.getPartyProgression();
 
 		if(progressionKey != null) {
-			String pv = getMyProgressionValue();
+			String pv = getMyProgressionValue(progression);
 
 			if(progressionType == ProgressionType.ONCE) {
 				if (pv == null || pv.isEmpty()) {
-					if(checkProgressionValue()) {
+					if(checkProgressionValue(progression)) {
 						super.doTriggerEvent(value);
-						updateProgressionValue();
+						updateProgressionValue(progression);
 					}
 					else {
 						triggerOnFail();
@@ -49,9 +54,9 @@ public class ProgressionTrigger extends Trigger {
 				}
 			}
 			else  {
-				if(checkProgressionValue()) {
+				if(checkProgressionValue(progression)) {
 					super.doTriggerEvent(value);
-					updateProgressionValue();
+					updateProgressionValue(progression);
 				}
 				else {
 					triggerOnFail();
@@ -62,10 +67,17 @@ public class ProgressionTrigger extends Trigger {
 
 	public void triggerOnFail() {
 		if(triggersOnFail != null && !triggersOnFail.isEmpty())
-			Game.instance.level.trigger(this, triggersOnFail, null);
+			Game.instance.level.trigger(this, triggersOnFail, null,
+					getTriggeringParticipantContext());
 	}
 
 	public boolean checkProgressionValue() {
+		ParticipantContext participant = getTriggeringParticipantContext();
+		if(participant == null) participant = LocalPlayerCompatibilityAdapter.fromGame();
+		return checkProgressionValue(participant.getPartyProgression());
+	}
+
+	private boolean checkProgressionValue(PartyProgression progression) {
 		// Make sure this can actually trigger
 		if (checkProgressionValue == null || checkProgressionValue.isEmpty()) {
 			return true;
@@ -75,41 +87,37 @@ public class ProgressionTrigger extends Trigger {
 			return true;
 		}
 
-		String pv = getOtherProgressionValue();
+		String pv = getOtherProgressionValue(progression);
 
 		return pv != null && pv.equals(checkProgressionValue);
 
 	}
 
-	private ArrayMap<String, String> getProgressionStorage() {
-		if(persistance == ProgressionPersistance.FOREVER) {
-			return Game.instance.progression.progressionTriggers;
-		}
-		else {
-			return Game.instance.progression.untilDeathProgressionTriggers;
-		}
-	}
-
-	private String getProgressionValue(String key) {
+	private String getProgressionValue(PartyProgression progression, String key) {
 		// check forever progression first
-		String value = Game.instance.progression.progressionTriggers.get(key);
+		String value = progression.getPersistent(key);
 		if(value != null && !value.isEmpty()) {
 			return value;
 		}
 
 		// fall back to transient progression
-		return Game.instance.progression.untilDeathProgressionTriggers.get(key);
+		return progression.getUntilDeath(key);
 	}
 
-	private String getMyProgressionValue() {
-		return getProgressionValue(progressionKey);
+	private String getMyProgressionValue(PartyProgression progression) {
+		return getProgressionValue(progression, progressionKey);
 	}
 
-	private String getOtherProgressionValue() {
-		return getProgressionValue(checkProgressionKey);
+	private String getOtherProgressionValue(PartyProgression progression) {
+		return getProgressionValue(progression, checkProgressionKey);
 	}
 
-	private void updateProgressionValue() {
-		getProgressionStorage().put(progressionKey, newProgressionValue);
+	private void updateProgressionValue(PartyProgression progression) {
+		if(persistance == ProgressionPersistance.FOREVER) {
+			progression.putPersistent(progressionKey, newProgressionValue);
+		}
+		else {
+			progression.putUntilDeath(progressionKey, newProgressionValue);
+		}
 	}
 }
