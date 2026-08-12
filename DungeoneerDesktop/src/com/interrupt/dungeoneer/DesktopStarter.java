@@ -15,6 +15,8 @@ import java.awt.GraphicsEnvironment;
 public class DesktopStarter {
     public static void main(String[] args) {
         DesktopLaunchOptions launchOptions = DesktopLaunchOptions.parse(args);
+        boolean directConnect = launchOptions.directHost
+                || launchOptions.directConnectAddress != null;
 
         if (args != null) {
             for (String arg : args) {
@@ -38,8 +40,14 @@ public class DesktopStarter {
             throw new IllegalArgumentException("Choose either --test-level or --owned-tutorial, not both.");
         }
 
+        if(directConnect) Game.isDebugMode = true;
+
         // Test content must not create or read a player profile in the source tree.
         if(launchOptions.openSourceTestLevel) {
+            Options.SetKeyboardBindings();
+        }
+        else if(directConnect) {
+            MultiplayerProfile.initializeDefault();
             Options.SetKeyboardBindings();
         }
         else {
@@ -61,7 +69,8 @@ public class DesktopStarter {
         DisplayMode defaultMode = LwjglApplicationConfiguration.getDesktopDisplayMode();
 
         LwjglApplicationConfiguration config = new LwjglApplicationConfiguration();
-        config.title = launchOptions.ownedTutorial ? "Delver Multiplayer" : "Delver Engine";
+        config.title = launchOptions.ownedTutorial || directConnect
+                ? "Delver Multiplayer" : "Delver Engine";
         config.fullscreen = Options.instance.fullScreen;
         config.width = defaultMode.width;
         config.height = defaultMode.height;
@@ -85,7 +94,15 @@ public class DesktopStarter {
         configureProcessExit(config);
 
         GameApplication gameApplication;
-        if(launchOptions.openSourceTestLevel) gameApplication = GameApplication.forOpenSourceTestLevel();
+        if(launchOptions.directHost) {
+            gameApplication = GameApplication.forDirectConnectHost(launchOptions.sessionPort);
+        }
+        else if(launchOptions.directConnectAddress != null) {
+            gameApplication = GameApplication.forDirectConnectClient(
+                    launchOptions.directConnectAddress, launchOptions.sessionPort,
+                    launchOptions.participantId);
+        }
+        else if(launchOptions.openSourceTestLevel) gameApplication = GameApplication.forOpenSourceTestLevel();
         else if(launchOptions.ownedTutorial) gameApplication = GameApplication.forOwnedTutorial();
         else gameApplication = new GameApplication();
         Thread.setDefaultUncaughtExceptionHandler(new DesktopCrashHandler(

@@ -29,6 +29,30 @@ task runTestLevel(dependsOn: classes, type: JavaExec) {
     args "--test-level"
 }
 
+task runDirectHost(dependsOn: classes, type: JavaExec) {
+    group = "application"
+    description = "Hosts one Direct Connect Participant on the open-source test floor."
+    main = project.mainClassName
+    classpath = sourceSets.main.runtimeClasspath
+    standardInput = System.in
+    workingDir = project.assetsDir
+    args "--direct-host"
+    if(project.hasProperty("sessionPort")) args "--session-port=" + project.property("sessionPort")
+}
+
+task runDirectClient(dependsOn: classes, type: JavaExec) {
+    group = "application"
+    description = "Connects to a Direct Connect Host on the open-source test floor."
+    main = project.mainClassName
+    classpath = sourceSets.main.runtimeClasspath
+    standardInput = System.in
+    workingDir = project.assetsDir
+    args "--direct-connect=" + (project.hasProperty("sessionAddress")
+            ? project.property("sessionAddress") : "127.0.0.1")
+    if(project.hasProperty("sessionPort")) args "--session-port=" + project.property("sessionPort")
+    if(project.hasProperty("participantId")) args "--participant-id=" + project.property("participantId")
+}
+
 task runOwnedTutorial(dependsOn: classes, type: JavaExec) {
     group = "application"
     description = "Validates an external Delver v1.08 archive and launches its tutorial read-only."
@@ -72,7 +96,6 @@ task dist(type: Jar) {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     }
     from(project.assetsDir) {
-        exclude "packaged_files.txt"
         exclude "save/**"
     }
     with jar

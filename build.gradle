@@ -18,6 +18,7 @@ allprojects {
         kryoVersion = '2.24.0'
         reflectionsVersion = '0.9.12'
         inkVersion = '1.0.0'
+        nettyVersion = '4.1.137.Final'
     }
 
     repositories {
@@ -59,6 +60,8 @@ project(":Dungeoneer") {
         api "com.badlogicgames.gdx:gdx-controllers:$gdxVersion"
         api "com.esotericsoftware.kryo:kryo:$kryoVersion"
         api "com.bladecoder.ink:blade-ink:$inkVersion"
+        api "io.netty:netty-codec:$nettyVersion"
+        api "io.netty:netty-transport:$nettyVersion"
     }
 }
 

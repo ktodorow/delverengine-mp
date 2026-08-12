@@ -10,9 +10,19 @@ import com.interrupt.dungeoneer.entities.triggers.TriggeredWarp;
 import com.interrupt.dungeoneer.game.GameData;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.owned.OwnedGameCopyMount;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectClient;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.interrupt.dungeoneer.screens.*;
 import com.interrupt.utils.JsonUtil;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 public class GameApplication extends Game {
 
@@ -21,12 +31,20 @@ public class GameApplication extends Game {
     private enum StartupMode {
         NORMAL,
         OPEN_SOURCE_TEST_LEVEL,
-        OWNED_TUTORIAL
+        OWNED_TUTORIAL,
+        DIRECT_CONNECT_HOST,
+        DIRECT_CONNECT_CLIENT
     }
 
 	protected GameManager gameManager = null;
 	public GameInput input = new GameInput();
     private final StartupMode startupMode;
+    private final String directConnectAddress;
+    private final int directConnectPort;
+    private final String directConnectParticipantId;
+    private DirectConnectPeer directConnectPeer;
+    private DirectConnectSessionScreen directConnectScreen;
+    private boolean enteredDirectConnectFloor = false;
 
     public GameScreen mainScreen;
     public GameOverScreen gameoverScreen;
@@ -39,11 +57,19 @@ public class GameApplication extends Game {
     public static boolean editorRunning = false;
 
     public GameApplication() {
-        this(StartupMode.NORMAL);
+        this(StartupMode.NORMAL, null, 0, null);
     }
 
     private GameApplication(StartupMode startupMode) {
+        this(startupMode, null, 0, null);
+    }
+
+    private GameApplication(StartupMode startupMode, String directConnectAddress,
+            int directConnectPort, String directConnectParticipantId) {
         this.startupMode = startupMode;
+        this.directConnectAddress = directConnectAddress;
+        this.directConnectPort = directConnectPort;
+        this.directConnectParticipantId = directConnectParticipantId;
     }
 
     public static GameApplication forOpenSourceTestLevel() {
@@ -54,8 +80,24 @@ public class GameApplication extends Game {
         return new GameApplication(StartupMode.OWNED_TUTORIAL);
     }
 
+    public static GameApplication forDirectConnectHost(int port) {
+        return new GameApplication(StartupMode.DIRECT_CONNECT_HOST, null, port, "host");
+    }
+
+    public static GameApplication forDirectConnectClient(String address, int port,
+            String participantId) {
+        return new GameApplication(StartupMode.DIRECT_CONNECT_CLIENT, address, port,
+                participantId);
+    }
+
 	@Override
 	public void create() {
+        if(startupMode == StartupMode.DIRECT_CONNECT_HOST
+                || startupMode == StartupMode.DIRECT_CONNECT_CLIENT) {
+            createDirectConnect();
+            return;
+        }
+
         if(startupMode == StartupMode.OPEN_SOURCE_TEST_LEVEL) {
             Level startupLevel = KryoSerializer.loadLevel(Gdx.files.internal(OPEN_SOURCE_TEST_LEVEL));
             if(startupLevel == null) {
@@ -86,6 +128,76 @@ public class GameApplication extends Game {
         }
 
         createGameplay(com.interrupt.dungeoneer.game.Game.StartMode.NORMAL, false);
+    }
+
+    private void createDirectConnect() {
+        instance = this;
+        Gdx.app.setLogLevel(Application.LOG_INFO);
+        DirectConnectCompatibility compatibility = createOpenSourceCompatibility();
+        if(startupMode == StartupMode.DIRECT_CONNECT_HOST) {
+            directConnectPeer = DirectConnectHost.start(directConnectPort, compatibility);
+        }
+        else {
+            directConnectPeer = DirectConnectClient.connect(directConnectAddress,
+                    directConnectPort, directConnectParticipantId, compatibility);
+        }
+        directConnectScreen = new DirectConnectSessionScreen(this, directConnectPeer);
+        setScreen(directConnectScreen);
+    }
+
+    private DirectConnectCompatibility createOpenSourceCompatibility() {
+        String index = Gdx.files.internal("packaged_files.txt").readString("UTF-8");
+        Set<String> indexedPaths = new TreeSet<String>();
+        for(String line : index.split("\\r?\\n")) {
+            String path = line.trim();
+            if(path.isEmpty() || path.startsWith("#") || path.equals("./")) continue;
+            if(path.startsWith("./")) path = path.substring(2);
+            if(path.equals("packaged_files.txt") || path.equals("save")
+                    || path.startsWith("save/")) continue;
+            if(path.startsWith("/") || path.contains("\\") || path.contains("../")) {
+                throw new IllegalStateException(
+                        "Open-source asset index contains unsafe path: " + path);
+            }
+            if(!indexedPaths.add(path)) {
+                throw new IllegalStateException(
+                        "Open-source asset index contains duplicate path: " + path);
+            }
+        }
+
+        Map<String, byte[]> assets = new LinkedHashMap<String, byte[]>();
+        for(String path : indexedPaths) {
+            boolean directory = false;
+            for(String candidate : indexedPaths) {
+                if(candidate.startsWith(path + "/")) {
+                    directory = true;
+                    break;
+                }
+            }
+            if(directory) continue;
+            if(!Gdx.files.internal(path).exists()) {
+                throw new IllegalStateException(
+                        "Open-source asset index references missing file: " + path);
+            }
+            assets.put(path, Gdx.files.internal(path).readBytes());
+        }
+        return DirectConnectCompatibility.forNormalizedOpenSourceAssets(assets);
+    }
+
+    public void enterDirectConnectTestFloor() {
+        if(enteredDirectConnectFloor || directConnectPeer == null
+                || directConnectPeer.getStatus().getPhase() != DirectConnectPhase.READY) return;
+        enteredDirectConnectFloor = true;
+
+        Level startupLevel = KryoSerializer.loadLevel(Gdx.files.internal(OPEN_SOURCE_TEST_LEVEL));
+        if(startupLevel == null) {
+            throw new IllegalStateException("Could not load startup level: " + OPEN_SOURCE_TEST_LEVEL);
+        }
+        if(startupLevel.theme == null) startupLevel.theme = "TEST";
+
+        DirectConnectSessionScreen completedScreen = directConnectScreen;
+        directConnectScreen = null;
+        createFromEditor(startupLevel);
+        completedScreen.dispose();
     }
 
     private void createGameplay(com.interrupt.dungeoneer.game.Game.StartMode startMode,
@@ -128,7 +240,9 @@ public class GameApplication extends Game {
 	@Override
 	public void dispose() {
 		Gdx.app.log("DelverLifeCycle", "Goodbye");
-		mainScreen.dispose();
+		if(directConnectPeer != null) directConnectPeer.close();
+		if(directConnectScreen != null) directConnectScreen.dispose();
+		if(mainScreen != null) mainScreen.dispose();
 		SteamApi.api.dispose();
         com.interrupt.dungeoneer.game.Game.threadPool.shutdownNow();
         OwnedGameCopyMount.unmount();

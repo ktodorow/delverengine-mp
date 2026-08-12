@@ -45,6 +45,28 @@ Run the focused authoritative-session scenarios on Windows:
 
 The harness loads only repository-owned test-floor metadata, advances a controlled 60 Hz Host clock, sends synthetic commands through `HostSessionCommandGateway`, and captures snapshots, events, disconnects, transitions, and persisted state through in-memory adapters. Commands carry a stable `ParticipantId`; authoritative remote character state remains separate from original global `Player`, while local first-person play uses `LocalPlayerCompatibilityAdapter`. Participant-scoped teleports and shared Party progression are covered without graphics, audio, or an Owned Game Copy.
 
+### Direct Connect test floor
+
+Open two terminals on Windows. Start Host on one configurable numeric port used by both TCP and UDP:
+
+```powershell
+.\gradlew.bat DungeoneerDesktop:runDirectHost -PsessionPort=37777 --no-daemon
+```
+
+Start second client with Host address, same port, and temporary prototype Participant identity:
+
+```powershell
+.\gradlew.bat DungeoneerDesktop:runDirectClient -PsessionAddress=127.0.0.1 -PsessionPort=37777 -PparticipantId=friend-2 --no-daemon
+```
+
+Both windows show same Private Session identity while exact protocol build and normalized open-source asset identity are checked. Host admits client only after TCP handshake plus token-bound UDP registration, then both enter repository-owned test floor. Build mismatch, content mismatch, malformed handshake, and disconnect reason remain explicit. No engine entity, save graph, commercial asset, archive path, or asset byte is serialized or transmitted.
+
+Run bounded-codec and live loopback coverage without graphics:
+
+```powershell
+.\gradlew.bat Dungeoneer:test --tests "com.interrupt.dungeoneer.multiplayer.network.*" --no-daemon
+```
+
 ### Owned v1.08 tutorial
 
 Owned Game Copy remains outside checkout and build output. Launcher can detect common Steam or GOG locations, browse to `delver.jar`, or accept explicit path. It hashes sorted whitelisted asset paths and bytes into normalized content identity before mounting approved data read-only. ZIP order, timestamps, compression, classes, native libraries, Steam files, JAR metadata, mods, and original saves do not affect identity and are never mounted. Unsafe archive paths reject entire copy.
