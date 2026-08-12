@@ -1,19 +1,16 @@
 package com.interrupt.dungeoneer.owned;
 
 import java.io.File;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
-
 public final class OwnedGameCopyInspection {
     private final File archive;
     private final String sha256;
-    private final Set<String> mountableAssets;
+    private final NormalizedOwnedGameManifest normalizedManifest;
 
-    OwnedGameCopyInspection(File archive, String sha256, Set<String> mountableAssets) {
+    OwnedGameCopyInspection(File archive, String sha256,
+            NormalizedOwnedGameManifest normalizedManifest) {
         this.archive = archive;
         this.sha256 = sha256;
-        this.mountableAssets = Collections.unmodifiableSet(new HashSet<String>(mountableAssets));
+        this.normalizedManifest = normalizedManifest;
     }
 
     public File getArchive() {
@@ -24,7 +21,11 @@ public final class OwnedGameCopyInspection {
         return sha256;
     }
 
-    public Set<String> getMountableAssets() {
-        return mountableAssets;
+    public int getMountableAssetCount() {
+        return normalizedManifest.getAssetCount();
+    }
+
+    public NormalizedOwnedGameManifest getNormalizedManifest() {
+        return normalizedManifest;
     }
 }

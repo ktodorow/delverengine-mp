@@ -5,55 +5,61 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.HashSet;
-import java.util.Locale;
+import java.util.List;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 
 public final class OwnedGameCopyValidator {
+    private static final int MAX_ARCHIVE_ENTRIES = 100000;
+    private static final long MAX_MOUNTABLE_ASSET_BYTES = 256L * 1024L * 1024L;
+    private static final long MAX_TOTAL_MOUNTABLE_BYTES = 2L * 1024L * 1024L * 1024L;
+
     private static final Set<String> REQUIRED_ASSETS = new HashSet<String>(Arrays.asList(
             "data/entities.dat",
             "data/game.dat",
             "data/items.dat",
             "data/monsters.dat",
-            "data/player.dat",
-            "packaged_files.txt"));
+            "data/player.dat"));
 
-    private final Set<String> approvedSha256;
+    private final ApprovedOwnedGameCopyRegistry approvedVariants;
 
-    public OwnedGameCopyValidator(Set<String> approvedSha256) {
-        this.approvedSha256 = new HashSet<String>();
-        for(String fingerprint : approvedSha256) {
-            if(fingerprint != null) this.approvedSha256.add(fingerprint.toLowerCase(Locale.ROOT));
-        }
+    public OwnedGameCopyValidator(ApprovedOwnedGameCopyRegistry approvedVariants) {
+        if(approvedVariants == null) throw new IllegalArgumentException("Approved variant registry cannot be null.");
+        this.approvedVariants = approvedVariants;
     }
 
     public OwnedGameCopyInspection inspect(File archive) throws OwnedGameCopyValidationException {
         File canonicalArchive = checkArchiveFile(archive);
         String sha256 = sha256(canonicalArchive);
-        Set<String> mountableAssets = inspectEntries(canonicalArchive);
+        NormalizedOwnedGameManifest normalizedManifest = inspectEntries(canonicalArchive);
 
         Set<String> missingAssets = new HashSet<String>(REQUIRED_ASSETS);
-        missingAssets.removeAll(mountableAssets);
+        missingAssets.removeAll(normalizedManifest.getAssetPaths());
         if(!missingAssets.isEmpty()) {
             throw new OwnedGameCopyValidationException(
                     "Owned Game Copy is missing required v1.08 data entries: " + missingAssets);
         }
 
-        return new OwnedGameCopyInspection(canonicalArchive, sha256, mountableAssets);
+        return new OwnedGameCopyInspection(canonicalArchive, sha256, normalizedManifest);
     }
 
     public OwnedGameCopy validate(File archive) throws OwnedGameCopyValidationException {
         OwnedGameCopyInspection inspection = inspect(archive);
-        if(!isApprovedFingerprint(inspection.getSha256())) {
+        ApprovedOwnedGameCopyVariant approvedVariant =
+                approvedVariants.find(inspection.getNormalizedManifest());
+        if(approvedVariant == null) {
             throw new OwnedGameCopyValidationException(
-                    "Unknown Delver archive. Nothing was mounted. SHA-256: " + inspection.getSha256()
-                            + ". Share only this fingerprint and storefront/version details for certification; never share delver.jar.");
+                    "Uncertified Delver content variant. Nothing was mounted. Normalized manifest SHA-256: "
+                            + inspection.getNormalizedManifest().getSha256() + " ("
+                            + inspection.getNormalizedManifest().getFormat() + "). Select an approved v1.08 copy, "
+                            + "or send only this manifest ID plus storefront and displayed game version for review. "
+                            + "Never share delver.jar, extracted assets, or private cache content.");
         }
 
         File inspectedArchive = inspection.getArchive();
@@ -63,21 +69,19 @@ public final class OwnedGameCopyValidator {
         }
 
         return new OwnedGameCopy(inspectedArchive, confirmationSha256, inspectedArchive.length(),
-                inspectedArchive.lastModified());
+                inspectedArchive.lastModified(), approvedVariant, inspection.getNormalizedManifest());
     }
 
-    public boolean isApprovedFingerprint(String sha256) {
-        return sha256 != null && approvedSha256.contains(sha256.toLowerCase(Locale.ROOT));
+    public ApprovedOwnedGameCopyVariant findApprovedVariant(OwnedGameCopyInspection inspection) {
+        return inspection == null ? null : approvedVariants.find(inspection.getNormalizedManifest());
+    }
+
+    public boolean isApprovedManifest(String normalizedManifestSha256) {
+        return approvedVariants.find(normalizedManifestSha256) != null;
     }
 
     public static String sha256(File file) throws OwnedGameCopyValidationException {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        }
-        catch(NoSuchAlgorithmException ex) {
-            throw new OwnedGameCopyValidationException("SHA-256 is unavailable in this Java runtime.", ex);
-        }
+        MessageDigest digest = NormalizedOwnedGameManifest.newSha256();
 
         byte[] buffer = new byte[32 * 1024];
         try(InputStream input = new FileInputStream(file)) {
@@ -88,9 +92,7 @@ public final class OwnedGameCopyValidator {
             throw new OwnedGameCopyValidationException("Could not read Owned Game Copy: " + file, ex);
         }
 
-        StringBuilder hex = new StringBuilder(64);
-        for(byte value : digest.digest()) hex.append(String.format("%02x", value & 0xff));
-        return hex.toString();
+        return NormalizedOwnedGameManifest.toHex(digest.digest());
     }
 
     private File checkArchiveFile(File archive) throws OwnedGameCopyValidationException {
@@ -113,18 +115,38 @@ public final class OwnedGameCopyValidator {
         return canonicalArchive;
     }
 
-    private Set<String> inspectEntries(File archive) throws OwnedGameCopyValidationException {
+    private NormalizedOwnedGameManifest inspectEntries(File archive)
+            throws OwnedGameCopyValidationException {
         Set<String> mountableAssets = new HashSet<String>();
+        List<NormalizedOwnedGameManifest.AssetDigest> assetDigests =
+                new ArrayList<NormalizedOwnedGameManifest.AssetDigest>();
+        long totalMountableBytes = 0;
+        int archiveEntryCount = 0;
         try(ZipFile zipFile = new ZipFile(archive)) {
             Enumeration<? extends ZipEntry> entries = zipFile.entries();
             while(entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
+                archiveEntryCount++;
+                if(archiveEntryCount > MAX_ARCHIVE_ENTRIES) {
+                    throw new OwnedGameCopyValidationException(
+                            "Owned Game Copy contains too many archive entries.");
+                }
+
                 String normalizedPath = OwnedGameCopyAssetPolicy.normalize(entry.getName());
                 if(entry.isDirectory() || !OwnedGameCopyAssetPolicy.isMountableAsset(normalizedPath)) continue;
                 if(!mountableAssets.add(normalizedPath)) {
                     throw new OwnedGameCopyValidationException(
                             "Owned Game Copy contains duplicate asset path: " + normalizedPath);
                 }
+
+                NormalizedOwnedGameManifest.AssetDigest assetDigest =
+                        digestAsset(zipFile, entry, normalizedPath);
+                if(totalMountableBytes > MAX_TOTAL_MOUNTABLE_BYTES - assetDigest.length) {
+                    throw new OwnedGameCopyValidationException(
+                            "Owned Game Copy mountable data exceeds the safe size limit.");
+                }
+                totalMountableBytes += assetDigest.length;
+                assetDigests.add(assetDigest);
             }
         }
         catch(ZipException ex) {
@@ -133,6 +155,35 @@ public final class OwnedGameCopyValidator {
         catch(IOException ex) {
             throw new OwnedGameCopyValidationException("Could not inspect Owned Game Copy: " + archive, ex);
         }
-        return mountableAssets;
+        return NormalizedOwnedGameManifest.create(assetDigests);
+    }
+
+    private NormalizedOwnedGameManifest.AssetDigest digestAsset(ZipFile zipFile, ZipEntry entry,
+            String normalizedPath) throws IOException, OwnedGameCopyValidationException {
+        if(entry.getSize() > MAX_MOUNTABLE_ASSET_BYTES) {
+            throw new OwnedGameCopyValidationException(
+                    "Owned Game Copy asset exceeds the safe size limit: " + normalizedPath);
+        }
+
+        MessageDigest digest = NormalizedOwnedGameManifest.newSha256();
+        byte[] buffer = new byte[32 * 1024];
+        long length = 0;
+        try(InputStream input = zipFile.getInputStream(entry)) {
+            int read;
+            while((read = input.read(buffer)) != -1) {
+                if(length > MAX_MOUNTABLE_ASSET_BYTES - read) {
+                    throw new OwnedGameCopyValidationException(
+                            "Owned Game Copy asset exceeds the safe size limit: " + normalizedPath);
+                }
+                digest.update(buffer, 0, read);
+                length += read;
+            }
+        }
+
+        if(entry.getSize() >= 0 && entry.getSize() != length) {
+            throw new OwnedGameCopyValidationException(
+                    "Owned Game Copy asset size changed while reading: " + normalizedPath);
+        }
+        return new NormalizedOwnedGameManifest.AssetDigest(normalizedPath, length, digest.digest());
     }
 }

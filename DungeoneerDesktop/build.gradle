@@ -9,7 +9,7 @@ dependencies {
 }
 
 project.ext.mainClassName = "com.interrupt.dungeoneer.DesktopStarter"
-project.ext.assetsDir = new File("../Dungeoneer/assets")
+project.ext.assetsDir = project.file("../Dungeoneer/assets")
 
 task run(dependsOn: classes, type: JavaExec) {
     main = project.mainClassName
@@ -145,17 +145,21 @@ task verifyOpenSourceAssets {
 
 dist.dependsOn verifyOpenSourceAssets
 
-task verifyOpenSourceDist(dependsOn: dist) {
+task verifyReleaseArtifacts(type: JavaExec, dependsOn: [classes, dist, verifyOpenSourceAssets]) {
     group = "verification"
-    description = "Checks the completed baseline distribution for known commercial game files."
-
-    doLast {
-        def restrictedEntries = zipTree(dist.archivePath).files.findAll {
-            restrictedFileNames.contains(it.name.toLowerCase())
-        }
-
-        if(!restrictedEntries.isEmpty()) {
-            throw new GradleException("Restricted commercial files found in distribution: " + restrictedEntries)
-        }
+    description = "Audits release contents against tracked assets and rejects commercial or private cache data."
+    main = "com.interrupt.dungeoneer.owned.ReleaseArtifactAudit"
+    classpath = sourceSets.main.runtimeClasspath
+    doFirst {
+        def trustedClassOrigins = files(sourceSets.main.output.classesDirs, configurations.runtimeClasspath)
+                .files
+                .collect { it.absolutePath }
+                .sort()
+        setArgs([dist.archivePath.absolutePath, project.assetsDir.absolutePath] + trustedClassOrigins)
     }
+}
+
+task verifyOpenSourceDist(dependsOn: verifyReleaseArtifacts) {
+    group = "verification"
+    description = "Compatibility alias for the complete release artifact audit."
 }

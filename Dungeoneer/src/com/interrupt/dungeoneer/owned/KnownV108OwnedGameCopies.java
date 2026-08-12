@@ -1,19 +1,19 @@
 package com.interrupt.dungeoneer.owned;
 
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
 
 public final class KnownV108OwnedGameCopies {
-    private static final Set<String> APPROVED_SHA256 = Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
-            // Owner-verified Delver v1.08 archive. Fingerprints contain no commercial data.
-            "a2d58e87b09f588ff8389508e43accf7d3c6ce949b5aa4d31d6380574ec095ae"
-    )));
+    private static final ApprovedOwnedGameCopyRegistry REGISTRY = new ApprovedOwnedGameCopyRegistry(
+            Collections.singletonList(new ApprovedOwnedGameCopyVariant(
+                    "v1.08-owner-verified",
+                    "Owner-verified",
+                    "v1.08",
+                    // Normalized content identity only. No commercial files or per-asset hashes are stored.
+                    "6f33f828a076a8ad68582a623be6e92883326b24f7f635be64f093cffe05930e")));
 
     private KnownV108OwnedGameCopies() { }
 
     public static OwnedGameCopyValidator validator() {
-        return new OwnedGameCopyValidator(APPROVED_SHA256);
+        return new OwnedGameCopyValidator(REGISTRY);
     }
 }

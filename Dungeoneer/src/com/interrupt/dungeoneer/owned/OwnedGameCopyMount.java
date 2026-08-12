@@ -4,6 +4,7 @@ import com.badlogic.gdx.Files;
 import com.badlogic.gdx.files.FileHandle;
 import com.badlogic.gdx.utils.GdxRuntimeException;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,6 +13,7 @@ import java.io.Writer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -24,12 +26,15 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 public final class OwnedGameCopyMount implements AutoCloseable {
+    private static final String SYNTHETIC_ASSET_INDEX_PATH = "packaged_files.txt";
+
     private static OwnedGameCopyMount active;
 
     private final OwnedGameCopy ownedGameCopy;
     private final ZipFile zipFile;
     private final Map<String, ZipEntry> entries = new HashMap<String, ZipEntry>();
     private final Set<String> directories = new HashSet<String>();
+    private byte[] syntheticAssetIndex;
 
     private OwnedGameCopyMount(OwnedGameCopy ownedGameCopy) throws OwnedGameCopyValidationException {
         this.ownedGameCopy = ownedGameCopy;
@@ -61,16 +66,13 @@ public final class OwnedGameCopyMount implements AutoCloseable {
         active = new OwnedGameCopyMount(ownedGameCopy);
     }
 
+    /** Local engine asset access only. Participant payloads use OwnedGameCopyCompatibility. */
     public static synchronized FileHandle resolve(String path) {
         return active == null ? null : active.resolveHandle(path);
     }
 
     public static synchronized boolean isMounted() {
         return active != null;
-    }
-
-    public static synchronized File getMountedArchive() {
-        return active == null ? null : active.ownedGameCopy.getArchive();
     }
 
     public static synchronized void unmount() {
@@ -101,6 +103,15 @@ public final class OwnedGameCopyMount implements AutoCloseable {
             }
             addParentDirectories(normalizedPath);
         }
+        buildSyntheticAssetIndex();
+    }
+
+    private void buildSyntheticAssetIndex() {
+        List<String> sortedPaths = new ArrayList<String>(entries.keySet());
+        Collections.sort(sortedPaths);
+        StringBuilder index = new StringBuilder("# Generated locally from validated mountable assets\n./\n");
+        for(String path : sortedPaths) index.append("./").append(path).append('\n');
+        syntheticAssetIndex = index.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     private void addParentDirectories(String path) {
@@ -120,11 +131,15 @@ public final class OwnedGameCopyMount implements AutoCloseable {
             return null;
         }
 
-        if(!entries.containsKey(normalizedPath) && !directories.contains(normalizedPath)) return null;
+        if(!entries.containsKey(normalizedPath) && !directories.contains(normalizedPath)
+                && !normalizedPath.equals(SYNTHETIC_ASSET_INDEX_PATH)) return null;
         return new OwnedArchiveFileHandle(normalizedPath);
     }
 
     private InputStream read(String path) {
+        if(path.equals(SYNTHETIC_ASSET_INDEX_PATH)) {
+            return new ByteArrayInputStream(syntheticAssetIndex);
+        }
         ZipEntry entry = entries.get(path);
         if(entry == null) throw new GdxRuntimeException("Cannot read Owned Game Copy directory: " + path);
         try {
@@ -136,6 +151,7 @@ public final class OwnedGameCopyMount implements AutoCloseable {
     }
 
     private long length(String path) {
+        if(path.equals(SYNTHETIC_ASSET_INDEX_PATH)) return syntheticAssetIndex.length;
         ZipEntry entry = entries.get(path);
         return entry == null ? 0 : Math.max(0, entry.getSize());
     }
@@ -146,6 +162,7 @@ public final class OwnedGameCopyMount implements AutoCloseable {
 
         for(String entryPath : entries.keySet()) addDirectChild(prefix, entryPath, childNames);
         for(String directoryPath : directories) addDirectChild(prefix, directoryPath, childNames);
+        addDirectChild(prefix, SYNTHETIC_ASSET_INDEX_PATH, childNames);
 
         List<String> sortedNames = new ArrayList<String>(childNames);
         Collections.sort(sortedNames);
@@ -239,7 +256,8 @@ public final class OwnedGameCopyMount implements AutoCloseable {
 
         @Override
         public boolean exists() {
-            return entries.containsKey(archivePath) || directories.contains(archivePath);
+            return entries.containsKey(archivePath) || directories.contains(archivePath)
+                    || archivePath.equals(SYNTHETIC_ASSET_INDEX_PATH);
         }
 
         @Override

@@ -1,5 +1,6 @@
 package com.interrupt.dungeoneer;
 
+import com.interrupt.dungeoneer.owned.ApprovedOwnedGameCopyVariant;
 import com.interrupt.dungeoneer.owned.KnownV108OwnedGameCopies;
 import com.interrupt.dungeoneer.owned.OwnedGameCopy;
 import com.interrupt.dungeoneer.owned.OwnedGameCopyInspection;
@@ -31,14 +32,20 @@ final class OwnedGameCopyLauncher {
 
         OwnedGameCopyValidator validator = KnownV108OwnedGameCopies.validator();
         OwnedGameCopyInspection inspection = validator.inspect(archive);
+        ApprovedOwnedGameCopyVariant approvedVariant = validator.findApprovedVariant(inspection);
         System.out.println("Owned Game Copy: " + inspection.getArchive());
-        System.out.println("SHA-256: " + inspection.getSha256());
-        System.out.println("Mountable asset entries: " + inspection.getMountableAssets().size());
-        System.out.println("Certification: "
-                + (validator.isApprovedFingerprint(inspection.getSha256()) ? "approved exact v1.08" : "unknown"));
+        System.out.println("Archive SHA-256 (packaging diagnostic): " + inspection.getSha256());
+        System.out.println("Normalized manifest format: " + inspection.getNormalizedManifest().getFormat());
+        System.out.println("Normalized manifest SHA-256: " + inspection.getNormalizedManifest().getSha256());
+        System.out.println("Mountable asset entries: " + inspection.getMountableAssetCount());
+        System.out.println("Certification: " + (approvedVariant == null
+                ? "unknown"
+                : "approved " + approvedVariant.getGameVersion() + " / "
+                        + approvedVariant.getStorefront() + " (" + approvedVariant.getId() + ")"));
         System.out.println("No archive data was copied, mounted, or transmitted.");
-        if(!validator.isApprovedFingerprint(inspection.getSha256())) {
-            System.out.println("Share only SHA-256 and storefront/version details for certification; never share delver.jar.");
+        if(approvedVariant == null) {
+            System.out.println("Share only normalized manifest SHA-256 plus storefront/version details for certification; "
+                    + "never share delver.jar, extracted assets, or private cache content.");
         }
     }
 
