@@ -35,6 +35,16 @@ Launch open-source test level directly; close game window to stop task:
 
 `smokeTest` loads `Dungeoneer/assets/levels/test-level.bin`, validates core open-source data and owned-copy boundaries, builds desktop JAR, rejects added, removed, or modified asset files before packaging, and audits artifact for unexpected game data or compiled classes, commercial archives, Steam files, saves, and private cache content.
 
+### Headless Host-session harness
+
+Run the focused authoritative-session scenarios on Windows:
+
+```bat
+.\gradlew.bat Dungeoneer:test --tests com.interrupt.dungeoneer.multiplayer.host.HeadlessHostSessionHarnessTest --no-daemon
+```
+
+The harness loads only repository-owned test-floor metadata, advances a controlled 60 Hz Host clock, sends synthetic commands through `HostSessionCommandGateway`, and captures snapshots, events, disconnects, transitions, and persisted state through in-memory adapters. It does not start graphics or audio and does not require an Owned Game Copy.
+
 ### Owned v1.08 tutorial
 
 Owned Game Copy remains outside checkout and build output. Launcher can detect common Steam or GOG locations, browse to `delver.jar`, or accept explicit path. It hashes sorted whitelisted asset paths and bytes into normalized content identity before mounting approved data read-only. ZIP order, timestamps, compression, classes, native libraries, Steam files, JAR metadata, mods, and original saves do not affect identity and are never mounted. Unsafe archive paths reject entire copy.
