@@ -1,10 +1,10 @@
 package com.interrupt.dungeoneer.gfx;
 
-import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.graphics.Camera;
 import com.badlogic.gdx.graphics.Texture;
 import com.badlogic.gdx.graphics.g2d.Sprite;
 import com.badlogic.gdx.math.Vector3;
+import com.interrupt.dungeoneer.game.Game;
 
 public class Billboard extends Sprite {
 	private static final float ANIM_SPEED = 1f;
@@ -13,7 +13,7 @@ public class Billboard extends Sprite {
     public Vector3 wmove = new Vector3(0,0,0);
 
     public static Billboard make(String imgPath) {
-            Texture tex = new Texture(Gdx.files.internal(imgPath));
+            Texture tex = new Texture(Game.findInternalFileInMods(imgPath));
             Billboard sp = new Billboard(tex);
             return sp;
     }

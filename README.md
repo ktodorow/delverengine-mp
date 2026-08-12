@@ -19,7 +19,7 @@ Windows x64 prerequisites:
 - 64-bit JDK 8. `java -version` and `javac -version` must both report Java 8.
 - PowerShell or Command Prompt. Gradle 4.8.1 downloads through checked-in wrapper.
 - Drive-letter checkout path such as `C:\\src\\delverengine-mp-v108`. In a VM, prefer a guest-local clone; otherwise map shared folders first because `cmd.exe` cannot use UNC working directories.
-- No Delver installation or commercial game data. Baseline uses only repository-owned open-source assets.
+- No Delver installation or commercial game data is needed for baseline tests. Baseline uses only repository-owned open-source assets.
 
 From clean checkout, build distribution and run automated smoke checks:
 
@@ -33,7 +33,35 @@ Launch open-source test level directly; close game window to stop task:
 .\gradlew.bat DungeoneerDesktop:runTestLevel --no-daemon
 ```
 
-`smokeTest` loads `Dungeoneer/assets/levels/test-level.bin`, validates core open-source data, builds desktop JAR, rejects added, removed, or modified asset files before packaging, and rejects known commercial executable, archive, and Steam runtime filenames from artifact. Do not copy Owned Game Copy files into repository; later owned-data work will mount them read-only outside source tree.
+`smokeTest` loads `Dungeoneer/assets/levels/test-level.bin`, validates core open-source data and owned-copy boundaries, builds desktop JAR, rejects added, removed, or modified asset files before packaging, and rejects known commercial executable, archive, and Steam runtime filenames from artifact.
+
+### Owned v1.08 tutorial
+
+Owned Game Copy remains outside checkout and build output. Launcher can detect common Steam or GOG locations, browse to `delver.jar`, or accept explicit path. It validates exact approved SHA-256 before mounting whitelisted data entries read-only. Java classes, executables, native libraries, Steam files, mods, and original saves are never mounted.
+
+In Windows VM, keep source checkout on guest-local drive such as `C:\src\delverengine-mp-v108`. Keep original Delver installation separate. Never copy `delver.jar` into repository.
+
+First inspect owned archive and print safe fingerprint metadata:
+
+```powershell
+.\gradlew.bat DungeoneerDesktop:inspectOwnedCopy '-PownedCopy=C:\Program Files (x86)\Steam\steamapps\common\Delver\delver.jar' --no-daemon
+```
+
+Share only printed SHA-256 plus storefront and displayed game version when certifying another archive. Never share `delver.jar`. Registered owner-verified v1.08 copy prints `Certification: approved exact v1.08`; unknown copies remain rejected.
+
+Launch owned tutorial using auto-detection and Browse fallback:
+
+```powershell
+.\gradlew.bat DungeoneerDesktop:runOwnedTutorial --no-daemon
+```
+
+Or pass explicit archive path:
+
+```powershell
+.\gradlew.bat DungeoneerDesktop:runOwnedTutorial '-PownedCopy=C:\Program Files (x86)\Steam\steamapps\common\Delver\delver.jar' --no-daemon
+```
+
+Multiplayer settings, cache, identities, saves, and logs live under `%LOCALAPPDATA%\Delver Multiplayer`. Original Delver installation and single-player save folders are not written or imported.
 
 ### Game
  

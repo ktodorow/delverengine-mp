@@ -7,6 +7,7 @@ import com.interrupt.dungeoneer.input.Actions;
 import com.interrupt.dungeoneer.input.Actions.Action;
 import com.interrupt.dungeoneer.input.GamepadBinding;
 import com.interrupt.dungeoneer.input.GamepadDefinition;
+import com.interrupt.dungeoneer.owned.MultiplayerProfile;
 import com.interrupt.utils.JsonUtil;
 import com.interrupt.utils.OSUtils;
 
@@ -160,11 +161,11 @@ public class Options {
 
     /** Used by the app to find the save directory. Probably should live somewhere else. */
     public static String getOptionsDir() {
-        return "save/";
+        return MultiplayerProfile.isInitialized() ? "settings/" : "save/";
     }
 
     public static String getOptionsFilePath() {
-        return "save/options.txt";
+        return getOptionsDir() + "options.txt";
     }
 
     /** Load options from file and update instance. */

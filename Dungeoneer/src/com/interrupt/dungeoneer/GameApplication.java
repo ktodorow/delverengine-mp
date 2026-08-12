@@ -9,6 +9,7 @@ import com.interrupt.dungeoneer.entities.Stairs;
 import com.interrupt.dungeoneer.entities.triggers.TriggeredWarp;
 import com.interrupt.dungeoneer.game.GameData;
 import com.interrupt.dungeoneer.game.Level;
+import com.interrupt.dungeoneer.owned.OwnedGameCopyMount;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.interrupt.dungeoneer.screens.*;
 import com.interrupt.utils.JsonUtil;
@@ -17,9 +18,15 @@ public class GameApplication extends Game {
 
     public static final String OPEN_SOURCE_TEST_LEVEL = "levels/test-level.bin";
 
+    private enum StartupMode {
+        NORMAL,
+        OPEN_SOURCE_TEST_LEVEL,
+        OWNED_TUTORIAL
+    }
+
 	protected GameManager gameManager = null;
 	public GameInput input = new GameInput();
-    private String startupLevelPath = null;
+    private final StartupMode startupMode;
 
     public GameScreen mainScreen;
     public GameOverScreen gameoverScreen;
@@ -31,18 +38,28 @@ public class GameApplication extends Game {
     public static GameApplication instance;
     public static boolean editorRunning = false;
 
-    public GameApplication() { }
+    public GameApplication() {
+        this(StartupMode.NORMAL);
+    }
 
-    public GameApplication(String startupLevelPath) {
-        this.startupLevelPath = startupLevelPath;
+    private GameApplication(StartupMode startupMode) {
+        this.startupMode = startupMode;
+    }
+
+    public static GameApplication forOpenSourceTestLevel() {
+        return new GameApplication(StartupMode.OPEN_SOURCE_TEST_LEVEL);
+    }
+
+    public static GameApplication forOwnedTutorial() {
+        return new GameApplication(StartupMode.OWNED_TUTORIAL);
     }
 
 	@Override
 	public void create() {
-        if(startupLevelPath != null) {
-            Level startupLevel = KryoSerializer.loadLevel(Gdx.files.internal(startupLevelPath));
+        if(startupMode == StartupMode.OPEN_SOURCE_TEST_LEVEL) {
+            Level startupLevel = KryoSerializer.loadLevel(Gdx.files.internal(OPEN_SOURCE_TEST_LEVEL));
             if(startupLevel == null) {
-                throw new IllegalStateException("Could not load startup level: " + startupLevelPath);
+                throw new IllegalStateException("Could not load startup level: " + OPEN_SOURCE_TEST_LEVEL);
             }
 
             if(startupLevel.theme == null) startupLevel.theme = "TEST";
@@ -50,6 +67,29 @@ public class GameApplication extends Game {
             return;
         }
 
+        if(startupMode == StartupMode.OWNED_TUTORIAL) {
+            if(!OwnedGameCopyMount.isMounted()) {
+                throw new IllegalStateException("Owned Game Copy must be validated and mounted before tutorial launch.");
+            }
+
+            com.interrupt.dungeoneer.game.Game.gameData =
+                    com.interrupt.dungeoneer.game.Game.getModManager().loadGameData();
+            Level tutorialLevel = com.interrupt.dungeoneer.game.Game.gameData == null
+                    ? null
+                    : com.interrupt.dungeoneer.game.Game.gameData.tutorialLevel;
+            if(tutorialLevel == null) {
+                throw new IllegalStateException("Validated Owned Game Copy does not define tutorial content.");
+            }
+
+            createGameplay(com.interrupt.dungeoneer.game.Game.StartMode.OWNED_TUTORIAL, true);
+            return;
+        }
+
+        createGameplay(com.interrupt.dungeoneer.game.Game.StartMode.NORMAL, false);
+    }
+
+    private void createGameplay(com.interrupt.dungeoneer.game.Game.StartMode startMode,
+            boolean launchImmediately) {
 		instance = this;
 		Gdx.app.log("DelverLifeCycle", "LibGdx Create");
 
@@ -60,12 +100,12 @@ public class GameApplication extends Game {
         gameManager.init();
 
         mainMenuScreen = new SplashScreen();
-        mainScreen = new GameScreen(gameManager, input);
+        mainScreen = new GameScreen(gameManager, input, startMode);
         gameoverScreen = new GameOverScreen(gameManager);
         levelChangeScreen = new LevelChangeScreen(gameManager);
         winScreen = new WinScreen(gameManager);
 
-        setScreen(new SplashScreen());
+        setScreen(launchImmediately ? mainScreen : new SplashScreen());
 	}
 
 	public void createFromEditor(Level level) {
@@ -90,6 +130,8 @@ public class GameApplication extends Game {
 		Gdx.app.log("DelverLifeCycle", "Goodbye");
 		mainScreen.dispose();
 		SteamApi.api.dispose();
+        com.interrupt.dungeoneer.game.Game.threadPool.shutdownNow();
+        OwnedGameCopyMount.unmount();
 	}
 
 	public static void ShowMainScreen() {

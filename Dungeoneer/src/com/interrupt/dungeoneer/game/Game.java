@@ -29,6 +29,8 @@ import com.interrupt.dungeoneer.gfx.DecalManager;
 import com.interrupt.dungeoneer.gfx.animation.lerp3d.LerpedAnimationManager;
 import com.interrupt.dungeoneer.input.ControllerState;
 import com.interrupt.dungeoneer.input.GamepadManager;
+import com.interrupt.dungeoneer.owned.MultiplayerProfile;
+import com.interrupt.dungeoneer.owned.OwnedGameCopyMount;
 import com.interrupt.dungeoneer.screens.GameScreen;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.interrupt.dungeoneer.ui.*;
@@ -51,6 +53,22 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class Game {
+
+    public enum StartMode {
+        NORMAL(true),
+        OWNED_TUTORIAL(false);
+
+        private final boolean loadsSavedGame;
+
+        StartMode(boolean loadsSavedGame) {
+            this.loadsSavedGame = loadsSavedGame;
+        }
+
+        boolean loadsSavedGame() {
+            return loadsSavedGame;
+        }
+    }
+
 	/** Engine version */
 	public static String VERSION = "v1.4.0";
 
@@ -125,8 +143,12 @@ public class Game {
     public static Pathfinding pathfinding = new Pathfinding();
 
 	public Game(int saveLoc) {
-		instance = this;
-		Start(saveLoc);
+        this(saveLoc, StartMode.NORMAL);
+    }
+
+    public Game(int saveLoc, StartMode startMode) {
+        instance = this;
+        Start(saveLoc, startMode);
 	}
 
 	public void loadManagers() {
@@ -384,8 +406,11 @@ public class Game {
         return levels;
     }
 
-	public void Start(int saveLoc)
-	{
+    public void Start(int saveLoc) {
+        Start(saveLoc, StartMode.NORMAL);
+    }
+
+    public void Start(int saveLoc, StartMode startMode) {
 		loadManagers();
 
 		Game.flashTimer = 0;
@@ -408,7 +433,7 @@ public class Game {
 		progression = loadProgression(saveLoc);
 		progression.trackMods();
 
-		boolean didLoad = load();
+        boolean didLoad = startMode.loadsSavedGame() && load();
 
 		isMobile = Gdx.app.getType() == ApplicationType.Android || Gdx.app.getType() == ApplicationType.iOS;
 		//isMobile = true;
@@ -449,9 +474,7 @@ public class Game {
 			// load the level
 			levelNum = 0;
 
-			if (progression.sawTutorial || gameData.tutorialLevel == null) {
-				level = dataLevels.get(levelNum);
-			} else {
+            if (shouldStartTutorial(startMode, progression, gameData)) {
 				levelNum = -1;
 				player = new Player(this);
 				player.level = 2;
@@ -461,6 +484,8 @@ public class Game {
 				player.randomSeed = rand.nextInt();
 				level = gameData.tutorialLevel;
 				progression.sawTutorial = true;
+            } else {
+                level = dataLevels.get(levelNum);
 			}
 
 			// Keep track of what engine version we're playing on
@@ -502,6 +527,12 @@ public class Game {
 
 		GameScreen.resetDelta = true;
 	}
+
+    static boolean shouldStartTutorial(StartMode startMode, Progression progression, GameData gameData) {
+        return gameData != null
+                && gameData.tutorialLevel != null
+                && (startMode == StartMode.OWNED_TUTORIAL || !progression.sawTutorial);
+    }
 
 	public void setInputHandler(GameInput input)
 	{
@@ -1126,6 +1157,9 @@ public class Game {
 	}
 
     public static FileHandle getFile(String file) {
+        FileHandle profileFile = MultiplayerProfile.resolveLegacyGameFile(file);
+        if(profileFile != null) return profileFile;
+
         if (OSUtils.isMac()) {
             // OSX needs this user.dir property to figure out where it is running from, and probably linux
             String userDir = System.getProperty("user.dir");
@@ -1303,7 +1337,7 @@ public class Game {
 	public static Progression loadProgression(Integer saveSlot) {
 		try {
 			//FileHandle modFile = Game.getInternal(path + "/data/items.dat");
-			FileHandle progressionFile = getFile(Options.getOptionsDir() + "game_" + saveSlot + ".dat");
+            FileHandle progressionFile = getFile("save/game_" + saveSlot + ".dat");
 			return JsonUtil.fromJson(Progression.class, progressionFile);
 		} catch (Exception e) {
 			Gdx.app.error("Delver", e.getMessage());
@@ -1317,13 +1351,13 @@ public class Game {
 			if(progression != null) {
 
 				// Ensure that the directory exists first
-				String optionsDirString = Options.getOptionsDir();
-				FileHandle optionsDir = getFile(optionsDirString);
+                String saveDirString = "save/";
+                FileHandle saveDir = getFile(saveDirString);
 
-				if(!optionsDir.exists())
-					optionsDir.mkdirs();
+                if(!saveDir.exists())
+                    saveDir.mkdirs();
 
-				FileHandle progressionFile = getFile(Options.getOptionsDir() + "game_" + saveSlot + ".dat");
+                FileHandle progressionFile = getFile(saveDirString + "game_" + saveSlot + ".dat");
 				JsonUtil.toJson(progression, progressionFile);
 			}
 		} catch (Exception e) {
@@ -1427,6 +1461,9 @@ public class Game {
 	    Gdx.app.debug("Delver", "Looking for " + filename);
 
 		if(filename.startsWith("./")) filename = filename.substring(2);
+        FileHandle ownedAsset = OwnedGameCopyMount.resolve(filename);
+        if(ownedAsset != null) return ownedAsset;
+
 		FileHandle h = getFile("assets/" + filename);
 		if(h.exists()) return h;
 
@@ -1443,7 +1480,7 @@ public class Game {
 		if(filename == null) return null;
         FileHandle h = Game.modManager.findFile(filename);
         if(h != null && h.exists()) return h;
-        return Gdx.files.internal(filename);
+        return getInternal(filename);
     }
 
 	public void clearMemory() {

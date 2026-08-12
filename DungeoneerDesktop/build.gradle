@@ -2,6 +2,11 @@ apply plugin: "java"
 
 sourceCompatibility = 1.8
 sourceSets.main.java.srcDirs = [ "src/" ]
+sourceSets.test.java.srcDirs = [ "test/" ]
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+}
 
 project.ext.mainClassName = "com.interrupt.dungeoneer.DesktopStarter"
 project.ext.assetsDir = new File("../Dungeoneer/assets")
@@ -22,6 +27,28 @@ task runTestLevel(dependsOn: classes, type: JavaExec) {
     standardInput = System.in
     workingDir = project.assetsDir
     args "--test-level"
+}
+
+task runOwnedTutorial(dependsOn: classes, type: JavaExec) {
+    group = "application"
+    description = "Validates an external Delver v1.08 archive and launches its tutorial read-only."
+    main = project.mainClassName
+    classpath = sourceSets.main.runtimeClasspath
+    standardInput = System.in
+    workingDir = project.assetsDir
+    args "--owned-tutorial"
+    if(project.hasProperty("ownedCopy")) args "--owned-copy=" + project.property("ownedCopy")
+}
+
+task inspectOwnedCopy(dependsOn: classes, type: JavaExec) {
+    group = "verification"
+    description = "Prints safe metadata for an external delver.jar without mounting or copying it."
+    main = project.mainClassName
+    classpath = sourceSets.main.runtimeClasspath
+    standardInput = System.in
+    workingDir = project.projectDir
+    args "--inspect-owned-copy"
+    if(project.hasProperty("ownedCopy")) args project.property("ownedCopy")
 }
 
 task debug(dependsOn: classes, type: JavaExec) {

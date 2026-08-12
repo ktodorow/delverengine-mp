@@ -40,7 +40,11 @@ public class GameManager {
 	}
 	
 	public void startGame(int saveLoc) {
-		game = new Game(saveLoc);
+        startGame(saveLoc, Game.StartMode.NORMAL);
+    }
+
+    public void startGame(int saveLoc, Game.StartMode startMode) {
+        game = new Game(saveLoc, startMode);
 		game.setInputHandler(myGameApp.input);
 		
 		gameHasStarted = true;

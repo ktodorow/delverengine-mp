@@ -18,7 +18,7 @@ public class Logger {
         ex.printStackTrace(ps);
         ps.close();
 
-        FileHandle f = Game.getFile("errorlog.txt");
+        FileHandle f = Game.getFile("logs/errorlog.txt");
         f.writeString("Fatal error in Game loop!\n\n", true);
         f.writeString(baos.toString(), true);
         f.writeString("\n", true);

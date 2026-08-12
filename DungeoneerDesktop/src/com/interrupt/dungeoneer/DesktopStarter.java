@@ -6,10 +6,15 @@ import com.badlogic.gdx.backends.lwjgl.LwjglApplication;
 import com.badlogic.gdx.backends.lwjgl.LwjglApplicationConfiguration;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Options;
+import com.interrupt.dungeoneer.owned.MultiplayerProfile;
+import com.interrupt.dungeoneer.owned.OwnedGameCopyValidationException;
+
+import javax.swing.JOptionPane;
+import java.awt.GraphicsEnvironment;
 
 public class DesktopStarter {
     public static void main(String[] args) {
-        String startupLevelPath = null;
+        DesktopLaunchOptions launchOptions = DesktopLaunchOptions.parse(args);
 
         if (args != null) {
             for (String arg : args) {
@@ -25,19 +30,38 @@ public class DesktopStarter {
                 }
                 else if (arg.equalsIgnoreCase("--test-level") || arg.equalsIgnoreCase("test-level=true")) {
                     Game.isDebugMode = true;
-                    startupLevelPath = GameApplication.OPEN_SOURCE_TEST_LEVEL;
                 }
             }
         }
 
+        if(launchOptions.openSourceTestLevel && launchOptions.ownedTutorial) {
+            throw new IllegalArgumentException("Choose either --test-level or --owned-tutorial, not both.");
+        }
+
         // Test content must not create or read a player profile in the source tree.
-        if(startupLevelPath == null) Options.loadOptions();
-        else Options.SetKeyboardBindings();
+        if(launchOptions.openSourceTestLevel) {
+            Options.SetKeyboardBindings();
+        }
+        else {
+            MultiplayerProfile.initializeDefault();
+            try {
+                if(launchOptions.inspectOwnedCopy) {
+                    OwnedGameCopyLauncher.inspect(launchOptions);
+                    return;
+                }
+                if(launchOptions.ownedTutorial) OwnedGameCopyLauncher.validateAndMount(launchOptions);
+            }
+            catch(OwnedGameCopyValidationException ex) {
+                reportOwnedCopyError(ex.getMessage());
+                throw new IllegalStateException("Owned Game Copy launch blocked: " + ex.getMessage(), ex);
+            }
+            Options.loadOptions();
+        }
 
         DisplayMode defaultMode = LwjglApplicationConfiguration.getDesktopDisplayMode();
 
         LwjglApplicationConfiguration config = new LwjglApplicationConfiguration();
-        config.title = "Delver Engine";
+        config.title = launchOptions.ownedTutorial ? "Delver Multiplayer" : "Delver Engine";
         config.fullscreen = Options.instance.fullScreen;
         config.width = defaultMode.width;
         config.height = defaultMode.height;
@@ -58,10 +82,31 @@ public class DesktopStarter {
         config.addIcon("icon-128.png", Files.FileType.Internal); // 128x128 icon (mac OS)
         config.addIcon("icon-32.png", Files.FileType.Internal);  // 32x32 icon (Windows + Linux)
         config.addIcon("icon-16.png", Files.FileType.Internal);  // 16x16 icon (Windows)
+        configureProcessExit(config);
 
-        GameApplication gameApplication = startupLevelPath == null
-                ? new GameApplication()
-                : new GameApplication(startupLevelPath);
+        GameApplication gameApplication;
+        if(launchOptions.openSourceTestLevel) gameApplication = GameApplication.forOpenSourceTestLevel();
+        else if(launchOptions.ownedTutorial) gameApplication = GameApplication.forOwnedTutorial();
+        else gameApplication = new GameApplication();
+        Thread.setDefaultUncaughtExceptionHandler(new DesktopCrashHandler(
+                System.err,
+                new DesktopCrashHandler.Exit() {
+                    @Override
+                    public void exit(int status) {
+                        System.exit(status);
+                    }
+                }));
         new LwjglApplication(gameApplication, config);
+    }
+
+    static void configureProcessExit(LwjglApplicationConfiguration config) {
+        config.forceExit = false;
+    }
+
+    private static void reportOwnedCopyError(String message) {
+        System.err.println(message);
+        if(!GraphicsEnvironment.isHeadless()) {
+            JOptionPane.showMessageDialog(null, message, "Owned Game Copy rejected", JOptionPane.ERROR_MESSAGE);
+        }
     }
 }
