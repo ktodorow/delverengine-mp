@@ -57,4 +57,38 @@ public class MultiplayerProfileTest {
         MultiplayerProfile.initialize(temporaryFolder.newFolder("profile"));
         MultiplayerProfile.resolveWritableFile("settings/../../original-save.dat");
     }
+
+    @Test
+    public void resolvesNestedProfileDirectoryWithTrailingSeparator() throws Exception {
+        File profileRoot = temporaryFolder.newFolder("profile");
+        MultiplayerProfile.initialize(profileRoot);
+
+        FileHandle levelsDirectory =
+                MultiplayerProfile.resolveLegacyGameFile("saves/0/levels/");
+        FileHandle legacyLevelsDirectory =
+                MultiplayerProfile.resolveLegacyGameFile("save/0/levels\\");
+
+        assertEquals(new File(profileRoot, "saves/0/levels").getCanonicalPath(),
+                levelsDirectory.file().getCanonicalPath());
+        assertEquals(new File(profileRoot, "saves/0/levels").getCanonicalPath(),
+                legacyLevelsDirectory.file().getCanonicalPath());
+    }
+
+    @Test
+    public void resolvesNestedProfileDirectoryWithoutTrailingSeparator() throws Exception {
+        File profileRoot = temporaryFolder.newFolder("profile");
+        MultiplayerProfile.initialize(profileRoot);
+
+        FileHandle levelsDirectory =
+                MultiplayerProfile.resolveLegacyGameFile("saves/0/levels");
+
+        assertEquals(new File(profileRoot, "saves/0/levels").getCanonicalPath(),
+                levelsDirectory.file().getCanonicalPath());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void rejectsEmptyInternalProfileSegment() throws Exception {
+        MultiplayerProfile.initialize(temporaryFolder.newFolder("profile"));
+        MultiplayerProfile.resolveWritableFile("saves//levels/");
+    }
 }

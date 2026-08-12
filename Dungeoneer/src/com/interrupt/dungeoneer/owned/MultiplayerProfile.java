@@ -116,6 +116,12 @@ public final class MultiplayerProfile {
         if(normalizedPath.startsWith("/") || normalizedPath.matches("^[A-Za-z]:.*")) {
             throw new IllegalArgumentException("Profile path must be relative: " + relativePath);
         }
+        while(normalizedPath.endsWith("/")) {
+            normalizedPath = normalizedPath.substring(0, normalizedPath.length() - 1);
+        }
+        if(normalizedPath.isEmpty()) {
+            throw new IllegalArgumentException("Profile path cannot be empty.");
+        }
 
         String[] segments = normalizedPath.split("/", -1);
         for(String segment : segments) {
