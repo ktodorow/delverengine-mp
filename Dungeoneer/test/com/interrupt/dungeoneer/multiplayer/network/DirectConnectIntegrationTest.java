@@ -13,6 +13,7 @@ import org.junit.Test;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
@@ -22,6 +23,25 @@ import static org.junit.Assert.fail;
 
 public class DirectConnectIntegrationTest {
     private static final long TIMEOUT_MILLIS = 8000L;
+
+    @Test
+    public void refusedConnectionExplainsHowToStartHost() throws Exception {
+        ServerSocket unusedPort = new ServerSocket(0);
+        int port = unusedPort.getLocalPort();
+        unusedPort.close();
+
+        DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", port,
+                "participant-2", compatibility("unavailable-host"));
+        try {
+            awaitPhase(client, DirectConnectPhase.FAILED);
+            assertEquals("No Direct Connect Host is listening at 127.0.0.1:" + port
+                    + ". Start Host first and check that both ports match.",
+                    client.getStatus().getMessage());
+        }
+        finally {
+            client.close();
+        }
+    }
 
     @Test
     public void oneConfiguredPortCarriesTcpAndUdpBeforeFloorEntry() throws Exception {
@@ -219,7 +239,8 @@ public class DirectConnectIntegrationTest {
         while(System.currentTimeMillis() < deadline) {
             DirectConnectStatus status = peer.getStatus();
             if(status.getPhase() == phase) return;
-            if(status.getPhase() == DirectConnectPhase.FAILED) {
+            if(status.getPhase() == DirectConnectPhase.FAILED
+                    && phase != DirectConnectPhase.FAILED) {
                 fail("Direct Connect failed while waiting for " + phase + ": "
                         + status.getMessage());
             }

@@ -54,24 +54,28 @@ public final class DirectConnectSessionScreen implements Screen {
         float y = camera.viewportHeight * 0.68f;
         batch.begin();
         font.getData().setScale(1.35f);
-        font.draw(batch, "Delver Multiplayer - Direct Connect", -width * 0.45f, y,
+        font.draw(batch, "Delver Multiplayer - Direct Connect", textLeft(width, 0.9f), y,
                 width * 0.9f, Align.center, false);
         font.getData().setScale(1f);
         y -= 52f;
         font.draw(batch, peer.getRole() + "  |  " + peer.getEndpoint(),
-                -width * 0.45f, y, width * 0.9f, Align.center, true);
+                textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
         y -= 42f;
-        font.draw(batch, status.getPhase().name(), -width * 0.45f, y,
+        font.draw(batch, status.getPhase().name(), textLeft(width, 0.9f), y,
                 width * 0.9f, Align.center, false);
         y -= 34f;
-        font.draw(batch, status.getMessage(), -width * 0.4f, y,
+        font.draw(batch, status.getMessage(), textLeft(width, 0.8f), y,
                 width * 0.8f, Align.center, true);
         if(status.getSessionId() != null) {
             y -= 58f;
             font.draw(batch, "Private Session " + status.getSessionId(),
-                    -width * 0.45f, y, width * 0.9f, Align.center, false);
+                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, false);
         }
         batch.end();
+    }
+
+    static float textLeft(float viewportWidth, float textWidthFraction) {
+        return viewportWidth * (1f - textWidthFraction) * 0.5f;
     }
 
     @Override

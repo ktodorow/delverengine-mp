@@ -56,8 +56,10 @@ Open two terminals on Windows. Start Host on one configurable numeric port used 
 Start second client with Host address, same port, and temporary prototype Participant identity:
 
 ```powershell
-.\gradlew.bat DungeoneerDesktop:runDirectClient -PsessionAddress=127.0.0.1 -PsessionPort=37777 -PparticipantId=friend-2 --no-daemon
+.\gradlew.bat DungeoneerDesktop:runDirectClient --% -PsessionAddress=127.0.0.1 -PsessionPort=37777 -PparticipantId=friend-2 --no-daemon
 ```
+
+`--%` keeps Windows PowerShell from splitting a dotted address while handing arguments to `gradlew.bat`. For a client in the same Windows VM, `-PsessionAddress=127.0.0.1` can instead be omitted because loopback is the default.
 
 Both windows show same Private Session identity while exact protocol build and normalized open-source asset identity are checked. Host admits client only after TCP handshake plus token-bound UDP registration, then both enter repository-owned test floor. Build mismatch, content mismatch, malformed handshake, and disconnect reason remain explicit. No engine entity, save graph, commercial asset, archive path, or asset byte is serialized or transmitted.
 

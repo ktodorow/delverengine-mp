@@ -28,9 +28,11 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -106,10 +108,25 @@ public final class DirectConnectClient implements DirectConnectPeer {
             @Override
             public void operationComplete(ChannelFuture future) {
                 if(!future.isSuccess()) {
-                    fail("TCP connection failed: " + safeMessage(future.cause()));
+                    fail(connectFailureReason(future.cause()));
                 }
             }
         });
+    }
+
+    private String connectFailureReason(Throwable failure) {
+        Throwable current = failure;
+        while(current != null) {
+            String message = current.getMessage();
+            if(current instanceof ConnectException && message != null
+                    && message.toLowerCase(Locale.ROOT).contains("refused")) {
+                return "No Direct Connect Host is listening at " + host + ":" + port
+                        + ". Start Host first and check that both ports match.";
+            }
+            if(current.getCause() == current) break;
+            current = current.getCause();
+        }
+        return "TCP connection failed: " + safeMessage(failure);
     }
 
     private synchronized void tcpConnected(ChannelHandlerContext context) {
