@@ -1,8 +1,15 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementState;
+import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientHello;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ProtocolException;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -12,6 +19,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -77,6 +85,37 @@ public class DirectConnectWireTest {
         assertEquals("campaign", accepted.campaignId);
         assertEquals(3, accepted.slotNumber);
         assertEquals(repeat('b'), accepted.reconnectToken);
+    }
+
+    @Test
+    public void boundedLifecycleInputsAndSnapshotsRoundTrip() throws Exception {
+        MovementEntityDescriptor descriptor = new MovementEntityDescriptor(1L,
+                new NetworkEntityId(2L), new ParticipantId("campaign-slot-2"),
+                2, "Friend", "humanoid-2");
+        DirectConnectWire.EntitySpawn spawn = (DirectConnectWire.EntitySpawn)roundTrip(
+                new DirectConnectWire.EntitySpawn("session", descriptor));
+        assertEquals(descriptor.getEntityId(), spawn.descriptor.getEntityId());
+        assertEquals(descriptor.getNickname(), spawn.descriptor.getNickname());
+
+        DirectConnectWire.MovementInputs inputs =
+                (DirectConnectWire.MovementInputs)roundTrip(
+                        new DirectConnectWire.MovementInputs("session", 42L, Arrays.asList(
+                                new MovementInputFrame(7L, 1f, 0f, 0.25f, false),
+                                new MovementInputFrame(8L, 0f, -1f, 0.5f, true))));
+        assertEquals(2, inputs.inputs.size());
+        assertEquals(8L, inputs.inputs.get(1).getInputTick());
+        assertTrue(inputs.inputs.get(1).isJump());
+
+        MovementEntityState entity = new MovementEntityState(new NetworkEntityId(2L),
+                1L, 8L, 3f, 4f, 0.5f, 1f, 2f, 0f, 0.5f,
+                MovementState.MOVING);
+        DirectConnectWire.MovementSnapshotMessage snapshot =
+                (DirectConnectWire.MovementSnapshotMessage)roundTrip(
+                        new DirectConnectWire.MovementSnapshotMessage("session",
+                                new MovementSnapshot(3L, 9L, Arrays.asList(entity))));
+        assertEquals(9L, snapshot.snapshot.getHostTick());
+        assertEquals(8L, snapshot.snapshot.getEntity(new NetworkEntityId(2L))
+                .getLastProcessedInputTick());
     }
 
     @Test

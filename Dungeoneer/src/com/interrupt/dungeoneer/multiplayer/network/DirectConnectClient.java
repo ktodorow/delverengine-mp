@@ -7,7 +7,11 @@ import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CampaignChallenge;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientDisconnect;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientHello;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.EntityDespawn;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.EntitySpawn;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.MovementInputs;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.MovementSnapshotMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ProtocolException;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerAccepted;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerDisconnect;
@@ -17,6 +21,12 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.SlotClaim;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.SlotPending;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.UdpRegister;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.UdpRegistered;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementReplicationState;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
+import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
@@ -38,12 +48,26 @@ import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Direct Connect client whose private Launcher Identity claims one persistent Campaign Slot. */
 public final class DirectConnectClient implements DirectConnectPeer {
+    interface MovementDatagramPolicy {
+        int copiesForBundle(List<MovementInputFrame> inputs);
+    }
+
+    private static final MovementDatagramPolicy NORMAL_MOVEMENT_DATAGRAMS =
+            new MovementDatagramPolicy() {
+                @Override
+                public int copiesForBundle(List<MovementInputFrame> inputs) {
+                    return 1;
+                }
+            };
+
     private final String host;
     private final int port;
     private final LauncherIdentity launcherIdentity;
@@ -51,9 +75,14 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private final int requestedSlot;
     private final ReconnectTokenStore reconnectTokens;
     private final DirectConnectCompatibility compatibility;
+    private final MovementDatagramPolicy movementDatagramPolicy;
     private final EventLoopGroup networkGroup = new NioEventLoopGroup(1);
     private final AtomicBoolean closing = new AtomicBoolean(false);
     private final AtomicBoolean resourcesClosing = new AtomicBoolean(false);
+    private final MovementReplicationState movementReplication =
+            new MovementReplicationState();
+    private final List<MovementInputFrame> pendingMovementInputs =
+            new ArrayList<MovementInputFrame>();
 
     private volatile DirectConnectStatus status;
     private volatile Channel tcpChannel;
@@ -66,10 +95,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile boolean udpRegistered;
     private volatile SessionReady readyMessage;
     private volatile int udpRegistrationAttempts;
+    private volatile NetworkEntityId localMovementEntityId;
+    private long lastSubmittedMovementTick;
 
     private DirectConnectClient(String host, int port, LauncherIdentity launcherIdentity,
             SlotPresentation presentation, int requestedSlot,
-            ReconnectTokenStore reconnectTokens, DirectConnectCompatibility compatibility) {
+            ReconnectTokenStore reconnectTokens, DirectConnectCompatibility compatibility,
+            MovementDatagramPolicy movementDatagramPolicy) {
         if(host == null || host.trim().isEmpty()
                 || host.getBytes(StandardCharsets.UTF_8).length > 255) {
             throw new IllegalArgumentException("Direct Connect address must be 1-255 bytes.");
@@ -84,6 +116,9 @@ public final class DirectConnectClient implements DirectConnectPeer {
         }
         if(reconnectTokens == null) throw new IllegalArgumentException("Reconnect token store cannot be null.");
         if(compatibility == null) throw new IllegalArgumentException("Client compatibility cannot be null.");
+        if(movementDatagramPolicy == null) {
+            throw new IllegalArgumentException("Movement datagram policy cannot be null.");
+        }
         this.host = host.trim();
         this.port = port;
         this.launcherIdentity = launcherIdentity;
@@ -91,6 +126,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         this.requestedSlot = requestedSlot;
         this.reconnectTokens = reconnectTokens;
         this.compatibility = compatibility;
+        this.movementDatagramPolicy = movementDatagramPolicy;
         status = new DirectConnectStatus(DirectConnectPhase.CONNECTING,
                 "Connecting TCP to " + this.host + ":" + port + ".",
                 null, null, null);
@@ -101,7 +137,20 @@ public final class DirectConnectClient implements DirectConnectPeer {
             int requestedSlot, ReconnectTokenStore reconnectTokens,
             DirectConnectCompatibility compatibility) {
         DirectConnectClient client = new DirectConnectClient(host, port, launcherIdentity,
-                presentation, requestedSlot, reconnectTokens, compatibility);
+                presentation, requestedSlot, reconnectTokens, compatibility,
+                NORMAL_MOVEMENT_DATAGRAMS);
+        client.start();
+        return client;
+    }
+
+    static DirectConnectClient connectForTest(String host, int port,
+            LauncherIdentity launcherIdentity, SlotPresentation presentation,
+            int requestedSlot, ReconnectTokenStore reconnectTokens,
+            DirectConnectCompatibility compatibility,
+            MovementDatagramPolicy movementDatagramPolicy) {
+        DirectConnectClient client = new DirectConnectClient(host, port, launcherIdentity,
+                presentation, requestedSlot, reconnectTokens, compatibility,
+                movementDatagramPolicy);
         client.start();
         return client;
     }
@@ -303,14 +352,36 @@ public final class DirectConnectClient implements DirectConnectPeer {
         catch(ProtocolException ignored) {
             return;
         }
-        if(!(message instanceof UdpRegistered)) return;
-        UdpRegistered registered = (UdpRegistered)message;
-        if(!sessionId.equals(registered.sessionId) || udpToken != registered.udpToken) return;
-        udpRegistered = true;
-        status = new DirectConnectStatus(DirectConnectPhase.LOBBY,
-                "Campaign Slot " + campaignSlot + " is ready. Waiting for Host to start play.",
-                sessionId, "host", null);
-        becomeReadyIfComplete();
+        if(message instanceof UdpRegistered) {
+            UdpRegistered registered = (UdpRegistered)message;
+            if(!sessionId.equals(registered.sessionId) || udpToken != registered.udpToken) return;
+            udpRegistered = true;
+            status = new DirectConnectStatus(DirectConnectPhase.LOBBY,
+                    "Campaign Slot " + campaignSlot
+                            + " is ready. Waiting for Host to start play.",
+                    sessionId, "host", null);
+            becomeReadyIfComplete();
+            return;
+        }
+        if(message instanceof MovementSnapshotMessage) {
+            MovementSnapshotMessage movement = (MovementSnapshotMessage)message;
+            if(!sessionId.equals(movement.sessionId)) return;
+            if(movementReplication.applySnapshot(movement.snapshot)) {
+                acknowledgeMovementInputs(movement.snapshot);
+            }
+        }
+    }
+
+    private synchronized void acknowledgeMovementInputs(MovementSnapshot snapshot) {
+        NetworkEntityId localEntity = localMovementEntityId;
+        if(localEntity == null) return;
+        MovementEntityState state = snapshot.getEntity(localEntity);
+        if(state == null) return;
+        long acknowledged = state.getLastProcessedInputTick();
+        while(!pendingMovementInputs.isEmpty()
+                && pendingMovementInputs.get(0).getInputTick() <= acknowledged) {
+            pendingMovementInputs.remove(0);
+        }
     }
 
     private synchronized void sessionReady(SessionReady ready) {
@@ -321,6 +392,26 @@ public final class DirectConnectClient implements DirectConnectPeer {
         }
         readyMessage = ready;
         becomeReadyIfComplete();
+    }
+
+    private synchronized void entitySpawn(EntitySpawn spawn) {
+        if(sessionId == null || !sessionId.equals(spawn.sessionId)
+                || spawn.descriptor == null) {
+            fail("Host returned malformed Entity spawn state.");
+            return;
+        }
+        if(movementReplication.applySpawn(spawn.descriptor)
+                && spawn.descriptor.getCampaignSlot() == campaignSlot) {
+            localMovementEntityId = spawn.descriptor.getEntityId();
+        }
+    }
+
+    private synchronized void entityDespawn(EntityDespawn despawn) {
+        if(sessionId == null || !sessionId.equals(despawn.sessionId)) {
+            fail("Host returned malformed Entity despawn state.");
+            return;
+        }
+        movementReplication.applyDespawn(despawn.lifecycleSequence, despawn.entityId);
     }
 
     private void becomeReadyIfComplete() {
@@ -403,6 +494,53 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     @Override
+    public NetworkEntityId getLocalMovementEntityId() {
+        return localMovementEntityId;
+    }
+
+    @Override
+    public List<MovementEntityDescriptor> getMovementEntities() {
+        return movementReplication.getEntities();
+    }
+
+    @Override
+    public List<MovementSnapshot> getMovementSnapshots() {
+        return movementReplication.getSnapshots();
+    }
+
+    @Override
+    public synchronized void submitMovementInput(MovementInputFrame input) {
+        if(input == null) throw new IllegalArgumentException("Movement input cannot be null.");
+        if(input.getInputTick() <= lastSubmittedMovementTick) return;
+        lastSubmittedMovementTick = input.getInputTick();
+        if(status.getPhase() != DirectConnectPhase.READY || udpChannel == null
+                || tcpChannel == null || !tcpChannel.isActive()) return;
+
+        pendingMovementInputs.add(input);
+        while(pendingMovementInputs.size() > 64) pendingMovementInputs.remove(0);
+        int first = Math.max(0, pendingMovementInputs.size()
+                - DirectConnectProtocol.MAX_INPUT_FRAMES);
+        List<MovementInputFrame> bundle = new ArrayList<MovementInputFrame>(
+                pendingMovementInputs.subList(first, pendingMovementInputs.size()));
+        InetSocketAddress remote = (InetSocketAddress)tcpChannel.remoteAddress();
+        try {
+            int copies = movementDatagramPolicy.copiesForBundle(bundle);
+            if(copies < 0 || copies > 2) {
+                throw new IllegalStateException("Movement datagram policy returned invalid copy count.");
+            }
+            for(int copy = 0; copy < copies; copy++) {
+                ByteBuf encoded = DirectConnectWire.encodeDatagram(udpChannel.alloc(),
+                        new MovementInputs(sessionId, udpToken, bundle));
+                udpChannel.writeAndFlush(new DatagramPacket(encoded,
+                        new InetSocketAddress(remote.getAddress(), port)));
+            }
+        }
+        catch(ProtocolException failure) {
+            fail("Could not encode movement input: " + safeMessage(failure));
+        }
+    }
+
+    @Override
     public DirectConnectStatus getStatus() {
         return status;
     }
@@ -479,6 +617,14 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof SessionReady && sessionId != null
                     && campaignSlot != 0) {
                 sessionReady((SessionReady)message);
+            }
+            else if(message instanceof EntitySpawn && sessionId != null
+                    && campaignSlot != 0) {
+                entitySpawn((EntitySpawn)message);
+            }
+            else if(message instanceof EntityDespawn && sessionId != null
+                    && campaignSlot != 0) {
+                entityDespawn((EntityDespawn)message);
             }
             else if(message instanceof ServerDisconnect) {
                 serverDisconnected((ServerDisconnect)message);

@@ -9,6 +9,8 @@ import com.badlogic.gdx.graphics.g2d.BitmapFont;
 import com.badlogic.gdx.graphics.g2d.SpriteBatch;
 import com.badlogic.gdx.utils.Align;
 import com.interrupt.dungeoneer.GameApplication;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
+import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
@@ -41,7 +43,8 @@ public final class DirectConnectSessionScreen implements Screen {
     public void render(float delta) {
         handleHostControls();
         DirectConnectStatus status = peer.getStatus();
-        if(status.getPhase() == DirectConnectPhase.READY && !floorEntryRequested) {
+        if(isFloorEntryReady(status.getPhase(), peer.getLocalMovementEntityId(),
+                peer.getMovementSnapshots()) && !floorEntryRequested) {
             floorEntryRequested = true;
             Gdx.app.postRunnable(new Runnable() {
                 @Override
@@ -122,6 +125,13 @@ public final class DirectConnectSessionScreen implements Screen {
 
     static float lowestHostTextBaseline(float viewportHeight) {
         return viewportHeight * 0.82f - 42f - 34f - 30f - 40f - 32f - 30f;
+    }
+
+    static boolean isFloorEntryReady(DirectConnectPhase phase,
+            NetworkEntityId localEntityId, List<MovementSnapshot> snapshots) {
+        if(phase != DirectConnectPhase.READY || localEntityId == null
+                || snapshots == null || snapshots.isEmpty()) return false;
+        return snapshots.get(snapshots.size() - 1).getEntity(localEntityId) != null;
     }
 
     @Override

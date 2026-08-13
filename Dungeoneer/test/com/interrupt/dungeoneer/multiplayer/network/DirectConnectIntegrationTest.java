@@ -7,6 +7,10 @@ import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
+import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerRejected;
 
@@ -27,6 +31,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
@@ -124,6 +129,88 @@ public class DirectConnectIntegrationTest {
             if(second != null) second.close();
             if(third != null) third.close();
             if(fourth != null) fourth.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void activeFloorCarriesTickedInputsAndTwentyHertzAuthoritativeSnapshots()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("movement-floor");
+        HostFixture fixture = host(compatibility, 2, "movement");
+        DirectConnectClient client = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        try {
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitMovementSnapshots(client, 3);
+            assertEquals(new NetworkEntityId(1L), fixture.host.getLocalMovementEntityId());
+            assertEquals(new NetworkEntityId(2L), client.getLocalMovementEntityId());
+            assertEquals(2, client.getMovementEntities().size());
+
+            List<MovementSnapshot> snapshotsBefore = client.getMovementSnapshots();
+            MovementSnapshot before = snapshotsBefore.get(snapshotsBefore.size() - 1);
+            float startingY = before.getEntity(client.getLocalMovementEntityId()).getY();
+            client.submitMovementInput(new MovementInputFrame(1L, 1f, 0f, 0f, false));
+            client.submitMovementInput(new MovementInputFrame(4L, 1f, 0f, 0f, false));
+            fixture.host.submitMovementInput(new MovementInputFrame(
+                    1L, 0f, 1f, 0f, false));
+
+            awaitAcknowledgedInput(client, 4L);
+            List<MovementSnapshot> snapshotsAfter = client.getMovementSnapshots();
+            MovementSnapshot after = snapshotsAfter.get(snapshotsAfter.size() - 1);
+            MovementEntityState local = after.getEntity(client.getLocalMovementEntityId());
+            assertTrue(local.getY() > startingY);
+            assertEquals(4L, local.getLastProcessedInputTick());
+            assertTrue(after.getEntity(new NetworkEntityId(1L)).getX() > 16.5f);
+
+            List<MovementSnapshot> snapshots = client.getMovementSnapshots();
+            for(int i = 1; i < snapshots.size(); i++) {
+                assertEquals(3L, snapshots.get(i).getHostTick()
+                        - snapshots.get(i - 1).getHostTick());
+            }
+        }
+        finally {
+            client.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void lostAndDuplicatedMovementDatagramsRecoverWithoutDuplicatingMovement()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("loss-duplication-floor");
+        HostFixture fixture = host(compatibility, 2, "loss-duplication");
+        final int[] submittedBundles = { 0 };
+        DirectConnectClient client = DirectConnectClient.connectForTest("127.0.0.1",
+                fixture.host.getBoundPort(), identity('2'),
+                new SlotPresentation("Friend", AvatarCatalog.HUMANOID_2), 0,
+                new MemoryReconnectTokens(), compatibility,
+                new DirectConnectClient.MovementDatagramPolicy() {
+                    @Override
+                    public int copiesForBundle(List<MovementInputFrame> inputs) {
+                        return submittedBundles[0]++ == 0 ? 0 : 2;
+                    }
+                });
+        try {
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitMovementSnapshots(client, 2);
+
+            client.submitMovementInput(new MovementInputFrame(1L, 0f, 0f, 0f, true));
+            client.submitMovementInput(new MovementInputFrame(2L, 0f, 0f, 0f, false));
+
+            awaitAcknowledgedInput(client, 2L);
+            MovementEntityState recovered = latestLocalMovement(client);
+            assertEquals(2L, recovered.getLastProcessedInputTick());
+            assertTrue("Dropped jump input was not recovered from duplicated bundle.",
+                    recovered.getZ() > 0.5f);
+        }
+        finally {
+            client.close();
             fixture.close();
         }
     }
@@ -392,6 +479,37 @@ public class DirectConnectIntegrationTest {
             Thread.sleep(10L);
         }
         fail("Timed out waiting for " + count + " pending Campaign Slot claims.");
+    }
+
+    private void awaitMovementSnapshots(DirectConnectPeer peer, int count)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(peer.getMovementSnapshots().size() >= count) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for " + count + " authoritative movement snapshots.");
+    }
+
+    private void awaitAcknowledgedInput(DirectConnectClient client, long inputTick)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            List<MovementSnapshot> snapshots = client.getMovementSnapshots();
+            if(!snapshots.isEmpty() && client.getLocalMovementEntityId() != null) {
+                MovementEntityState state = snapshots.get(snapshots.size() - 1)
+                        .getEntity(client.getLocalMovementEntityId());
+                if(state != null && state.getLastProcessedInputTick() >= inputTick) return;
+            }
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for movement input acknowledgement " + inputTick + ".");
+    }
+
+    private MovementEntityState latestLocalMovement(DirectConnectClient client) {
+        List<MovementSnapshot> snapshots = client.getMovementSnapshots();
+        return snapshots.get(snapshots.size() - 1)
+                .getEntity(client.getLocalMovementEntityId());
     }
 
     private void awaitPhase(DirectConnectPeer peer, DirectConnectPhase phase)

@@ -1,5 +1,13 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementState;
+import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelPipeline;
@@ -13,6 +21,8 @@ import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /** Manual allowlisted wire codec. It never serializes engine, entity, or save object graphs. */
@@ -28,6 +38,10 @@ final class DirectConnectWire {
     private static final int CAMPAIGN_CHALLENGE = 9;
     private static final int SLOT_CLAIM = 10;
     private static final int SLOT_PENDING = 11;
+    private static final int ENTITY_SPAWN = 12;
+    private static final int ENTITY_DESPAWN = 13;
+    private static final int MOVEMENT_INPUTS = 14;
+    private static final int MOVEMENT_SNAPSHOT = 15;
 
     private DirectConnectWire() { }
 
@@ -164,6 +178,79 @@ final class DirectConnectWire {
             writeString(output, ready.floorId, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
                     "floor identity");
         }
+        else if(message instanceof EntitySpawn) {
+            EntitySpawn spawn = (EntitySpawn)message;
+            MovementEntityDescriptor descriptor = spawn.descriptor;
+            output.writeByte(ENTITY_SPAWN);
+            writeString(output, spawn.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(descriptor.getLifecycleSequence());
+            output.writeLong(descriptor.getEntityId().getValue());
+            writeString(output, descriptor.getParticipantId().getValue(),
+                    DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES, "Participant identity");
+            output.writeByte(descriptor.getCampaignSlot());
+            writeString(output, descriptor.getNickname(), DirectConnectProtocol.MAX_NICKNAME_BYTES,
+                    "Nickname");
+            writeString(output, descriptor.getAvatarId(), DirectConnectProtocol.MAX_AVATAR_ID_BYTES,
+                    "Avatar identity");
+        }
+        else if(message instanceof EntityDespawn) {
+            EntityDespawn despawn = (EntityDespawn)message;
+            if(despawn.lifecycleSequence <= 0L) {
+                throw new ProtocolException("Entity lifecycle sequence must be positive.");
+            }
+            output.writeByte(ENTITY_DESPAWN);
+            writeString(output, despawn.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(despawn.lifecycleSequence);
+            output.writeLong(despawn.entityId.getValue());
+        }
+        else if(message instanceof MovementInputs) {
+            MovementInputs inputs = (MovementInputs)message;
+            if(inputs.inputs.isEmpty()
+                    || inputs.inputs.size() > DirectConnectProtocol.MAX_INPUT_FRAMES) {
+                throw new ProtocolException("Movement input bundle count is outside protocol bounds.");
+            }
+            output.writeByte(MOVEMENT_INPUTS);
+            writeString(output, inputs.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(inputs.udpToken);
+            output.writeByte(inputs.inputs.size());
+            for(MovementInputFrame input : inputs.inputs) {
+                output.writeLong(input.getInputTick());
+                output.writeFloat(input.getForward());
+                output.writeFloat(input.getStrafe());
+                output.writeFloat(input.getRotation());
+                output.writeBoolean(input.isJump());
+            }
+        }
+        else if(message instanceof MovementSnapshotMessage) {
+            MovementSnapshotMessage snapshotMessage = (MovementSnapshotMessage)message;
+            MovementSnapshot snapshot = snapshotMessage.snapshot;
+            List<MovementEntityState> entities = snapshot.getEntities();
+            if(entities.size() > DirectConnectProtocol.MAX_MOVEMENT_ENTITIES) {
+                throw new ProtocolException("Movement snapshot entity count is outside protocol bounds.");
+            }
+            output.writeByte(MOVEMENT_SNAPSHOT);
+            writeString(output, snapshotMessage.sessionId,
+                    DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(snapshot.getSequence());
+            output.writeLong(snapshot.getHostTick());
+            output.writeByte(entities.size());
+            for(MovementEntityState entity : entities) {
+                output.writeLong(entity.getEntityId().getValue());
+                output.writeLong(entity.getLifecycleSequence());
+                output.writeLong(entity.getLastProcessedInputTick());
+                output.writeFloat(entity.getX());
+                output.writeFloat(entity.getY());
+                output.writeFloat(entity.getZ());
+                output.writeFloat(entity.getVelocityX());
+                output.writeFloat(entity.getVelocityY());
+                output.writeFloat(entity.getVelocityZ());
+                output.writeFloat(entity.getRotation());
+                output.writeByte(entity.getMovementState().getWireId());
+            }
+        }
         else if(message instanceof ClientDisconnect) {
             output.writeByte(CLIENT_DISCONNECT);
             writeString(output, ((ClientDisconnect)message).reason,
@@ -283,6 +370,118 @@ final class DirectConnectWire {
                 message = new SessionReady(readySession, participantCount,
                         readString(input, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
                                 "floor identity"));
+                break;
+            case ENTITY_SPAWN:
+                String spawnSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 17, "Entity spawn identity");
+                long spawnSequence = input.readLong();
+                long spawnEntityId = input.readLong();
+                String spawnParticipant = readString(input,
+                        DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES,
+                        "Participant identity");
+                int spawnSlot = input.readUnsignedByte();
+                String spawnNickname = readString(input,
+                        DirectConnectProtocol.MAX_NICKNAME_BYTES, "Nickname");
+                String spawnAvatar = readString(input,
+                        DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity");
+                try {
+                    message = new EntitySpawn(spawnSession, new MovementEntityDescriptor(
+                            spawnSequence, new NetworkEntityId(spawnEntityId),
+                            new ParticipantId(spawnParticipant), spawnSlot,
+                            spawnNickname, spawnAvatar));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed Entity spawn: " + ex.getMessage(), ex);
+                }
+                break;
+            case ENTITY_DESPAWN:
+                String despawnSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 16, "Entity despawn identity");
+                long despawnSequence = input.readLong();
+                long despawnEntityId = input.readLong();
+                try {
+                    message = new EntityDespawn(despawnSession, despawnSequence,
+                            new NetworkEntityId(despawnEntityId));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed Entity despawn: " + ex.getMessage(), ex);
+                }
+                break;
+            case MOVEMENT_INPUTS:
+                String inputSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 9, "Movement input bundle header");
+                long inputToken = input.readLong();
+                int inputCount = input.readUnsignedByte();
+                if(inputCount < 1 || inputCount > DirectConnectProtocol.MAX_INPUT_FRAMES) {
+                    throw new ProtocolException("Movement input bundle count is outside protocol bounds.");
+                }
+                List<MovementInputFrame> inputFrames = new ArrayList<MovementInputFrame>();
+                for(int i = 0; i < inputCount; i++) {
+                    requireReadable(input, 21, "Movement input frame");
+                    long inputTick = input.readLong();
+                    float forward = input.readFloat();
+                    float strafe = input.readFloat();
+                    float rotation = input.readFloat();
+                    boolean jump = input.readBoolean();
+                    try {
+                        inputFrames.add(new MovementInputFrame(inputTick, forward,
+                                strafe, rotation, jump));
+                    }
+                    catch(IllegalArgumentException ex) {
+                        throw new ProtocolException("Malformed movement input: "
+                                + ex.getMessage(), ex);
+                    }
+                }
+                message = new MovementInputs(inputSession, inputToken, inputFrames);
+                break;
+            case MOVEMENT_SNAPSHOT:
+                String snapshotSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 17, "Movement snapshot header");
+                long snapshotSequence = input.readLong();
+                long snapshotHostTick = input.readLong();
+                int entityCount = input.readUnsignedByte();
+                if(entityCount > DirectConnectProtocol.MAX_MOVEMENT_ENTITIES) {
+                    throw new ProtocolException("Movement snapshot entity count is outside protocol bounds.");
+                }
+                List<MovementEntityState> movementEntities =
+                        new ArrayList<MovementEntityState>();
+                for(int i = 0; i < entityCount; i++) {
+                    requireReadable(input, 53, "Movement snapshot entity");
+                    long entityId = input.readLong();
+                    long lifecycleSequence = input.readLong();
+                    long acknowledgedInput = input.readLong();
+                    float x = input.readFloat();
+                    float y = input.readFloat();
+                    float z = input.readFloat();
+                    float velocityX = input.readFloat();
+                    float velocityY = input.readFloat();
+                    float velocityZ = input.readFloat();
+                    float rotation = input.readFloat();
+                    int movementState = input.readUnsignedByte();
+                    try {
+                        movementEntities.add(new MovementEntityState(
+                                new NetworkEntityId(entityId), lifecycleSequence,
+                                acknowledgedInput, x, y, z, velocityX, velocityY,
+                                velocityZ, rotation, MovementState.fromWireId(movementState)));
+                    }
+                    catch(IllegalArgumentException ex) {
+                        throw new ProtocolException("Malformed movement snapshot: "
+                                + ex.getMessage(), ex);
+                    }
+                }
+                try {
+                    message = new MovementSnapshotMessage(snapshotSession,
+                            new MovementSnapshot(snapshotSequence, snapshotHostTick,
+                                    movementEntities));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed movement snapshot: "
+                            + ex.getMessage(), ex);
+                }
                 break;
             case CLIENT_DISCONNECT:
                 message = new ClientDisconnect(readString(input,
@@ -484,6 +683,57 @@ final class DirectConnectWire {
             this.sessionId = sessionId;
             this.participantCount = participantCount;
             this.floorId = floorId;
+        }
+    }
+
+    static final class EntitySpawn implements Message {
+        final String sessionId;
+        final MovementEntityDescriptor descriptor;
+
+        EntitySpawn(String sessionId, MovementEntityDescriptor descriptor) {
+            this.sessionId = sessionId;
+            this.descriptor = descriptor;
+        }
+    }
+
+    static final class EntityDespawn implements Message {
+        final String sessionId;
+        final long lifecycleSequence;
+        final NetworkEntityId entityId;
+
+        EntityDespawn(String sessionId, long lifecycleSequence, NetworkEntityId entityId) {
+            if(lifecycleSequence <= 0L) {
+                throw new IllegalArgumentException("Entity lifecycle sequence must be positive.");
+            }
+            if(entityId == null) throw new IllegalArgumentException("Network Entity ID cannot be null.");
+            this.sessionId = sessionId;
+            this.lifecycleSequence = lifecycleSequence;
+            this.entityId = entityId;
+        }
+    }
+
+    static final class MovementInputs implements Message {
+        final String sessionId;
+        final long udpToken;
+        final List<MovementInputFrame> inputs;
+
+        MovementInputs(String sessionId, long udpToken, List<MovementInputFrame> inputs) {
+            if(inputs == null) throw new IllegalArgumentException("Movement inputs cannot be null.");
+            this.sessionId = sessionId;
+            this.udpToken = udpToken;
+            this.inputs = Collections.unmodifiableList(
+                    new ArrayList<MovementInputFrame>(inputs));
+        }
+    }
+
+    static final class MovementSnapshotMessage implements Message {
+        final String sessionId;
+        final MovementSnapshot snapshot;
+
+        MovementSnapshotMessage(String sessionId, MovementSnapshot snapshot) {
+            if(snapshot == null) throw new IllegalArgumentException("Movement snapshot cannot be null.");
+            this.sessionId = sessionId;
+            this.snapshot = snapshot;
         }
     }
 

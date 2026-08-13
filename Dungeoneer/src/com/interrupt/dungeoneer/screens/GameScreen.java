@@ -12,6 +12,7 @@ import com.interrupt.dungeoneer.game.Options;
 import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.gfx.Tesselator;
 import com.interrupt.dungeoneer.metrics.MetricsCore;
+import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
 
 import java.util.Map.Entry;
@@ -42,6 +43,7 @@ public class GameScreen implements Screen {
 
 	private Level editorLevel = null;
     private Game.StartMode startMode = Game.StartMode.NORMAL;
+    private DirectConnectMovementController networkMovementController;
     
     public GameScreen(Level level, GameManager gameManager, GameInput input) {
     	this.gameManager = gameManager;
@@ -89,6 +91,10 @@ public class GameScreen implements Screen {
 
 			if(game != null)
 				game.updateMouseInput();
+
+            if(networkMovementController != null && game != null) {
+                networkMovementController.update(game, input, delta);
+            }
 
 			// draw the game
 			gameManager.render();
@@ -225,7 +231,13 @@ public class GameScreen implements Screen {
 
 	@Override
 	public void dispose() {
+        if(networkMovementController != null) networkMovementController.dispose();
 		Audio.disposeAudio(null);
 		if(editorLevel != null) GameApplication.editorRunning = false;
 	}
+
+    public void setNetworkMovementController(
+            DirectConnectMovementController networkMovementController) {
+        this.networkMovementController = networkMovementController;
+    }
 }

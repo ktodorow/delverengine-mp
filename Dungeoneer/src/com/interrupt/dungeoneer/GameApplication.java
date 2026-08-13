@@ -20,6 +20,8 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
+import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
+import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.interrupt.dungeoneer.screens.*;
 import com.interrupt.utils.JsonUtil;
@@ -54,6 +56,7 @@ public class GameApplication extends Game {
     private final ReconnectTokenStore directConnectReconnectTokens;
     private DirectConnectPeer directConnectPeer;
     private DirectConnectSessionScreen directConnectScreen;
+    private DirectConnectMovementController directConnectMovementController;
     private boolean enteredDirectConnectFloor = false;
 
     public GameScreen mainScreen;
@@ -157,8 +160,15 @@ public class GameApplication extends Game {
         Gdx.app.setLogLevel(Application.LOG_INFO);
         DirectConnectCompatibility compatibility = createOpenSourceCompatibility();
         if(startupMode == StartupMode.DIRECT_CONNECT_HOST) {
+            Level authoritativeLevel = KryoSerializer.loadLevel(
+                    Gdx.files.internal(OPEN_SOURCE_TEST_LEVEL));
+            if(authoritativeLevel == null) {
+                throw new IllegalStateException("Could not load authoritative movement Level: "
+                        + OPEN_SOURCE_TEST_LEVEL);
+            }
             directConnectPeer = DirectConnectHost.start(directConnectPort, compatibility,
-                    directConnectRoster, directConnectRosterStore);
+                    directConnectRoster, directConnectRosterStore,
+                    new LevelMovementCollisionWorld(authoritativeLevel));
         }
         else {
             directConnectPeer = DirectConnectClient.connect(directConnectAddress,
@@ -222,6 +232,14 @@ public class GameApplication extends Game {
         DirectConnectSessionScreen completedScreen = directConnectScreen;
         directConnectScreen = null;
         createFromEditor(startupLevel);
+        directConnectMovementController =
+                new DirectConnectMovementController(directConnectPeer);
+        if(!directConnectMovementController.applyInitialAuthoritativeState(
+                GameManager.getGame().player)) {
+            throw new IllegalStateException(
+                    "Direct Connect floor entered without an authoritative local spawn.");
+        }
+        mainScreen.setNetworkMovementController(directConnectMovementController);
         completedScreen.dispose();
     }
 
@@ -266,6 +284,7 @@ public class GameApplication extends Game {
 	public void dispose() {
 		Gdx.app.log("DelverLifeCycle", "Goodbye");
 		if(directConnectPeer != null) directConnectPeer.close();
+        if(directConnectMovementController != null) directConnectMovementController.dispose();
 		if(directConnectScreen != null) directConnectScreen.dispose();
 		if(mainScreen != null) mainScreen.dispose();
 		SteamApi.api.dispose();
