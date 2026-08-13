@@ -1,5 +1,10 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
+import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
+import com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CampaignChallenge;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientDisconnect;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientHello;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
@@ -8,9 +13,10 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerAcce
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerDisconnect;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerRejected;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.SessionReady;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.SlotClaim;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.SlotPending;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.UdpRegister;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.UdpRegistered;
-import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
@@ -36,11 +42,14 @@ import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Initial Direct Connect client. Host remains sole authority over admission and floor entry. */
+/** Direct Connect client whose private Launcher Identity claims one persistent Campaign Slot. */
 public final class DirectConnectClient implements DirectConnectPeer {
     private final String host;
     private final int port;
-    private final ParticipantId participantId;
+    private final LauncherIdentity launcherIdentity;
+    private final SlotPresentation presentation;
+    private final int requestedSlot;
+    private final ReconnectTokenStore reconnectTokens;
     private final DirectConnectCompatibility compatibility;
     private final EventLoopGroup networkGroup = new NioEventLoopGroup(1);
     private final AtomicBoolean closing = new AtomicBoolean(false);
@@ -50,13 +59,17 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile Channel tcpChannel;
     private volatile Channel udpChannel;
     private volatile String sessionId;
+    private volatile String campaignId;
+    private volatile int campaignCapacity;
+    private volatile int campaignSlot;
     private volatile long udpToken;
     private volatile boolean udpRegistered;
     private volatile SessionReady readyMessage;
     private volatile int udpRegistrationAttempts;
 
-    private DirectConnectClient(String host, int port, ParticipantId participantId,
-            DirectConnectCompatibility compatibility) {
+    private DirectConnectClient(String host, int port, LauncherIdentity launcherIdentity,
+            SlotPresentation presentation, int requestedSlot,
+            ReconnectTokenStore reconnectTokens, DirectConnectCompatibility compatibility) {
         if(host == null || host.trim().isEmpty()
                 || host.getBytes(StandardCharsets.UTF_8).length > 255) {
             throw new IllegalArgumentException("Direct Connect address must be 1-255 bytes.");
@@ -64,25 +77,31 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(port < 1 || port > 65535) {
             throw new IllegalArgumentException("Direct Connect port must be between 1 and 65535.");
         }
-        if(participantId == null) {
-            throw new IllegalArgumentException("Client Participant identity cannot be null.");
+        if(launcherIdentity == null) throw new IllegalArgumentException("Launcher Identity cannot be null.");
+        if(presentation == null) throw new IllegalArgumentException("Slot presentation cannot be null.");
+        if(requestedSlot < 0 || requestedSlot > 4) {
+            throw new IllegalArgumentException("Requested Campaign Slot must be zero (any) or 1-4.");
         }
-        if(compatibility == null) {
-            throw new IllegalArgumentException("Client compatibility cannot be null.");
-        }
+        if(reconnectTokens == null) throw new IllegalArgumentException("Reconnect token store cannot be null.");
+        if(compatibility == null) throw new IllegalArgumentException("Client compatibility cannot be null.");
         this.host = host.trim();
         this.port = port;
-        this.participantId = participantId;
+        this.launcherIdentity = launcherIdentity;
+        this.presentation = presentation;
+        this.requestedSlot = requestedSlot;
+        this.reconnectTokens = reconnectTokens;
         this.compatibility = compatibility;
         status = new DirectConnectStatus(DirectConnectPhase.CONNECTING,
                 "Connecting TCP to " + this.host + ":" + port + ".",
                 null, null, null);
     }
 
-    public static DirectConnectClient connect(String host, int port, String participantId,
+    public static DirectConnectClient connect(String host, int port,
+            LauncherIdentity launcherIdentity, SlotPresentation presentation,
+            int requestedSlot, ReconnectTokenStore reconnectTokens,
             DirectConnectCompatibility compatibility) {
-        DirectConnectClient client = new DirectConnectClient(host, port,
-                new ParticipantId(participantId), compatibility);
+        DirectConnectClient client = new DirectConnectClient(host, port, launcherIdentity,
+                presentation, requestedSlot, reconnectTokens, compatibility);
         client.start();
         return client;
     }
@@ -107,9 +126,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         connect.addListener(new ChannelFutureListener() {
             @Override
             public void operationComplete(ChannelFuture future) {
-                if(!future.isSuccess()) {
-                    fail(connectFailureReason(future.cause()));
-                }
+                if(!future.isSuccess()) fail(connectFailureReason(future.cause()));
             }
         });
     }
@@ -139,29 +156,83 @@ public final class DirectConnectClient implements DirectConnectPeer {
                 null, null, null);
         context.writeAndFlush(new ClientHello(DirectConnectProtocol.VERSION,
                 compatibility.getBuildId(), compatibility.getContentFormat(),
-                compatibility.getContentSha256(), participantId.getValue()));
+                compatibility.getContentSha256(), launcherIdentity.getValue()));
         context.executor().schedule(new Runnable() {
             @Override
             public void run() {
                 DirectConnectPhase phase = status.getPhase();
                 if(phase == DirectConnectPhase.HANDSHAKING
+                        || phase == DirectConnectPhase.CLAIMING_SLOT
                         || phase == DirectConnectPhase.REGISTERING_UDP) {
-                    fail("Direct Connect handshake timed out.");
+                    fail("Direct Connect lobby handshake timed out.");
                 }
             }
         }, 10L, TimeUnit.SECONDS);
     }
 
-    private synchronized void accepted(ServerAccepted accepted) {
-        if(sessionId != null || accepted.sessionId == null || accepted.sessionId.trim().isEmpty()
-                || accepted.udpToken == 0L) {
-            fail("Host returned malformed handshake acceptance.");
+    private synchronized void campaignChallenge(CampaignChallenge challenge) {
+        if(sessionId != null || challenge.sessionId == null || challenge.sessionId.trim().isEmpty()
+                || challenge.capacity < 2 || challenge.capacity > 4) {
+            fail("Host returned malformed Campaign lobby details.");
             return;
         }
-        sessionId = accepted.sessionId;
+        try {
+            CampaignRoster.requireCampaignId(challenge.campaignId);
+        }
+        catch(IllegalArgumentException ex) {
+            fail("Host returned malformed Campaign identity.");
+            return;
+        }
+        sessionId = challenge.sessionId;
+        campaignId = challenge.campaignId;
+        campaignCapacity = challenge.capacity;
+
+        String reconnectToken;
+        try {
+            reconnectToken = reconnectTokens.load(campaignId);
+        }
+        catch(RuntimeException ex) {
+            fail("Could not read private Campaign reconnect credential: " + safeMessage(ex));
+            return;
+        }
+        tcpChannel.writeAndFlush(new SlotClaim(sessionId, presentation.getNickname(),
+                presentation.getAvatarId(), requestedSlot,
+                reconnectToken == null ? "" : reconnectToken));
+        status = new DirectConnectStatus(DirectConnectPhase.CLAIMING_SLOT,
+                reconnectToken == null
+                        ? "Requesting a new Host-approved Campaign Slot."
+                        : "Reclaiming persistent Campaign Slot with private reconnect credential.",
+                sessionId, "host", null);
+    }
+
+    private synchronized void pending(SlotPending pending) {
+        if(sessionId == null || !sessionId.equals(pending.sessionId)) {
+            fail("Host returned malformed pending approval state.");
+            return;
+        }
+        status = new DirectConnectStatus(DirectConnectPhase.AWAITING_APPROVAL,
+                pending.reason, sessionId, "host", null);
+    }
+
+    private synchronized void accepted(ServerAccepted accepted) {
+        if(sessionId == null || !sessionId.equals(accepted.sessionId)
+                || !campaignId.equals(accepted.campaignId) || accepted.udpToken == 0L
+                || accepted.slotNumber < 1 || accepted.slotNumber > campaignCapacity) {
+            fail("Host returned malformed Campaign Slot acceptance.");
+            return;
+        }
+        try {
+            reconnectTokens.save(campaignId, accepted.reconnectToken);
+        }
+        catch(RuntimeException ex) {
+            fail("Could not store private Campaign reconnect credential: " + safeMessage(ex));
+            return;
+        }
+        campaignSlot = accepted.slotNumber;
         udpToken = accepted.udpToken;
         status = new DirectConnectStatus(DirectConnectPhase.REGISTERING_UDP,
-                "TCP handshake accepted. Registering UDP on Host's same numeric port.",
+                "Campaign Slot " + campaignSlot
+                        + " accepted. Registering UDP on Host's same numeric port.",
                 sessionId, "host", null);
         bindUdp();
     }
@@ -236,12 +307,15 @@ public final class DirectConnectClient implements DirectConnectPeer {
         UdpRegistered registered = (UdpRegistered)message;
         if(!sessionId.equals(registered.sessionId) || udpToken != registered.udpToken) return;
         udpRegistered = true;
+        status = new DirectConnectStatus(DirectConnectPhase.LOBBY,
+                "Campaign Slot " + campaignSlot + " is ready. Waiting for Host to start play.",
+                sessionId, "host", null);
         becomeReadyIfComplete();
     }
 
     private synchronized void sessionReady(SessionReady ready) {
         if(sessionId == null || !sessionId.equals(ready.sessionId)
-                || ready.participantCount != 2) {
+                || ready.participantCount < 2 || ready.participantCount > campaignCapacity) {
             fail("Host returned malformed session-ready state.");
             return;
         }
@@ -252,7 +326,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private void becomeReadyIfComplete() {
         if(!udpRegistered || readyMessage == null) return;
         status = new DirectConnectStatus(DirectConnectPhase.READY,
-                "TCP and UDP are ready. Entering shared open-source test floor.",
+                "Host started play with " + readyMessage.participantCount
+                        + " Participants. Entering shared open-source test floor.",
                 sessionId, "host", readyMessage.floorId);
     }
 
@@ -309,6 +384,22 @@ public final class DirectConnectClient implements DirectConnectPeer {
         InetAddress tcpAddress = tcpRemote.getAddress();
         InetAddress udpAddress = sender.getAddress();
         return tcpAddress != null && tcpAddress.equals(udpAddress);
+    }
+
+    public LauncherIdentity getLauncherIdentity() {
+        return launcherIdentity;
+    }
+
+    public String getCampaignId() {
+        return campaignId;
+    }
+
+    public int getCampaignCapacity() {
+        return campaignCapacity;
+    }
+
+    public int getCampaignSlot() {
+        return campaignSlot;
     }
 
     @Override
@@ -371,13 +462,22 @@ public final class DirectConnectClient implements DirectConnectPeer {
 
         @Override
         protected void channelRead0(ChannelHandlerContext context, Message message) {
-            if(message instanceof ServerAccepted && sessionId == null) {
+            if(message instanceof CampaignChallenge && sessionId == null) {
+                campaignChallenge((CampaignChallenge)message);
+            }
+            else if(message instanceof SlotPending
+                    && status.getPhase() == DirectConnectPhase.CLAIMING_SLOT) {
+                pending((SlotPending)message);
+            }
+            else if(message instanceof ServerAccepted && sessionId != null
+                    && campaignSlot == 0) {
                 accepted((ServerAccepted)message);
             }
             else if(message instanceof ServerRejected) {
                 rejected((ServerRejected)message);
             }
-            else if(message instanceof SessionReady && sessionId != null) {
+            else if(message instanceof SessionReady && sessionId != null
+                    && campaignSlot != 0) {
                 sessionReady((SessionReady)message);
             }
             else if(message instanceof ServerDisconnect) {

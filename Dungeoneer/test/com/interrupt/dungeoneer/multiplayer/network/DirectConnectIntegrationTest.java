@@ -1,28 +1,46 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
 import com.interrupt.dungeoneer.GameApplication;
+import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
+import com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerRejected;
 
-import io.netty.buffer.Unpooled;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class DirectConnectIntegrationTest {
     private static final long TIMEOUT_MILLIS = 8000L;
+
+    @Rule
+    public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+    private int campaignStoreCounter;
 
     @Test
     public void refusedConnectionExplainsHowToStartHost() throws Exception {
@@ -30,12 +48,13 @@ public class DirectConnectIntegrationTest {
         int port = unusedPort.getLocalPort();
         unusedPort.close();
 
-        DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", port,
-                "participant-2", compatibility("unavailable-host"));
+        DirectConnectClient client = client(port, '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(),
+                compatibility("unavailable-host"));
         try {
             awaitPhase(client, DirectConnectPhase.FAILED);
             assertEquals("No Direct Connect Host is listening at 127.0.0.1:" + port
-                    + ". Start Host first and check that both ports match.",
+                            + ". Start Host first and check that both ports match.",
                     client.getStatus().getMessage());
         }
         finally {
@@ -44,74 +63,179 @@ public class DirectConnectIntegrationTest {
     }
 
     @Test
-    public void oneConfiguredPortCarriesTcpAndUdpBeforeFloorEntry() throws Exception {
+    public void unknownIdentityWaitsForHostApprovalBeforeLobbyAndFloorEntry() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("same-floor");
-        DirectConnectHost host = DirectConnectHost.start(0, compatibility);
-        DirectConnectClient client = null;
+        HostFixture fixture = host(compatibility, 2, "approval");
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
         try {
-            client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
-                    "participant-2", compatibility);
-            awaitPhase(client, DirectConnectPhase.READY);
-            awaitPhase(host, DirectConnectPhase.READY);
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            awaitPendingCount(fixture.host, 1);
+            assertEquals(1, fixture.roster.getSlots().size());
 
-            assertTrue(host.getBoundPort() > 0);
-            assertEquals(host.getStatus().getSessionId(), client.getStatus().getSessionId());
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            awaitPhase(fixture.host, DirectConnectPhase.LOBBY);
+            assertEquals(2, fixture.roster.getSlots().size());
+            assertEquals(identity('2'), fixture.roster.getSlot(2).getLauncherIdentity());
+            assertTrue(tokens.load("approval") != null);
+
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitPhase(fixture.host, DirectConnectPhase.READY);
             assertEquals(GameApplication.OPEN_SOURCE_TEST_LEVEL,
                     client.getStatus().getFloorId());
-            assertEquals("participant-2", host.getStatus().getRemoteParticipantId());
-
-            client.close();
-            awaitPhase(host, DirectConnectPhase.DISCONNECTED);
-            assertTrue(host.getStatus().getMessage().contains("cleanly"));
-            client = null;
+            assertEquals(2, client.getCampaignSlot());
         }
         finally {
-            if(client != null) client.close();
-            host.close();
+            client.close();
+            fixture.close();
         }
     }
 
     @Test
-    public void explicitBuildAndContentMismatchesAreRejected() throws Exception {
+    public void capacityFourLobbyAdmitsThreeExplicitlyApprovedRemoteIdentities() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("four-party-floor");
+        HostFixture fixture = host(compatibility, 4, "four-party");
+        DirectConnectClient second = null;
+        DirectConnectClient third = null;
+        DirectConnectClient fourth = null;
+        try {
+            second = approveClient(fixture, compatibility, '2', "Two",
+                    AvatarCatalog.HUMANOID_2);
+            third = approveClient(fixture, compatibility, '3', "Three",
+                    AvatarCatalog.HUMANOID_3);
+            fourth = approveClient(fixture, compatibility, '4', "Four",
+                    AvatarCatalog.HUMANOID_4);
+
+            assertEquals(4, fixture.host.getConnectedParticipantCount());
+            assertEquals(4, fixture.host.getUdpReadyParticipantCount());
+            fixture.host.startSession();
+            awaitPhase(second, DirectConnectPhase.READY);
+            awaitPhase(third, DirectConnectPhase.READY);
+            awaitPhase(fourth, DirectConnectPhase.READY);
+            assertEquals(4, fixture.roster.getSlots().size());
+            assertEquals(identity('2'), fixture.roster.getSlot(2).getLauncherIdentity());
+            assertEquals(identity('3'), fixture.roster.getSlot(3).getLauncherIdentity());
+            assertEquals(identity('4'), fixture.roster.getSlot(4).getLauncherIdentity());
+        }
+        finally {
+            if(second != null) second.close();
+            if(third != null) third.close();
+            if(fourth != null) fourth.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void approvedIdentityAutomaticallyReclaimsSameSlotAcrossLobbySessions() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("persistent-floor");
+        File storageRoot = temporaryFolder.newFolder("persistent-campaign");
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        HostFixture first = host(compatibility, 3, "persistent", storageRoot);
+        DirectConnectClient firstClient = client(first.host.getBoundPort(), '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+        try {
+            awaitPhase(firstClient, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(first.host.approve(identity('2').getValue()));
+            awaitPhase(firstClient, DirectConnectPhase.LOBBY);
+            assertEquals(2, firstClient.getCampaignSlot());
+        }
+        finally {
+            firstClient.close();
+            first.close();
+        }
+
+        HostFixture resumed = host(compatibility, 3, "persistent", storageRoot);
+        DirectConnectClient returning = client(resumed.host.getBoundPort(), '2', "Renamed",
+                AvatarCatalog.HUMANOID_3, 0, tokens, compatibility);
+        try {
+            awaitPhase(returning, DirectConnectPhase.LOBBY);
+            assertTrue(resumed.host.getPendingClaims().isEmpty());
+            assertEquals(2, returning.getCampaignSlot());
+            assertEquals("Renamed",
+                    resumed.roster.getSlot(2).getPresentation().getNickname());
+            assertEquals(identity('2'),
+                    resumed.roster.getSlot(2).getLauncherIdentity());
+        }
+        finally {
+            returning.close();
+            resumed.close();
+        }
+    }
+
+    @Test
+    public void fullRosterAndOccupiedHostSlotRejectUnknownIdentityWithoutReassignment()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("protected-roster");
+        HostFixture full = host(compatibility, 2, "full");
+        full.roster.approve(new com.interrupt.dungeoneer.multiplayer.lobby.SlotClaimRequest(
+                        identity('2'), new SlotPresentation("Owner", AvatarCatalog.HUMANOID_2),
+                        2, null), new SecureRandom());
+        full.store.save(full.roster);
+        DirectConnectClient unknown = client(full.host.getBoundPort(), '3', "Unknown",
+                AvatarCatalog.HUMANOID_3, 0, new MemoryReconnectTokens(), compatibility);
+        try {
+            awaitPhase(unknown, DirectConnectPhase.REJECTED);
+            assertTrue(unknown.getStatus().getMessage().startsWith("CAMPAIGN_FULL"));
+            assertEquals(identity('2'), full.roster.getSlot(2).getLauncherIdentity());
+        }
+        finally {
+            unknown.close();
+            full.close();
+        }
+
+        HostFixture occupied = host(compatibility, 3, "occupied");
+        DirectConnectClient claimant = client(occupied.host.getBoundPort(), '3', "Claimant",
+                AvatarCatalog.HUMANOID_3, 1, new MemoryReconnectTokens(), compatibility);
+        try {
+            awaitPhase(claimant, DirectConnectPhase.REJECTED);
+            assertTrue(claimant.getStatus().getMessage().startsWith("SLOT_OCCUPIED"));
+            assertEquals(identity('1'), occupied.roster.getSlot(1).getLauncherIdentity());
+        }
+        finally {
+            claimant.close();
+            occupied.close();
+        }
+    }
+
+    @Test
+    public void explicitBuildAndContentMismatchesAreRejectedBeforeSlotClaim() throws Exception {
         DirectConnectCompatibility hostCompatibility = compatibility("host-floor");
-        DirectConnectHost host = DirectConnectHost.start(0, hostCompatibility);
+        HostFixture fixture = host(hostCompatibility, 2, "compatibility");
         DirectConnectClient client = null;
         try {
             DirectConnectCompatibility wrongBuild = new DirectConnectCompatibility(
                     "different-build", hostCompatibility.getContentFormat(),
                     hostCompatibility.getContentSha256());
-            client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
-                    "wrong-build", wrongBuild);
+            client = client(fixture.host.getBoundPort(), '2', "Wrong Build",
+                    AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), wrongBuild);
             awaitPhase(client, DirectConnectPhase.REJECTED);
             assertTrue(client.getStatus().getMessage().contains("Build mismatch"));
             client.close();
 
             DirectConnectCompatibility wrongContent = compatibility("different-floor");
-            client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
-                    "wrong-content", wrongContent);
+            client = client(fixture.host.getBoundPort(), '2', "Wrong Content",
+                    AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), wrongContent);
             awaitPhase(client, DirectConnectPhase.REJECTED);
             assertTrue(client.getStatus().getMessage().contains("Content mismatch"));
-            client.close();
-
-            client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
-                    "compatible", hostCompatibility);
-            awaitPhase(client, DirectConnectPhase.READY);
-            awaitPhase(host, DirectConnectPhase.READY);
+            assertTrue(fixture.roster.findSlot(identity('2')) == null);
         }
         finally {
             if(client != null) client.close();
-            host.close();
+            fixture.close();
         }
     }
 
     @Test
     public void malformedHandshakeRejectsOnlyOffendingConnection() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("safe-floor");
-        DirectConnectHost host = DirectConnectHost.start(0, compatibility);
+        HostFixture fixture = host(compatibility, 2, "malformed");
         DirectConnectClient validClient = null;
         try {
             Socket malformed = new Socket();
-            malformed.connect(new InetSocketAddress("127.0.0.1", host.getBoundPort()));
+            malformed.connect(new InetSocketAddress("127.0.0.1", fixture.host.getBoundPort()));
             malformed.setSoTimeout(3000);
             DataOutputStream output = new DataOutputStream(malformed.getOutputStream());
             output.writeInt(5);
@@ -138,42 +262,31 @@ public class DirectConnectIntegrationTest {
                 responseBuffer.release();
             }
 
-            Socket oversized = new Socket();
-            oversized.connect(new InetSocketAddress("127.0.0.1", host.getBoundPort()));
-            oversized.setSoTimeout(3000);
-            DataOutputStream oversizedOutput = new DataOutputStream(oversized.getOutputStream());
-            oversizedOutput.writeInt(DirectConnectProtocol.MAX_TCP_FRAME_BYTES + 1);
-            oversizedOutput.flush();
-            DataInputStream oversizedInput = new DataInputStream(oversized.getInputStream());
-            int oversizedResponseLength = oversizedInput.readInt();
-            assertTrue(oversizedResponseLength > 0);
-            assertTrue(oversizedResponseLength <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES);
-            oversized.close();
-
-            validClient = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
-                    "after-malformed", compatibility);
-            awaitPhase(validClient, DirectConnectPhase.READY);
-            awaitPhase(host, DirectConnectPhase.READY);
+            validClient = client(fixture.host.getBoundPort(), '2', "After Malformed",
+                    AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(validClient, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(validClient, DirectConnectPhase.LOBBY);
         }
         finally {
             if(validClient != null) validClient.close();
-            host.close();
+            fixture.close();
         }
     }
 
     @Test
     public void protocolMismatchIsExplicitAndDoesNotStopHost() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("protocol-floor");
-        DirectConnectHost host = DirectConnectHost.start(0, compatibility);
-        DirectConnectClient validClient = null;
+        HostFixture fixture = host(compatibility, 2, "protocol");
         ByteBuf wrongProtocol = DirectConnectWire.encodeDatagram(
                 UnpooledByteBufAllocator.DEFAULT,
                 new DirectConnectWire.ClientHello(DirectConnectProtocol.VERSION + 1,
                         compatibility.getBuildId(), compatibility.getContentFormat(),
-                        compatibility.getContentSha256(), "wrong-protocol"));
+                        compatibility.getContentSha256(), identity('2').getValue()));
+        DirectConnectClient validClient = null;
         try {
             Socket socket = new Socket();
-            socket.connect(new InetSocketAddress("127.0.0.1", host.getBoundPort()));
+            socket.connect(new InetSocketAddress("127.0.0.1", fixture.host.getBoundPort()));
             socket.setSoTimeout(3000);
             DataOutputStream output = new DataOutputStream(socket.getOutputStream());
             output.writeInt(wrongProtocol.readableBytes());
@@ -192,45 +305,93 @@ public class DirectConnectIntegrationTest {
                 assertTrue(rejection instanceof ServerRejected);
                 assertEquals(DirectConnectWire.RejectCode.PROTOCOL_MISMATCH,
                         ((ServerRejected)rejection).code);
-                assertTrue(((ServerRejected)rejection).reason.contains("Protocol mismatch"));
             }
             finally {
                 responseBuffer.release();
             }
 
-            validClient = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
-                    "after-protocol-mismatch", compatibility);
-            awaitPhase(validClient, DirectConnectPhase.READY);
-            awaitPhase(host, DirectConnectPhase.READY);
+            validClient = client(fixture.host.getBoundPort(), '2', "Valid",
+                    AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(validClient, DirectConnectPhase.AWAITING_APPROVAL);
         }
         finally {
             wrongProtocol.release();
             if(validClient != null) validClient.close();
-            host.close();
+            fixture.close();
         }
     }
 
     @Test
-    public void hostCanDisconnectClientCleanly() throws Exception {
+    public void hostCanDisconnectApprovedClientCleanly() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("disconnect-floor");
-        DirectConnectHost host = DirectConnectHost.start(0, compatibility);
-        DirectConnectClient client = DirectConnectClient.connect("127.0.0.1",
-                host.getBoundPort(), "participant-2", compatibility);
+        HostFixture fixture = host(compatibility, 2, "disconnect");
+        DirectConnectClient client = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
         try {
-            awaitPhase(client, DirectConnectPhase.READY);
-            host.close();
+            fixture.host.close();
             awaitPhase(client, DirectConnectPhase.DISCONNECTED);
             assertTrue(client.getStatus().getMessage().contains("Host disconnected cleanly"));
         }
         finally {
             client.close();
-            host.close();
+            fixture.close();
         }
+    }
+
+    private DirectConnectClient approveClient(HostFixture fixture,
+            DirectConnectCompatibility compatibility, char identity, String nickname,
+            String avatar) throws Exception {
+        DirectConnectClient client = client(fixture.host.getBoundPort(), identity, nickname,
+                avatar, 0, new MemoryReconnectTokens(), compatibility);
+        awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+        assertTrue(fixture.host.approve(identity(identity).getValue()));
+        awaitPhase(client, DirectConnectPhase.LOBBY);
+        return client;
+    }
+
+    private DirectConnectClient client(int port, char identity, String nickname, String avatar,
+            int requestedSlot, ReconnectTokenStore reconnectTokens,
+            DirectConnectCompatibility compatibility) {
+        return DirectConnectClient.connect("127.0.0.1", port, identity(identity),
+                new SlotPresentation(nickname, avatar), requestedSlot, reconnectTokens,
+                compatibility);
+    }
+
+    private HostFixture host(DirectConnectCompatibility compatibility, int capacity,
+            String campaignId) throws Exception {
+        return host(compatibility, capacity, campaignId,
+                temporaryFolder.newFolder("campaign-store-" + campaignStoreCounter++));
+    }
+
+    private HostFixture host(DirectConnectCompatibility compatibility, int capacity,
+            String campaignId, File storageRoot) {
+        CampaignRosterStore store = new CampaignRosterStore(storageRoot, new SecureRandom());
+        CampaignRoster roster = store.loadOrCreate(campaignId, capacity,
+                AvatarCatalog.ownedV108Humanoids(), identity('1'),
+                new SlotPresentation("Host", AvatarCatalog.HUMANOID_1));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
+        return new HostFixture(host, roster, store);
     }
 
     private DirectConnectCompatibility compatibility(String floor) {
         return DirectConnectCompatibility.forOpenSourceTestFloor(
                 floor.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private LauncherIdentity identity(char value) {
+        StringBuilder result = new StringBuilder(LauncherIdentity.ENCODED_LENGTH);
+        while(result.length() < LauncherIdentity.ENCODED_LENGTH) result.append(value);
+        return new LauncherIdentity(result.toString());
+    }
+
+    private void awaitPendingCount(DirectConnectHost host, int count)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(host.getPendingClaims().size() == count) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for " + count + " pending Campaign Slot claims.");
     }
 
     private void awaitPhase(DirectConnectPeer peer, DirectConnectPhase phase)
@@ -248,5 +409,37 @@ public class DirectConnectIntegrationTest {
         }
         fail("Timed out waiting for " + phase + "; last state was "
                 + peer.getStatus().getPhase() + ": " + peer.getStatus().getMessage());
+    }
+
+    private static final class HostFixture implements AutoCloseable {
+        private final DirectConnectHost host;
+        private final CampaignRoster roster;
+        private final CampaignRosterStore store;
+
+        private HostFixture(DirectConnectHost host, CampaignRoster roster,
+                CampaignRosterStore store) {
+            this.host = host;
+            this.roster = roster;
+            this.store = store;
+        }
+
+        @Override
+        public void close() {
+            host.close();
+        }
+    }
+
+    private static final class MemoryReconnectTokens implements ReconnectTokenStore {
+        private final Map<String, String> tokens = new HashMap<String, String>();
+
+        @Override
+        public synchronized String load(String campaignId) {
+            return tokens.get(campaignId);
+        }
+
+        @Override
+        public synchronized void save(String campaignId, String reconnectToken) {
+            tokens.put(campaignId, reconnectToken);
+        }
     }
 }

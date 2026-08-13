@@ -12,6 +12,11 @@ public class DirectConnectSessionScreenTest {
         assertInsideViewport(1920f, 0.9f);
     }
 
+    @Test
+    public void hostApprovalControlsStayAboveSmallWindowsViewportBottom() {
+        assertTrue(DirectConnectSessionScreen.lowestHostTextBaseline(320f) >= 16f);
+    }
+
     private static void assertInsideViewport(float viewportWidth, float textWidthFraction) {
         float left = DirectConnectSessionScreen.textLeft(viewportWidth, textWidthFraction);
         float right = left + viewportWidth * textWidthFraction;

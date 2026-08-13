@@ -10,6 +10,11 @@ import com.interrupt.dungeoneer.entities.triggers.TriggeredWarp;
 import com.interrupt.dungeoneer.game.GameData;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.owned.OwnedGameCopyMount;
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
+import com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectClient;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
@@ -41,7 +46,12 @@ public class GameApplication extends Game {
     private final StartupMode startupMode;
     private final String directConnectAddress;
     private final int directConnectPort;
-    private final String directConnectParticipantId;
+    private final CampaignRoster directConnectRoster;
+    private final CampaignRosterStore directConnectRosterStore;
+    private final LauncherIdentity directConnectLauncherIdentity;
+    private final SlotPresentation directConnectPresentation;
+    private final int directConnectRequestedSlot;
+    private final ReconnectTokenStore directConnectReconnectTokens;
     private DirectConnectPeer directConnectPeer;
     private DirectConnectSessionScreen directConnectScreen;
     private boolean enteredDirectConnectFloor = false;
@@ -57,19 +67,28 @@ public class GameApplication extends Game {
     public static boolean editorRunning = false;
 
     public GameApplication() {
-        this(StartupMode.NORMAL, null, 0, null);
+        this(StartupMode.NORMAL, null, 0, null, null, null, null, 0, null);
     }
 
     private GameApplication(StartupMode startupMode) {
-        this(startupMode, null, 0, null);
+        this(startupMode, null, 0, null, null, null, null, 0, null);
     }
 
     private GameApplication(StartupMode startupMode, String directConnectAddress,
-            int directConnectPort, String directConnectParticipantId) {
+            int directConnectPort, CampaignRoster directConnectRoster,
+            CampaignRosterStore directConnectRosterStore,
+            LauncherIdentity directConnectLauncherIdentity,
+            SlotPresentation directConnectPresentation, int directConnectRequestedSlot,
+            ReconnectTokenStore directConnectReconnectTokens) {
         this.startupMode = startupMode;
         this.directConnectAddress = directConnectAddress;
         this.directConnectPort = directConnectPort;
-        this.directConnectParticipantId = directConnectParticipantId;
+        this.directConnectRoster = directConnectRoster;
+        this.directConnectRosterStore = directConnectRosterStore;
+        this.directConnectLauncherIdentity = directConnectLauncherIdentity;
+        this.directConnectPresentation = directConnectPresentation;
+        this.directConnectRequestedSlot = directConnectRequestedSlot;
+        this.directConnectReconnectTokens = directConnectReconnectTokens;
     }
 
     public static GameApplication forOpenSourceTestLevel() {
@@ -80,14 +99,17 @@ public class GameApplication extends Game {
         return new GameApplication(StartupMode.OWNED_TUTORIAL);
     }
 
-    public static GameApplication forDirectConnectHost(int port) {
-        return new GameApplication(StartupMode.DIRECT_CONNECT_HOST, null, port, "host");
+    public static GameApplication forDirectConnectHost(int port, CampaignRoster roster,
+            CampaignRosterStore rosterStore) {
+        return new GameApplication(StartupMode.DIRECT_CONNECT_HOST, null, port,
+                roster, rosterStore, null, null, 0, null);
     }
 
     public static GameApplication forDirectConnectClient(String address, int port,
-            String participantId) {
+            LauncherIdentity launcherIdentity, SlotPresentation presentation,
+            int requestedSlot, ReconnectTokenStore reconnectTokens) {
         return new GameApplication(StartupMode.DIRECT_CONNECT_CLIENT, address, port,
-                participantId);
+                null, null, launcherIdentity, presentation, requestedSlot, reconnectTokens);
     }
 
 	@Override
@@ -135,11 +157,14 @@ public class GameApplication extends Game {
         Gdx.app.setLogLevel(Application.LOG_INFO);
         DirectConnectCompatibility compatibility = createOpenSourceCompatibility();
         if(startupMode == StartupMode.DIRECT_CONNECT_HOST) {
-            directConnectPeer = DirectConnectHost.start(directConnectPort, compatibility);
+            directConnectPeer = DirectConnectHost.start(directConnectPort, compatibility,
+                    directConnectRoster, directConnectRosterStore);
         }
         else {
             directConnectPeer = DirectConnectClient.connect(directConnectAddress,
-                    directConnectPort, directConnectParticipantId, compatibility);
+                    directConnectPort, directConnectLauncherIdentity,
+                    directConnectPresentation, directConnectRequestedSlot,
+                    directConnectReconnectTokens, compatibility);
         }
         directConnectScreen = new DirectConnectSessionScreen(this, directConnectPeer);
         setScreen(directConnectScreen);

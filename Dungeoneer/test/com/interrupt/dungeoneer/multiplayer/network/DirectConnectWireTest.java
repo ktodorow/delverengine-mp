@@ -6,6 +6,7 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ProtocolEx
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.embedded.EmbeddedChannel;
 
 import org.junit.Test;
@@ -48,9 +49,34 @@ public class DirectConnectWireTest {
         assertEquals(hello.buildId, decodedHello.buildId);
         assertEquals(hello.contentFormat, decodedHello.contentFormat);
         assertEquals(hello.contentSha256, decodedHello.contentSha256);
-        assertEquals(hello.participantId, decodedHello.participantId);
+        assertEquals(hello.launcherIdentity, decodedHello.launcherIdentity);
         assertFalse(inbound.finishAndReleaseAll());
         assertFalse(outbound.finishAndReleaseAll());
+    }
+
+    @Test
+    public void boundedCampaignChallengeClaimAndAcceptanceRoundTrip() throws Exception {
+        DirectConnectWire.CampaignChallenge challenge =
+                (DirectConnectWire.CampaignChallenge)roundTrip(
+                        new DirectConnectWire.CampaignChallenge("session", "campaign", 4));
+        assertEquals("campaign", challenge.campaignId);
+        assertEquals(4, challenge.capacity);
+
+        DirectConnectWire.SlotClaim claim = (DirectConnectWire.SlotClaim)roundTrip(
+                new DirectConnectWire.SlotClaim("session", "Friend",
+                        "humanoid-2", 3, repeat('a')));
+        assertEquals("Friend", claim.nickname);
+        assertEquals("humanoid-2", claim.avatarId);
+        assertEquals(3, claim.requestedSlot);
+        assertEquals(repeat('a'), claim.reconnectToken);
+
+        DirectConnectWire.ServerAccepted accepted =
+                (DirectConnectWire.ServerAccepted)roundTrip(
+                        new DirectConnectWire.ServerAccepted("session", 42L,
+                                "campaign", 3, repeat('b')));
+        assertEquals("campaign", accepted.campaignId);
+        assertEquals(3, accepted.slotNumber);
+        assertEquals(repeat('b'), accepted.reconnectToken);
     }
 
     @Test
@@ -91,5 +117,23 @@ public class DirectConnectWireTest {
         finally {
             message.release();
         }
+    }
+
+    private DirectConnectWire.Message roundTrip(DirectConnectWire.Message message)
+            throws Exception {
+        ByteBuf encoded = DirectConnectWire.encodeDatagram(
+                UnpooledByteBufAllocator.DEFAULT, message);
+        try {
+            return DirectConnectWire.decodeDatagram(encoded);
+        }
+        finally {
+            encoded.release();
+        }
+    }
+
+    private String repeat(char value) {
+        StringBuilder result = new StringBuilder(64);
+        while(result.length() < 64) result.append(value);
+        return result.toString();
     }
 }

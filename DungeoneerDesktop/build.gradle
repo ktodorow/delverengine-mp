@@ -31,13 +31,18 @@ task runTestLevel(dependsOn: classes, type: JavaExec) {
 
 task runDirectHost(dependsOn: classes, type: JavaExec) {
     group = "application"
-    description = "Hosts one Direct Connect Participant on the open-source test floor."
+    description = "Hosts a two-to-four-slot approved Direct Connect lobby on the open-source test floor."
     main = project.mainClassName
     classpath = sourceSets.main.runtimeClasspath
     standardInput = System.in
     workingDir = project.assetsDir
     args "--direct-host"
     if(project.hasProperty("sessionPort")) args "--session-port=" + project.property("sessionPort")
+    if(project.hasProperty("campaignCapacity")) args "--campaign-capacity=" + project.property("campaignCapacity")
+    if(project.hasProperty("campaignId")) args "--campaign-id=" + project.property("campaignId")
+    if(project.hasProperty("nickname")) args "--nickname=" + project.property("nickname")
+    if(project.hasProperty("avatar")) args "--avatar=" + project.property("avatar")
+    if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
 }
 
 task runDirectClient(dependsOn: classes, type: JavaExec) {
@@ -50,7 +55,10 @@ task runDirectClient(dependsOn: classes, type: JavaExec) {
     args "--direct-connect=" + (project.hasProperty("sessionAddress")
             ? project.property("sessionAddress") : "127.0.0.1")
     if(project.hasProperty("sessionPort")) args "--session-port=" + project.property("sessionPort")
-    if(project.hasProperty("participantId")) args "--participant-id=" + project.property("participantId")
+    if(project.hasProperty("nickname")) args "--nickname=" + project.property("nickname")
+    if(project.hasProperty("avatar")) args "--avatar=" + project.property("avatar")
+    if(project.hasProperty("campaignSlot")) args "--campaign-slot=" + project.property("campaignSlot")
+    if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
 }
 
 task runOwnedTutorial(dependsOn: classes, type: JavaExec) {

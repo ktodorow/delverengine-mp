@@ -25,6 +25,9 @@ final class DirectConnectWire {
     private static final int SESSION_READY = 6;
     private static final int CLIENT_DISCONNECT = 7;
     private static final int SERVER_DISCONNECT = 8;
+    private static final int CAMPAIGN_CHALLENGE = 9;
+    private static final int SLOT_CLAIM = 10;
+    private static final int SLOT_PENDING = 11;
 
     private DirectConnectWire() { }
 
@@ -74,8 +77,44 @@ final class DirectConnectWire {
                     DirectConnectProtocol.MAX_CONTENT_FORMAT_BYTES, "content format");
             writeString(output, hello.contentSha256,
                     DirectConnectProtocol.MAX_CONTENT_HASH_BYTES, "content hash");
-            writeString(output, hello.participantId,
-                    DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES, "Participant identity");
+            writeString(output, hello.launcherIdentity,
+                    DirectConnectProtocol.MAX_LAUNCHER_IDENTITY_BYTES, "Launcher Identity");
+        }
+        else if(message instanceof CampaignChallenge) {
+            CampaignChallenge challenge = (CampaignChallenge)message;
+            output.writeByte(CAMPAIGN_CHALLENGE);
+            writeString(output, challenge.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            writeString(output, challenge.campaignId, DirectConnectProtocol.MAX_CAMPAIGN_ID_BYTES,
+                    "campaign identity");
+            if(challenge.capacity < 2 || challenge.capacity > 4) {
+                throw new ProtocolException("Campaign Capacity is outside protocol bounds.");
+            }
+            output.writeByte(challenge.capacity);
+        }
+        else if(message instanceof SlotClaim) {
+            SlotClaim claim = (SlotClaim)message;
+            output.writeByte(SLOT_CLAIM);
+            writeString(output, claim.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            writeString(output, claim.nickname, DirectConnectProtocol.MAX_NICKNAME_BYTES,
+                    "Nickname");
+            writeString(output, claim.avatarId, DirectConnectProtocol.MAX_AVATAR_ID_BYTES,
+                    "Avatar identity");
+            if(claim.requestedSlot < 0 || claim.requestedSlot > 4) {
+                throw new ProtocolException("Requested Campaign Slot is outside protocol bounds.");
+            }
+            output.writeByte(claim.requestedSlot);
+            writeString(output, claim.reconnectToken,
+                    DirectConnectProtocol.MAX_RECONNECT_TOKEN_BYTES, "reconnect credential");
+        }
+        else if(message instanceof SlotPending) {
+            SlotPending pending = (SlotPending)message;
+            output.writeByte(SLOT_PENDING);
+            writeString(output, pending.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            writeString(output, pending.reason, DirectConnectProtocol.MAX_REASON_BYTES,
+                    "pending approval reason");
         }
         else if(message instanceof ServerAccepted) {
             ServerAccepted accepted = (ServerAccepted)message;
@@ -83,6 +122,14 @@ final class DirectConnectWire {
             writeString(output, accepted.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                     "session identity");
             output.writeLong(accepted.udpToken);
+            writeString(output, accepted.campaignId, DirectConnectProtocol.MAX_CAMPAIGN_ID_BYTES,
+                    "campaign identity");
+            if(accepted.slotNumber < 1 || accepted.slotNumber > 4) {
+                throw new ProtocolException("Campaign Slot number is outside protocol bounds.");
+            }
+            output.writeByte(accepted.slotNumber);
+            writeString(output, accepted.reconnectToken,
+                    DirectConnectProtocol.MAX_RECONNECT_TOKEN_BYTES, "reconnect credential");
         }
         else if(message instanceof ServerRejected) {
             ServerRejected rejected = (ServerRejected)message;
@@ -152,14 +199,59 @@ final class DirectConnectWire {
                                 "content format"),
                         readString(input, DirectConnectProtocol.MAX_CONTENT_HASH_BYTES,
                                 "content hash"),
-                        readString(input, DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES,
-                                "Participant identity"));
+                        readString(input, DirectConnectProtocol.MAX_LAUNCHER_IDENTITY_BYTES,
+                                "Launcher Identity"));
+                break;
+            case CAMPAIGN_CHALLENGE:
+                String challengeSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                String campaignId = readString(input,
+                        DirectConnectProtocol.MAX_CAMPAIGN_ID_BYTES, "campaign identity");
+                requireReadable(input, 1, "Campaign Capacity");
+                int capacity = input.readUnsignedByte();
+                if(capacity < 2 || capacity > 4) {
+                    throw new ProtocolException("Campaign Capacity is outside protocol bounds.");
+                }
+                message = new CampaignChallenge(challengeSession, campaignId, capacity);
+                break;
+            case SLOT_CLAIM:
+                String claimSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                String nickname = readString(input,
+                        DirectConnectProtocol.MAX_NICKNAME_BYTES, "Nickname");
+                String avatarId = readString(input,
+                        DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity");
+                requireReadable(input, 1, "requested Campaign Slot");
+                int requestedSlot = input.readUnsignedByte();
+                if(requestedSlot > 4) {
+                    throw new ProtocolException("Requested Campaign Slot is outside protocol bounds.");
+                }
+                message = new SlotClaim(claimSession, nickname, avatarId, requestedSlot,
+                        readString(input, DirectConnectProtocol.MAX_RECONNECT_TOKEN_BYTES,
+                                "reconnect credential"));
+                break;
+            case SLOT_PENDING:
+                message = new SlotPending(readString(input,
+                                DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity"),
+                        readString(input, DirectConnectProtocol.MAX_REASON_BYTES,
+                                "pending approval reason"));
                 break;
             case SERVER_ACCEPTED:
                 String acceptedSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
                 requireReadable(input, 8, "UDP token");
-                message = new ServerAccepted(acceptedSession, input.readLong());
+                long acceptedUdpToken = input.readLong();
+                String acceptedCampaign = readString(input,
+                        DirectConnectProtocol.MAX_CAMPAIGN_ID_BYTES, "campaign identity");
+                requireReadable(input, 1, "Campaign Slot number");
+                int acceptedSlot = input.readUnsignedByte();
+                if(acceptedSlot < 1 || acceptedSlot > 4) {
+                    throw new ProtocolException("Campaign Slot number is outside protocol bounds.");
+                }
+                message = new ServerAccepted(acceptedSession, acceptedUdpToken,
+                        acceptedCampaign, acceptedSlot,
+                        readString(input, DirectConnectProtocol.MAX_RECONNECT_TOKEN_BYTES,
+                                "reconnect credential"));
                 break;
             case SERVER_REJECTED:
                 requireReadable(input, 1, "rejection code");
@@ -256,25 +348,71 @@ final class DirectConnectWire {
         final String buildId;
         final String contentFormat;
         final String contentSha256;
-        final String participantId;
+        final String launcherIdentity;
 
         ClientHello(int protocolVersion, String buildId, String contentFormat,
-                String contentSha256, String participantId) {
+                String contentSha256, String launcherIdentity) {
             this.protocolVersion = protocolVersion;
             this.buildId = buildId;
             this.contentFormat = contentFormat;
             this.contentSha256 = contentSha256;
-            this.participantId = participantId;
+            this.launcherIdentity = launcherIdentity;
+        }
+    }
+
+    static final class CampaignChallenge implements Message {
+        final String sessionId;
+        final String campaignId;
+        final int capacity;
+
+        CampaignChallenge(String sessionId, String campaignId, int capacity) {
+            this.sessionId = sessionId;
+            this.campaignId = campaignId;
+            this.capacity = capacity;
+        }
+    }
+
+    static final class SlotClaim implements Message {
+        final String sessionId;
+        final String nickname;
+        final String avatarId;
+        final int requestedSlot;
+        final String reconnectToken;
+
+        SlotClaim(String sessionId, String nickname, String avatarId, int requestedSlot,
+                String reconnectToken) {
+            this.sessionId = sessionId;
+            this.nickname = nickname;
+            this.avatarId = avatarId;
+            this.requestedSlot = requestedSlot;
+            this.reconnectToken = reconnectToken == null ? "" : reconnectToken;
+        }
+    }
+
+    static final class SlotPending implements Message {
+        final String sessionId;
+        final String reason;
+
+        SlotPending(String sessionId, String reason) {
+            this.sessionId = sessionId;
+            this.reason = reason;
         }
     }
 
     static final class ServerAccepted implements Message {
         final String sessionId;
         final long udpToken;
+        final String campaignId;
+        final int slotNumber;
+        final String reconnectToken;
 
-        ServerAccepted(String sessionId, long udpToken) {
+        ServerAccepted(String sessionId, long udpToken, String campaignId, int slotNumber,
+                String reconnectToken) {
             this.sessionId = sessionId;
             this.udpToken = udpToken;
+            this.campaignId = campaignId;
+            this.slotNumber = slotNumber;
+            this.reconnectToken = reconnectToken;
         }
     }
 
@@ -283,7 +421,15 @@ final class DirectConnectWire {
         BUILD_MISMATCH(2),
         CONTENT_MISMATCH(3),
         MALFORMED_HANDSHAKE(4),
-        SESSION_FULL(5);
+        SESSION_FULL(5),
+        CAMPAIGN_FULL(6),
+        SLOT_OCCUPIED(7),
+        RECONNECT_DENIED(8),
+        NICKNAME_TAKEN(9),
+        AVATAR_UNAVAILABLE(10),
+        APPROVAL_DECLINED(11),
+        IDENTITY_IN_USE(12),
+        NOT_IN_LOBBY(13);
 
         final int id;
 

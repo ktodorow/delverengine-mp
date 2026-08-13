@@ -47,21 +47,23 @@ The harness loads only repository-owned test-floor metadata, advances a controll
 
 ### Direct Connect test floor
 
-Open two terminals on Windows. Start Host on one configurable numeric port used by both TCP and UDP:
+Open two terminals on Windows. Separate profile roots simulate two installations on one development VM. Start Host with Campaign Capacity, Campaign identity, Nickname, and one of four owned humanoid Avatar identities:
 
 ```powershell
-.\gradlew.bat DungeoneerDesktop:runDirectHost -PsessionPort=37777 --no-daemon
+.\gradlew.bat DungeoneerDesktop:runDirectHost --% -PsessionPort=37777 -PcampaignCapacity=2 -PcampaignId=friends-test -Pnickname=Host -Pavatar=humanoid-1 -PprofileRoot=C:\DelverMpProfiles\Host --no-daemon
 ```
 
-Start second client with Host address, same port, and temporary prototype Participant identity:
+Start client with Host address, same port, a different profile root, Party-unique Nickname, and available Avatar:
 
 ```powershell
-.\gradlew.bat DungeoneerDesktop:runDirectClient --% -PsessionAddress=127.0.0.1 -PsessionPort=37777 -PparticipantId=friend-2 --no-daemon
+.\gradlew.bat DungeoneerDesktop:runDirectClient --% -PsessionAddress=127.0.0.1 -PsessionPort=37777 -Pnickname=Friend -Pavatar=humanoid-2 -PprofileRoot=C:\DelverMpProfiles\Friend --no-daemon
 ```
 
 `--%` keeps Windows PowerShell from splitting a dotted address while handing arguments to `gradlew.bat`. For a client in the same Windows VM, `-PsessionAddress=127.0.0.1` can instead be omitted because loopback is the default.
 
-Both windows show same Private Session identity while exact protocol build and normalized open-source asset identity are checked. Host admits client only after TCP handshake plus token-bound UDP registration, then both enter repository-owned test floor. Build mismatch, content mismatch, malformed handshake, and disconnect reason remain explicit. No engine entity, save graph, commercial asset, archive path, or asset byte is serialized or transmitted.
+Client waits for explicit Host approval. In Host window, press `A` to approve displayed pending claim or `R` to reject it. After approved clients finish TCP and token-bound UDP setup, press `Enter` to start repository-owned test floor. Capacity three or four accepts more clients before `Enter`; give each separate profile root, Nickname, and unused `humanoid-1` through `humanoid-4` choice.
+
+Each profile creates one private random Launcher Identity. Host persists approved Campaign Slot ownership under isolated multiplayer profile and client stores per-campaign reconnect credential there; returning identity reclaims same slot automatically even if Nickname or Avatar changes. IP address, Nickname, and Steam identity never own slot. Build mismatch, content mismatch, full roster, occupied slot, malformed handshake, and disconnect reason remain explicit. No engine entity, save graph, commercial asset, archive path, or asset byte is serialized or transmitted.
 
 Run bounded-codec and live loopback coverage without graphics:
 

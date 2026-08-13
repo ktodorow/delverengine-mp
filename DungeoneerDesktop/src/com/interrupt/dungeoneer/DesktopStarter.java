@@ -6,6 +6,14 @@ import com.badlogic.gdx.backends.lwjgl.LwjglApplication;
 import com.badlogic.gdx.backends.lwjgl.LwjglApplicationConfiguration;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Options;
+import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
+import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentityStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.ProfileReconnectTokenStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
 import com.interrupt.dungeoneer.owned.MultiplayerProfile;
 import com.interrupt.dungeoneer.owned.OwnedGameCopyValidationException;
 
@@ -17,6 +25,11 @@ public class DesktopStarter {
         DesktopLaunchOptions launchOptions = DesktopLaunchOptions.parse(args);
         boolean directConnect = launchOptions.directHost
                 || launchOptions.directConnectAddress != null;
+        LauncherIdentity launcherIdentity = null;
+        SlotPresentation slotPresentation = null;
+        CampaignRoster campaignRoster = null;
+        CampaignRosterStore campaignRosterStore = null;
+        ReconnectTokenStore reconnectTokenStore = null;
 
         if (args != null) {
             for (String arg : args) {
@@ -47,7 +60,21 @@ public class DesktopStarter {
             Options.SetKeyboardBindings();
         }
         else if(directConnect) {
-            MultiplayerProfile.initializeDefault();
+            if(launchOptions.profileRoot == null) MultiplayerProfile.initializeDefault();
+            else MultiplayerProfile.initialize(launchOptions.profileRoot);
+            launcherIdentity = LauncherIdentityStore.loadOrCreate();
+            slotPresentation = new SlotPresentation(
+                    launchOptions.nickname, launchOptions.avatarId);
+            if(launchOptions.directHost) {
+                campaignRosterStore = new CampaignRosterStore();
+                campaignRoster = campaignRosterStore.loadOrCreate(
+                        launchOptions.campaignId, launchOptions.campaignCapacity,
+                        AvatarCatalog.ownedV108Humanoids(), launcherIdentity,
+                        slotPresentation);
+            }
+            else {
+                reconnectTokenStore = new ProfileReconnectTokenStore();
+            }
             Options.SetKeyboardBindings();
         }
         else {
@@ -95,12 +122,14 @@ public class DesktopStarter {
 
         GameApplication gameApplication;
         if(launchOptions.directHost) {
-            gameApplication = GameApplication.forDirectConnectHost(launchOptions.sessionPort);
+            gameApplication = GameApplication.forDirectConnectHost(launchOptions.sessionPort,
+                    campaignRoster, campaignRosterStore);
         }
         else if(launchOptions.directConnectAddress != null) {
             gameApplication = GameApplication.forDirectConnectClient(
                     launchOptions.directConnectAddress, launchOptions.sessionPort,
-                    launchOptions.participantId);
+                    launcherIdentity, slotPresentation, launchOptions.requestedSlot,
+                    reconnectTokenStore);
         }
         else if(launchOptions.openSourceTestLevel) gameApplication = GameApplication.forOpenSourceTestLevel();
         else if(launchOptions.ownedTutorial) gameApplication = GameApplication.forOwnedTutorial();

@@ -34,19 +34,33 @@ public class DesktopLaunchOptionsTest {
     @Test
     public void parsesDirectHostAndClientSettings() {
         DesktopLaunchOptions host = DesktopLaunchOptions.parse(new String[] {
-                "--direct-host=41234"
+                "--direct-host=41234",
+                "--campaign-capacity=4",
+                "--campaign-id=friends",
+                "--nickname=Hosty",
+                "--avatar=humanoid-1",
+                "--profile-root=C:\\DelverProfiles\\Host"
         });
         assertTrue(host.directHost);
         assertEquals(41234, host.sessionPort);
+        assertEquals(4, host.campaignCapacity);
+        assertEquals("friends", host.campaignId);
+        assertEquals("Hosty", host.nickname);
+        assertEquals("humanoid-1", host.avatarId);
+        assertEquals(new File("C:\\DelverProfiles\\Host"), host.profileRoot);
 
         DesktopLaunchOptions client = DesktopLaunchOptions.parse(new String[] {
                 "--direct-connect", "192.168.1.50",
                 "--session-port=41234",
-                "--participant-id=friend-2"
+                "--nickname=Friend",
+                "--avatar=humanoid-2",
+                "--campaign-slot=3"
         });
         assertEquals("192.168.1.50", client.directConnectAddress);
         assertEquals(41234, client.sessionPort);
-        assertEquals("friend-2", client.participantId);
+        assertEquals("Friend", client.nickname);
+        assertEquals("humanoid-2", client.avatarId);
+        assertEquals(3, client.requestedSlot);
         assertFalse(client.directHost);
     }
 
@@ -58,6 +72,12 @@ public class DesktopLaunchOptionsTest {
                 "cannot be combined");
         assertParseFailure(new String[] { "--direct-host", "--session-port=70000" },
                 "1 to 65535");
+        assertParseFailure(new String[] { "--direct-host", "--campaign-capacity=5" },
+                "2, 3, or 4");
+        assertParseFailure(new String[] { "--direct-connect=127.0.0.1", "--campaign-capacity=3" },
+                "Only Host");
+        assertParseFailure(new String[] { "--direct-connect=127.0.0.1", "--participant-id=ip-name" },
+                "generated automatically");
     }
 
     private void assertParseFailure(String[] arguments, String expected) {
