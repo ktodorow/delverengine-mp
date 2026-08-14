@@ -11,6 +11,9 @@ public final class MovementPredictionBuffer {
 
     public synchronized void add(long inputTick, float deltaX, float deltaY, float deltaZ) {
         if(inputTick <= 0L) throw new IllegalArgumentException("Prediction input tick must be positive.");
+        requireFinite(deltaX, "Predicted x displacement");
+        requireFinite(deltaY, "Predicted y displacement");
+        requireFinite(deltaZ, "Predicted z displacement");
         if(!pending.isEmpty()
                 && inputTick <= pending.get(pending.size() - 1).inputTick) {
             throw new IllegalArgumentException("Prediction input ticks must increase.");
@@ -40,6 +43,16 @@ public final class MovementPredictionBuffer {
 
     public synchronized int size() {
         return pending.size();
+    }
+
+    public synchronized void clear() {
+        pending.clear();
+    }
+
+    private static void requireFinite(float value, String label) {
+        if(Float.isNaN(value) || Float.isInfinite(value)) {
+            throw new IllegalArgumentException(label + " must be finite.");
+        }
     }
 
     public static final class PredictedPosition {

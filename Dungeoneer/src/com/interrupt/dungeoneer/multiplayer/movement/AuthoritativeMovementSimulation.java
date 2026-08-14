@@ -17,6 +17,9 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
     public static final float MAX_SPEED = 2.4f;
     public static final long MAX_INPUT_TICK_LEAD = 600L;
 
+    private static final int MAX_SAVED_INPUT_STEPS = 12;
+    private static final int MAX_RETAINED_INPUT_STEPS = 1;
+    private static final long INPUT_REORDER_GRACE_TICKS = 3L;
     private static final float ACCELERATION = 18f;
     private static final float DECELERATION = 14f;
     private static final float JUMP_SPEED = 3.2f;
@@ -60,18 +63,39 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         MovementInputFrame input = movement.getInput();
         if(input.getInputTick() <= participant.lastProcessedInputTick) return;
         if(input.getInputTick() - participant.lastProcessedInputTick > MAX_INPUT_TICK_LEAD) return;
-        boolean jumpWasPressed = participant.input != null
-                && participant.input.isJump();
-        if(input.isJump() && !jumpWasPressed) participant.jumpQueued = true;
-        participant.input = input;
-        participant.lastProcessedInputTick = input.getInputTick();
+        if(!participant.pendingInputs.containsKey(input.getInputTick())) {
+            participant.pendingInputs.put(input.getInputTick(),
+                    new QueuedInput(input, hostTick));
+        }
     }
 
     @Override
     public synchronized void tick(long hostTick, float fixedDeltaSeconds,
             HostSessionOutput output) {
         for(MutableMovement participant : participants.values()) {
-            step(participant, fixedDeltaSeconds);
+            // One credit per Host tick bounds sustained movement to 60 Hz while
+            // saved credits let delayed UDP bundles catch up in validated steps.
+            participant.savedInputSteps = Math.min(MAX_SAVED_INPUT_STEPS,
+                    participant.savedInputSteps + 1);
+            boolean processedInput = false;
+            while(participant.savedInputSteps > 0) {
+                QueuedInput queued = nextInput(participant, hostTick);
+                if(queued == null) break;
+                MovementInputFrame previous = participant.input;
+                participant.input = queued.input;
+                participant.lastProcessedInputTick = queued.input.getInputTick();
+                if(queued.input.isJump()
+                        && (previous == null || !previous.isJump())) {
+                    participant.jumpQueued = true;
+                }
+                step(participant, fixedDeltaSeconds);
+                participant.savedInputSteps--;
+                processedInput = true;
+            }
+            if(processedInput && participant.pendingInputs.isEmpty()) {
+                participant.savedInputSteps = Math.min(MAX_RETAINED_INPUT_STEPS,
+                        participant.savedInputSteps);
+            }
         }
     }
 
@@ -91,6 +115,19 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
     public synchronized MovementEntityState getState(ParticipantId participantId) {
         MutableMovement participant = participants.get(participantId);
         return participant == null ? null : participant.snapshot();
+    }
+
+    private QueuedInput nextInput(MutableMovement participant, long hostTick) {
+        long expectedTick = participant.lastProcessedInputTick + 1L;
+        QueuedInput expected = participant.pendingInputs.remove(expectedTick);
+        if(expected != null) return expected;
+        Map.Entry<Long, QueuedInput> first = participant.pendingInputs.firstEntry();
+        // Briefly hold newer input for reordering, then skip a permanently lost gap.
+        if(first == null
+                || hostTick - first.getValue().receivedHostTick
+                        < INPUT_REORDER_GRACE_TICKS) return null;
+        participant.pendingInputs.remove(first.getKey());
+        return first.getValue();
     }
 
     private void step(MutableMovement participant, float deltaSeconds) {
@@ -179,8 +216,11 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
 
     private static final class MutableMovement {
         private final MovementEntityDescriptor descriptor;
+        private final TreeMap<Long, QueuedInput> pendingInputs =
+                new TreeMap<Long, QueuedInput>();
         private MovementInputFrame input;
         private long lastProcessedInputTick;
+        private int savedInputSteps;
         private float x;
         private float y;
         private float z;
@@ -204,6 +244,16 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
             return new MovementEntityState(descriptor.getEntityId(),
                     descriptor.getLifecycleSequence(), lastProcessedInputTick,
                     x, y, z, velocityX, velocityY, velocityZ, rotation, movementState);
+        }
+    }
+
+    private static final class QueuedInput {
+        private final MovementInputFrame input;
+        private final long receivedHostTick;
+
+        private QueuedInput(MovementInputFrame input, long receivedHostTick) {
+            this.input = input;
+            this.receivedHostTick = receivedHostTick;
         }
     }
 }

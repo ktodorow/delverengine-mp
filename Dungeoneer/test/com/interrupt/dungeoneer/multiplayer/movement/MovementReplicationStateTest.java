@@ -35,6 +35,9 @@ public class MovementReplicationStateTest {
         assertTrue(replication.applySnapshot(snapshot(5L, state(entityId, 3L, 5f))));
         assertEquals(5f, replication.getSnapshots().get(2)
                 .getEntity(entityId).getX(), 0f);
+        assertFalse(replication.applySnapshot(new MovementSnapshot(6L, 14L,
+                Arrays.asList(state(entityId, 3L, 6f)))));
+        assertEquals(15L, replication.getLatestSnapshotHostTick());
     }
 
     @Test

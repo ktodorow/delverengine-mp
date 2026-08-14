@@ -3,8 +3,8 @@ package com.interrupt.dungeoneer.multiplayer.network;
 /** Stable, explicitly bounded protocol constants for Direct Connect session traffic. */
 public final class DirectConnectProtocol {
     public static final int MAGIC = 0x444D5031; // DMP1
-    public static final int VERSION = 3;
-    public static final String BUILD_ID = "mp-v108-prototype-movement-3";
+    public static final int VERSION = 4;
+    public static final String BUILD_ID = "mp-v108-prototype-smooth-movement-4";
     public static final int DEFAULT_PORT = 37777;
 
     public static final int MAX_TCP_FRAME_BYTES = 1024;
@@ -20,7 +20,7 @@ public final class DirectConnectProtocol {
     public static final int MAX_AVATAR_ID_BYTES = 32;
     public static final int MAX_FLOOR_ID_BYTES = 128;
     public static final int MAX_REASON_BYTES = 256;
-    public static final int MAX_INPUT_FRAMES = 8;
+    public static final int MAX_INPUT_FRAMES = 16;
     public static final int MAX_MOVEMENT_ENTITIES = 4;
 
     public static final String OPEN_SOURCE_TEST_CONTENT_FORMAT =

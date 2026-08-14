@@ -56,6 +56,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Direct Connect client whose private Launcher Identity claims one persistent Campaign Slot. */
 public final class DirectConnectClient implements DirectConnectPeer {
+    private static final int MAX_PENDING_MOVEMENT_INPUTS =
+            DirectConnectProtocol.MAX_INPUT_FRAMES * 4;
+
     interface MovementDatagramPolicy {
         int copiesForBundle(List<MovementInputFrame> inputs);
     }
@@ -517,7 +520,9 @@ public final class DirectConnectClient implements DirectConnectPeer {
                 || tcpChannel == null || !tcpChannel.isActive()) return;
 
         pendingMovementInputs.add(input);
-        while(pendingMovementInputs.size() > 64) pendingMovementInputs.remove(0);
+        while(pendingMovementInputs.size() > MAX_PENDING_MOVEMENT_INPUTS) {
+            pendingMovementInputs.remove(0);
+        }
         int first = Math.max(0, pendingMovementInputs.size()
                 - DirectConnectProtocol.MAX_INPUT_FRAMES);
         List<MovementInputFrame> bundle = new ArrayList<MovementInputFrame>(

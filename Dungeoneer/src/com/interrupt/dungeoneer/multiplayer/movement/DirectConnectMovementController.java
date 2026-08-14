@@ -4,7 +4,9 @@ import com.interrupt.dungeoneer.GameInput;
 import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
-import com.interrupt.dungeoneer.multiplayer.movement.MovementPredictionBuffer.PredictedPosition;
+import com.interrupt.dungeoneer.multiplayer.movement.LocalMovementReconciler.CorrectionStep;
+import com.interrupt.dungeoneer.multiplayer.movement.LocalMovementReconciler.Reconciliation;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshotInterpolator.InterpolatedMovementState;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
 
@@ -16,12 +18,11 @@ import java.util.Map;
 /** Render-thread adapter for local prediction, reconciliation, and remote interpolation. */
 public final class DirectConnectMovementController {
     private static final float INPUT_STEP_SECONDS = 1f / 60f;
-    private static final float SNAP_DISTANCE = 1.25f;
-    private static final float CORRECTION_RATE = 12f;
-    private static final long INTERPOLATION_DELAY_TICKS = 6L;
 
     private final DirectConnectPeer peer;
-    private final MovementPredictionBuffer predictions = new MovementPredictionBuffer();
+    private final LocalMovementReconciler reconciler = new LocalMovementReconciler();
+    private final MovementSnapshotInterpolator interpolator =
+            new MovementSnapshotInterpolator();
     private final Map<NetworkEntityId, RemoteAvatar> remoteAvatars =
             new LinkedHashMap<NetworkEntityId, RemoteAvatar>();
     private long nextInputTick = 1L;
@@ -30,9 +31,6 @@ public final class DirectConnectMovementController {
     private float unsampledDeltaX;
     private float unsampledDeltaY;
     private float unsampledDeltaZ;
-    private float correctionX;
-    private float correctionY;
-    private float correctionZ;
     private float observedX;
     private float observedY;
     private float observedZ;
@@ -57,6 +55,8 @@ public final class DirectConnectMovementController {
         player.ya = authoritative.getVelocityY();
         player.za = authoritative.getVelocityZ();
         player.rot = authoritative.getRotation();
+        reconciler.reset();
+        interpolator.reset();
         lastReconciledSnapshot = latest.getSequence();
         observedX = player.x;
         observedY = player.y;
@@ -75,7 +75,7 @@ public final class DirectConnectMovementController {
         sampleInputs(player, input, boundedDelta);
         reconcileLocalPlayer(player);
         applyCorrection(player, boundedDelta);
-        updateRemoteAvatars(game.level);
+        updateRemoteAvatars(game.level, boundedDelta);
 
         observedX = player.x;
         observedY = player.y;
@@ -135,7 +135,7 @@ public final class DirectConnectMovementController {
 
         for(int i = 0; i < samples; i++) {
             long tick = nextInputTick++;
-            predictions.add(tick, predictionX, predictionY, predictionZ);
+            reconciler.addPrediction(tick, predictionX, predictionY, predictionZ);
             peer.submitMovementInput(new MovementInputFrame(tick, forward, strafe,
                     player.rot, jump));
         }
@@ -151,44 +151,31 @@ public final class DirectConnectMovementController {
         if(authoritative == null) return;
         lastReconciledSnapshot = latest.getSequence();
 
-        PredictedPosition replayed = predictions.replay(authoritative);
-        float errorX = replayed.getX() - player.x;
-        float errorY = replayed.getY() - player.y;
-        float errorZ = replayed.getZ() - player.z;
-        float errorSquared = errorX * errorX + errorY * errorY + errorZ * errorZ;
-        if(errorSquared >= SNAP_DISTANCE * SNAP_DISTANCE) {
-            player.setPosition(replayed.getX(), replayed.getY(), replayed.getZ());
+        Reconciliation result = reconciler.reconcile(authoritative,
+                player.x, player.y, player.z);
+        if(result.isSnapRequired()) {
+            player.setPosition(result.getTargetX(), result.getTargetY(),
+                    result.getTargetZ());
             player.xa = 0f;
             player.ya = 0f;
             player.za = 0f;
-            correctionX = correctionY = correctionZ = 0f;
-        }
-        else {
-            correctionX = errorX;
-            correctionY = errorY;
-            correctionZ = errorZ;
         }
     }
 
     private void applyCorrection(Player player, float deltaSeconds) {
-        float blend = Math.min(1f, CORRECTION_RATE * deltaSeconds);
-        float appliedX = correctionX * blend;
-        float appliedY = correctionY * blend;
-        float appliedZ = correctionZ * blend;
-        player.x += appliedX;
-        player.y += appliedY;
-        player.z += appliedZ;
-        correctionX -= appliedX;
-        correctionY -= appliedY;
-        correctionZ -= appliedZ;
+        CorrectionStep correction = reconciler.advance(deltaSeconds);
+        player.x += correction.getX();
+        player.y += correction.getY();
+        player.z += correction.getZ();
     }
 
     private void attachToLevel(Level level) {
         detachRemoteAvatars();
+        interpolator.reset();
         attachedLevel = level;
     }
 
-    private void updateRemoteAvatars(Level level) {
+    private void updateRemoteAvatars(Level level, float deltaSeconds) {
         NetworkEntityId localId = peer.getLocalMovementEntityId();
         List<MovementEntityDescriptor> descriptors = peer.getMovementEntities();
         Map<NetworkEntityId, MovementEntityDescriptor> active =
@@ -213,38 +200,15 @@ public final class DirectConnectMovementController {
 
         List<MovementSnapshot> snapshots = peer.getMovementSnapshots();
         if(snapshots.isEmpty()) return;
-        long targetTick = Math.max(1L,
-                snapshots.get(snapshots.size() - 1).getHostTick()
-                        - INTERPOLATION_DELAY_TICKS);
-        MovementSnapshot before = null;
-        MovementSnapshot after = null;
-        for(MovementSnapshot snapshot : snapshots) {
-            if(snapshot.getHostTick() <= targetTick) before = snapshot;
-            if(snapshot.getHostTick() >= targetTick) {
-                after = snapshot;
-                break;
-            }
-        }
-        if(before == null) before = snapshots.get(0);
-        if(after == null) after = snapshots.get(snapshots.size() - 1);
-        float blend = before == after ? 1f : (float)(targetTick - before.getHostTick())
-                / (float)(after.getHostTick() - before.getHostTick());
-        blend = Math.max(0f, Math.min(1f, blend));
+        interpolator.advance(snapshots, deltaSeconds);
 
         for(Map.Entry<NetworkEntityId, RemoteAvatar> entry : remoteAvatars.entrySet()) {
-            MovementEntityState first = before.getEntity(entry.getKey());
-            MovementEntityState second = after.getEntity(entry.getKey());
-            if(first == null) first = second;
-            if(second == null) second = first;
-            if(first == null) continue;
+            InterpolatedMovementState state = interpolator.sample(entry.getKey(), snapshots);
+            if(state == null) continue;
             entry.getValue().applyNetworkState(
-                    lerp(first.getX(), second.getX(), blend),
-                    lerp(first.getY(), second.getY(), blend),
-                    lerp(first.getZ(), second.getZ(), blend),
-                    lerp(first.getVelocityX(), second.getVelocityX(), blend),
-                    lerp(first.getVelocityY(), second.getVelocityY(), blend),
-                    lerp(first.getVelocityZ(), second.getVelocityZ(), blend),
-                    second.getMovementState());
+                    state.getX(), state.getY(), state.getZ(),
+                    state.getVelocityX(), state.getVelocityY(), state.getVelocityZ(),
+                    state.getMovementState());
         }
     }
 
@@ -256,9 +220,5 @@ public final class DirectConnectMovementController {
             }
         }
         remoteAvatars.clear();
-    }
-
-    private static float lerp(float first, float second, float amount) {
-        return first + (second - first) * amount;
     }
 }

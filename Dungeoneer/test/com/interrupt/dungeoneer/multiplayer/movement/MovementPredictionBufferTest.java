@@ -4,6 +4,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementPredictionBuffer.Pr
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 public class MovementPredictionBufferTest {
     @Test
@@ -20,5 +21,17 @@ public class MovementPredictionBufferTest {
         assertEquals(13f, replayed.getX(), 0f);
         assertEquals(5f, replayed.getY(), 0f);
         assertEquals(1, predictions.size());
+    }
+
+    @Test
+    public void rejectsNonFinitePredictedDisplacement() {
+        MovementPredictionBuffer predictions = new MovementPredictionBuffer();
+        try {
+            predictions.add(1L, Float.NaN, 0f, 0f);
+            fail("Expected non-finite prediction to be rejected.");
+        }
+        catch(IllegalArgumentException expected) {
+            assertEquals(0, predictions.size());
+        }
     }
 }

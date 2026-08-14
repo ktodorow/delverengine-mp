@@ -19,7 +19,9 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -116,6 +118,21 @@ public class DirectConnectWireTest {
         assertEquals(9L, snapshot.snapshot.getHostTick());
         assertEquals(8L, snapshot.snapshot.getEntity(new NetworkEntityId(2L))
                 .getLastProcessedInputTick());
+    }
+
+    @Test
+    public void fullLatencyRecoveryInputWindowFitsOneDatagram() throws Exception {
+        List<MovementInputFrame> frames = new ArrayList<MovementInputFrame>();
+        for(int tick = 1; tick <= DirectConnectProtocol.MAX_INPUT_FRAMES; tick++) {
+            frames.add(new MovementInputFrame(tick, 1f, 0f, 0f, false));
+        }
+
+        DirectConnectWire.MovementInputs decoded =
+                (DirectConnectWire.MovementInputs)roundTrip(
+                        new DirectConnectWire.MovementInputs("session", 42L, frames));
+
+        assertEquals(16, decoded.inputs.size());
+        assertEquals(16L, decoded.inputs.get(15).getInputTick());
     }
 
     @Test

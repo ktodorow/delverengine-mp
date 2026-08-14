@@ -18,6 +18,7 @@ public final class MovementReplicationState {
     private final List<MovementSnapshot> snapshots = new ArrayList<MovementSnapshot>();
     private long latestLifecycleSequence;
     private long latestSnapshotSequence;
+    private long latestSnapshotHostTick;
 
     public synchronized boolean applySpawn(MovementEntityDescriptor descriptor) {
         if(descriptor == null) throw new IllegalArgumentException("Entity spawn cannot be null.");
@@ -51,7 +52,8 @@ public final class MovementReplicationState {
 
     public synchronized boolean applySnapshot(MovementSnapshot snapshot) {
         if(snapshot == null) throw new IllegalArgumentException("Movement snapshot cannot be null.");
-        if(snapshot.getSequence() <= latestSnapshotSequence) return false;
+        if(snapshot.getSequence() <= latestSnapshotSequence
+                || snapshot.getHostTick() <= latestSnapshotHostTick) return false;
         List<MovementEntityState> accepted = new ArrayList<MovementEntityState>();
         for(MovementEntityState state : snapshot.getEntities()) {
             MovementEntityDescriptor descriptor = entities.get(state.getEntityId());
@@ -65,6 +67,7 @@ public final class MovementReplicationState {
         snapshots.add(filtered);
         while(snapshots.size() > MAX_SNAPSHOT_HISTORY) snapshots.remove(0);
         latestSnapshotSequence = snapshot.getSequence();
+        latestSnapshotHostTick = snapshot.getHostTick();
         return true;
     }
 
@@ -95,5 +98,9 @@ public final class MovementReplicationState {
 
     public synchronized long getLatestSnapshotSequence() {
         return latestSnapshotSequence;
+    }
+
+    public synchronized long getLatestSnapshotHostTick() {
+        return latestSnapshotHostTick;
     }
 }
