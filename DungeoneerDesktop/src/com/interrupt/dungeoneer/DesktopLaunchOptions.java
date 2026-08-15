@@ -14,6 +14,9 @@ final class DesktopLaunchOptions {
     File ownedCopy;
     boolean directHost;
     String directConnectAddress;
+    boolean discoverPrivateSessions;
+    String diagnoseDirectConnectAddress;
+    boolean networkHelp;
     int sessionPort = com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.DEFAULT_PORT;
     File profileRoot;
     int campaignCapacity = 2;
@@ -82,6 +85,27 @@ final class DesktopLaunchOptions {
                 }
                 options.directConnectAddress = requireValue(args[++i],
                         "Direct Connect address cannot be empty.");
+            }
+            else if(argument.equalsIgnoreCase("--discover-private-sessions")
+                    || argument.equalsIgnoreCase("--discover-lan")) {
+                options.discoverPrivateSessions = true;
+            }
+            else if(argument.regionMatches(true, 0, "--diagnose-direct-connect=", 0,
+                    "--diagnose-direct-connect=".length())) {
+                options.diagnoseDirectConnectAddress = requireValue(
+                        argument.substring("--diagnose-direct-connect=".length()),
+                        "Direct Connect diagnostic address cannot be empty.");
+            }
+            else if(argument.equalsIgnoreCase("--diagnose-direct-connect")) {
+                if(i + 1 >= args.length || args[i + 1].startsWith("--")) {
+                    throw new IllegalArgumentException(
+                            "--diagnose-direct-connect requires a Host address.");
+                }
+                options.diagnoseDirectConnectAddress = requireValue(args[++i],
+                        "Direct Connect diagnostic address cannot be empty.");
+            }
+            else if(argument.equalsIgnoreCase("--network-help")) {
+                options.networkHelp = true;
             }
             else if(argument.regionMatches(true, 0, "--session-port=", 0,
                     "--session-port=".length())) {
@@ -183,6 +207,13 @@ final class DesktopLaunchOptions {
             throw new IllegalArgumentException(
                     "Direct Connect cannot be combined with another launch mode.");
         }
+        if(options.hasNetworkUtility()
+                && (options.directHost || options.directConnectAddress != null
+                        || options.openSourceTestLevel || options.ownedTutorial
+                        || options.inspectOwnedCopy)) {
+            throw new IllegalArgumentException(
+                    "Network discovery, diagnostics, or help cannot be combined with a game launch mode.");
+        }
         if(options.directConnectAddress != null && options.campaignCapacitySpecified) {
             throw new IllegalArgumentException("Only Host chooses --campaign-capacity.");
         }
@@ -199,6 +230,10 @@ final class DesktopLaunchOptions {
             new SlotPresentation(options.nickname, options.avatarId);
         }
         return options;
+    }
+
+    boolean hasNetworkUtility() {
+        return discoverPrivateSessions || diagnoseDirectConnectAddress != null || networkHelp;
     }
 
     private static int parsePort(String value) {

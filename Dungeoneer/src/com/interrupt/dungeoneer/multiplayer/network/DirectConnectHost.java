@@ -19,6 +19,8 @@ import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CampaignChallenge;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientDisconnect;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientHello;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.DiscoveryAnnouncement;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.DiscoveryProbe;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.EntityDespawn;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.EntitySpawn;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
@@ -475,6 +477,10 @@ public final class DirectConnectHost implements DirectConnectPeer {
         catch(ProtocolException ignored) {
             return;
         }
+        if(decoded instanceof DiscoveryProbe) {
+            respondToDiscovery((DiscoveryProbe)decoded, packet.sender());
+            return;
+        }
         if(decoded instanceof UdpRegister && !sessionStarted) {
             UdpRegister register = (UdpRegister)decoded;
             if(!sessionId.equals(register.sessionId)) return;
@@ -510,6 +516,22 @@ public final class DirectConnectHost implements DirectConnectPeer {
                 session.submit(new MovementInputCommand(
                         connection.movementDescriptor.getParticipantId(), input));
             }
+        }
+    }
+
+    private void respondToDiscovery(DiscoveryProbe probe, InetSocketAddress recipient) {
+        try {
+            DiscoveryAnnouncement announcement = new DiscoveryAnnouncement(probe.nonce,
+                    DirectConnectProtocol.VERSION, compatibility.getBuildId(),
+                    compatibility.getContentFormat(), compatibility.getContentSha256(),
+                    sessionId, roster.getCampaignId(), boundPort, roster.getCapacity(),
+                    roster.getSlots().size(), !sessionStarted);
+            ByteBuf response = DirectConnectWire.encodeDatagram(udpListener.alloc(),
+                    announcement);
+            udpListener.writeAndFlush(new DatagramPacket(response, recipient));
+        }
+        catch(ProtocolException ignored) {
+            // Host metadata is validated at construction; malformed probes get no reply.
         }
     }
 

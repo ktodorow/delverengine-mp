@@ -80,6 +80,39 @@ public class DesktopLaunchOptionsTest {
                 "generated automatically");
     }
 
+    @Test
+    public void parsesLanDiscoveryDiagnosticsAndManualNetworkHelp() {
+        DesktopLaunchOptions discovery = DesktopLaunchOptions.parse(new String[] {
+                "--discover-private-sessions", "--session-port=41234"
+        });
+        assertTrue(discovery.discoverPrivateSessions);
+        assertTrue(discovery.hasNetworkUtility());
+        assertEquals(41234, discovery.sessionPort);
+
+        DesktopLaunchOptions diagnostics = DesktopLaunchOptions.parse(new String[] {
+                "--diagnose-direct-connect", "friends.example", "--session-port", "41235"
+        });
+        assertEquals("friends.example", diagnostics.diagnoseDirectConnectAddress);
+        assertEquals(41235, diagnostics.sessionPort);
+
+        DesktopLaunchOptions help = DesktopLaunchOptions.parse(
+                new String[] { "--network-help" });
+        assertTrue(help.networkHelp);
+        assertTrue(help.hasNetworkUtility());
+    }
+
+    @Test
+    public void rejectsNetworkUtilityCombinedWithGameLaunch() {
+        assertParseFailure(new String[] {
+                "--discover-private-sessions", "--direct-host"
+        }, "cannot be combined");
+        assertParseFailure(new String[] {
+                "--diagnose-direct-connect=127.0.0.1", "--test-level"
+        }, "cannot be combined");
+        assertParseFailure(new String[] { "--diagnose-direct-connect" },
+                "requires a Host address");
+    }
+
     private void assertParseFailure(String[] arguments, String expected) {
         try {
             DesktopLaunchOptions.parse(arguments);

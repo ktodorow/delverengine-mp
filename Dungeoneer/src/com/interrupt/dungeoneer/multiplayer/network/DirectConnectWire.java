@@ -42,6 +42,8 @@ final class DirectConnectWire {
     private static final int ENTITY_DESPAWN = 13;
     private static final int MOVEMENT_INPUTS = 14;
     private static final int MOVEMENT_SNAPSHOT = 15;
+    private static final int DISCOVERY_PROBE = 16;
+    private static final int DISCOVERY_ANNOUNCEMENT = 17;
 
     private DirectConnectWire() { }
 
@@ -59,7 +61,7 @@ final class DirectConnectWire {
         boolean successful = false;
         try {
             encode(message, output);
-            if(output.readableBytes() > DirectConnectProtocol.MAX_TCP_FRAME_BYTES) {
+            if(output.readableBytes() > DirectConnectProtocol.MAX_UDP_DATAGRAM_BYTES) {
                 throw new ProtocolException("Datagram exceeded protocol size bound.");
             }
             successful = true;
@@ -71,7 +73,7 @@ final class DirectConnectWire {
     }
 
     static Message decodeDatagram(ByteBuf input) throws ProtocolException {
-        if(input.readableBytes() > DirectConnectProtocol.MAX_TCP_FRAME_BYTES) {
+        if(input.readableBytes() > DirectConnectProtocol.MAX_UDP_DATAGRAM_BYTES) {
             throw new ProtocolException("Datagram exceeded protocol size bound.");
         }
         return decode(input);
@@ -81,7 +83,49 @@ final class DirectConnectWire {
         if(message == null) throw new ProtocolException("Wire message cannot be null.");
         output.writeInt(DirectConnectProtocol.MAGIC);
 
-        if(message instanceof ClientHello) {
+        if(message instanceof DiscoveryProbe) {
+            DiscoveryProbe probe = (DiscoveryProbe)message;
+            if(probe.nonce == 0L || probe.protocolVersion < 1) {
+                throw new ProtocolException("Discovery probe identity is invalid.");
+            }
+            output.writeByte(DISCOVERY_PROBE);
+            output.writeLong(probe.nonce);
+            output.writeInt(probe.protocolVersion);
+            writeString(output, probe.buildId, DirectConnectProtocol.MAX_BUILD_ID_BYTES,
+                    "build identity");
+            writeString(output, probe.contentFormat,
+                    DirectConnectProtocol.MAX_CONTENT_FORMAT_BYTES, "content format");
+            writeString(output, probe.contentSha256,
+                    DirectConnectProtocol.MAX_CONTENT_HASH_BYTES, "content hash");
+        }
+        else if(message instanceof DiscoveryAnnouncement) {
+            DiscoveryAnnouncement announcement = (DiscoveryAnnouncement)message;
+            if(announcement.nonce == 0L || announcement.protocolVersion < 1
+                    || announcement.port < 1 || announcement.port > 65535
+                    || announcement.capacity < 2 || announcement.capacity > 4
+                    || announcement.claimedSlots < 1
+                    || announcement.claimedSlots > announcement.capacity) {
+                throw new ProtocolException("Discovery announcement is outside protocol bounds.");
+            }
+            output.writeByte(DISCOVERY_ANNOUNCEMENT);
+            output.writeLong(announcement.nonce);
+            output.writeInt(announcement.protocolVersion);
+            writeString(output, announcement.buildId,
+                    DirectConnectProtocol.MAX_BUILD_ID_BYTES, "build identity");
+            writeString(output, announcement.contentFormat,
+                    DirectConnectProtocol.MAX_CONTENT_FORMAT_BYTES, "content format");
+            writeString(output, announcement.contentSha256,
+                    DirectConnectProtocol.MAX_CONTENT_HASH_BYTES, "content hash");
+            writeString(output, announcement.sessionId,
+                    DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            writeString(output, announcement.campaignId,
+                    DirectConnectProtocol.MAX_CAMPAIGN_ID_BYTES, "campaign identity");
+            output.writeInt(announcement.port);
+            output.writeByte(announcement.capacity);
+            output.writeByte(announcement.claimedSlots);
+            output.writeBoolean(announcement.lobbyOpen);
+        }
+        else if(message instanceof ClientHello) {
             ClientHello hello = (ClientHello)message;
             output.writeByte(CLIENT_HELLO);
             output.writeInt(hello.protocolVersion);
@@ -277,6 +321,56 @@ final class DirectConnectWire {
         int type = input.readUnsignedByte();
         Message message;
         switch(type) {
+            case DISCOVERY_PROBE:
+                requireReadable(input, 12, "discovery probe identity");
+                long probeNonce = input.readLong();
+                int probeProtocol = input.readInt();
+                if(probeNonce == 0L || probeProtocol < 1) {
+                    throw new ProtocolException("Discovery probe identity is invalid.");
+                }
+                message = new DiscoveryProbe(probeNonce, probeProtocol,
+                        readString(input, DirectConnectProtocol.MAX_BUILD_ID_BYTES,
+                                "build identity"),
+                        readString(input, DirectConnectProtocol.MAX_CONTENT_FORMAT_BYTES,
+                                "content format"),
+                        readString(input, DirectConnectProtocol.MAX_CONTENT_HASH_BYTES,
+                                "content hash"));
+                break;
+            case DISCOVERY_ANNOUNCEMENT:
+                requireReadable(input, 12, "discovery announcement identity");
+                long announcementNonce = input.readLong();
+                int announcementProtocol = input.readInt();
+                if(announcementNonce == 0L || announcementProtocol < 1) {
+                    throw new ProtocolException("Discovery announcement identity is invalid.");
+                }
+                String announcementBuild = readString(input,
+                        DirectConnectProtocol.MAX_BUILD_ID_BYTES, "build identity");
+                String announcementFormat = readString(input,
+                        DirectConnectProtocol.MAX_CONTENT_FORMAT_BYTES, "content format");
+                String announcementHash = readString(input,
+                        DirectConnectProtocol.MAX_CONTENT_HASH_BYTES, "content hash");
+                String announcementSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                String announcementCampaign = readString(input,
+                        DirectConnectProtocol.MAX_CAMPAIGN_ID_BYTES, "campaign identity");
+                requireReadable(input, 7, "discovery announcement lobby details");
+                int announcementPort = input.readInt();
+                int announcementCapacity = input.readUnsignedByte();
+                int announcementClaimed = input.readUnsignedByte();
+                boolean announcementLobbyOpen = input.readBoolean();
+                if(announcementPort < 1 || announcementPort > 65535
+                        || announcementCapacity < 2 || announcementCapacity > 4
+                        || announcementClaimed < 1
+                        || announcementClaimed > announcementCapacity) {
+                    throw new ProtocolException(
+                            "Discovery announcement is outside protocol bounds.");
+                }
+                message = new DiscoveryAnnouncement(announcementNonce,
+                        announcementProtocol, announcementBuild, announcementFormat,
+                        announcementHash, announcementSession, announcementCampaign,
+                        announcementPort, announcementCapacity, announcementClaimed,
+                        announcementLobbyOpen);
+                break;
             case CLIENT_HELLO:
                 requireReadable(input, 4, "protocol version");
                 message = new ClientHello(input.readInt(),
@@ -541,6 +635,54 @@ final class DirectConnectWire {
     }
 
     interface Message { }
+
+    static final class DiscoveryProbe implements Message {
+        final long nonce;
+        final int protocolVersion;
+        final String buildId;
+        final String contentFormat;
+        final String contentSha256;
+
+        DiscoveryProbe(long nonce, int protocolVersion, String buildId,
+                String contentFormat, String contentSha256) {
+            this.nonce = nonce;
+            this.protocolVersion = protocolVersion;
+            this.buildId = buildId;
+            this.contentFormat = contentFormat;
+            this.contentSha256 = contentSha256;
+        }
+    }
+
+    static final class DiscoveryAnnouncement implements Message {
+        final long nonce;
+        final int protocolVersion;
+        final String buildId;
+        final String contentFormat;
+        final String contentSha256;
+        final String sessionId;
+        final String campaignId;
+        final int port;
+        final int capacity;
+        final int claimedSlots;
+        final boolean lobbyOpen;
+
+        DiscoveryAnnouncement(long nonce, int protocolVersion, String buildId,
+                String contentFormat, String contentSha256, String sessionId,
+                String campaignId, int port, int capacity, int claimedSlots,
+                boolean lobbyOpen) {
+            this.nonce = nonce;
+            this.protocolVersion = protocolVersion;
+            this.buildId = buildId;
+            this.contentFormat = contentFormat;
+            this.contentSha256 = contentSha256;
+            this.sessionId = sessionId;
+            this.campaignId = campaignId;
+            this.port = port;
+            this.capacity = capacity;
+            this.claimedSlots = claimedSlots;
+            this.lobbyOpen = lobbyOpen;
+        }
+    }
 
     static final class ClientHello implements Message {
         final int protocolVersion;

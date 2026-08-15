@@ -61,6 +61,37 @@ task runDirectClient(dependsOn: classes, type: JavaExec) {
     if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
 }
 
+task discoverPrivateSessions(dependsOn: classes, type: JavaExec) {
+    group = "application"
+    description = "Lists compatible Direct Connect Private Sessions discovered on the LAN."
+    main = project.mainClassName
+    classpath = sourceSets.main.runtimeClasspath
+    workingDir = project.assetsDir
+    args "--discover-private-sessions"
+    if(project.hasProperty("sessionPort")) args "--session-port=" + project.property("sessionPort")
+}
+
+task diagnoseDirectConnect(dependsOn: classes, type: JavaExec) {
+    group = "verification"
+    description = "Reports TCP and UDP reachability separately for one Direct Connect Host."
+    main = project.mainClassName
+    classpath = sourceSets.main.runtimeClasspath
+    workingDir = project.assetsDir
+    args "--diagnose-direct-connect=" + (project.hasProperty("sessionAddress")
+            ? project.property("sessionAddress") : "127.0.0.1")
+    if(project.hasProperty("sessionPort")) args "--session-port=" + project.property("sessionPort")
+}
+
+task directConnectNetworkHelp(dependsOn: classes, type: JavaExec) {
+    group = "help"
+    description = "Prints manual Windows firewall, forwarding, and CGNAT guidance."
+    main = project.mainClassName
+    classpath = sourceSets.main.runtimeClasspath
+    workingDir = project.assetsDir
+    args "--network-help"
+    if(project.hasProperty("sessionPort")) args "--session-port=" + project.property("sessionPort")
+}
+
 task runOwnedTutorial(dependsOn: classes, type: JavaExec) {
     group = "application"
     description = "Validates an external Delver v1.08 archive and launches its tutorial read-only."
@@ -193,4 +224,38 @@ task verifyReleaseArtifacts(type: JavaExec, dependsOn: [classes, dist, verifyOpe
 task verifyOpenSourceDist(dependsOn: verifyReleaseArtifacts) {
     group = "verification"
     description = "Compatibility alias for the complete release artifact audit."
+}
+
+// Windows keeps loaded JARs open. Each JavaExec receives a unique core copy so a
+// second Gradle invocation can rebuild the canonical JAR while a game keeps running.
+tasks.withType(JavaExec).all { JavaExec javaExec ->
+    def coreJarTask = project(":Dungeoneer").tasks.getByName("jar")
+    File coreJar = coreJarTask.archivePath
+
+    javaExec.doFirst {
+        File isolatedDirectory = new File(buildDir, "isolated-runtime/"
+                + javaExec.name + "-" + UUID.randomUUID().toString())
+        javaExec.ext.isolatedCoreRuntimeDirectory = isolatedDirectory
+        if(!isolatedDirectory.mkdirs() && !isolatedDirectory.isDirectory()) {
+            throw new GradleException(
+                    "Could not create isolated Java runtime directory: "
+                            + isolatedDirectory)
+        }
+        copy {
+            from coreJar
+            into isolatedDirectory
+        }
+        File isolatedCoreJar = new File(isolatedDirectory, coreJar.name)
+        javaExec.classpath = javaExec.classpath - files(coreJar) + files(isolatedCoreJar)
+    }
+
+    Task cleanupRuntime = tasks.create(
+            javaExec.name + "IsolatedRuntimeCleanup") {
+        doLast {
+            if(javaExec.ext.has("isolatedCoreRuntimeDirectory")) {
+                delete javaExec.ext.isolatedCoreRuntimeDirectory
+            }
+        }
+    }
+    javaExec.finalizedBy cleanupRuntime
 }

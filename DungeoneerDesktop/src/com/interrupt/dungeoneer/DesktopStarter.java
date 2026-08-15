@@ -19,10 +19,21 @@ import com.interrupt.dungeoneer.owned.OwnedGameCopyValidationException;
 
 import javax.swing.JOptionPane;
 import java.awt.GraphicsEnvironment;
+import java.io.IOException;
 
 public class DesktopStarter {
     public static void main(String[] args) {
         DesktopLaunchOptions launchOptions = DesktopLaunchOptions.parse(args);
+        if(launchOptions.hasNetworkUtility()) {
+            try {
+                DesktopNetworkLauncher.run(launchOptions, System.out);
+                return;
+            }
+            catch(IOException ex) {
+                System.err.println("Network launcher failed: " + ex.getMessage());
+                throw new IllegalStateException("Network launcher failed.", ex);
+            }
+        }
         boolean directConnect = launchOptions.directHost
                 || launchOptions.directConnectAddress != null;
         LauncherIdentity launcherIdentity = null;

@@ -90,6 +90,37 @@ public class DirectConnectWireTest {
     }
 
     @Test
+    public void boundedDiscoveryProbeAndAnnouncementRoundTrip() throws Exception {
+        DirectConnectCompatibility compatibility =
+                DirectConnectCompatibility.forOpenSourceTestFloor(
+                        "floor".getBytes(StandardCharsets.UTF_8));
+        DirectConnectWire.DiscoveryProbe probe =
+                (DirectConnectWire.DiscoveryProbe)roundTrip(
+                        new DirectConnectWire.DiscoveryProbe(42L,
+                                DirectConnectProtocol.VERSION,
+                                compatibility.getBuildId(),
+                                compatibility.getContentFormat(),
+                                compatibility.getContentSha256()));
+        assertEquals(42L, probe.nonce);
+        assertEquals(DirectConnectProtocol.VERSION, probe.protocolVersion);
+        assertEquals(compatibility.getContentSha256(), probe.contentSha256);
+
+        DirectConnectWire.DiscoveryAnnouncement announcement =
+                (DirectConnectWire.DiscoveryAnnouncement)roundTrip(
+                        new DirectConnectWire.DiscoveryAnnouncement(42L,
+                                DirectConnectProtocol.VERSION,
+                                compatibility.getBuildId(),
+                                compatibility.getContentFormat(),
+                                compatibility.getContentSha256(), "session", "friends",
+                                37777, 4, 2, true));
+        assertEquals("friends", announcement.campaignId);
+        assertEquals(37777, announcement.port);
+        assertEquals(4, announcement.capacity);
+        assertEquals(2, announcement.claimedSlots);
+        assertTrue(announcement.lobbyOpen);
+    }
+
+    @Test
     public void boundedLifecycleInputsAndSnapshotsRoundTrip() throws Exception {
         MovementEntityDescriptor descriptor = new MovementEntityDescriptor(1L,
                 new NetworkEntityId(2L), new ParticipantId("campaign-slot-2"),

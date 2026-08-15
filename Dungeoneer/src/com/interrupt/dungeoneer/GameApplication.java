@@ -20,16 +20,14 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
+import com.interrupt.dungeoneer.multiplayer.network.OpenSourceTestCompatibility;
 import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
 import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.interrupt.dungeoneer.screens.*;
 import com.interrupt.utils.JsonUtil;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeSet;
+import java.io.IOException;
 
 public class GameApplication extends Game {
 
@@ -181,41 +179,24 @@ public class GameApplication extends Game {
     }
 
     private DirectConnectCompatibility createOpenSourceCompatibility() {
-        String index = Gdx.files.internal("packaged_files.txt").readString("UTF-8");
-        Set<String> indexedPaths = new TreeSet<String>();
-        for(String line : index.split("\\r?\\n")) {
-            String path = line.trim();
-            if(path.isEmpty() || path.startsWith("#") || path.equals("./")) continue;
-            if(path.startsWith("./")) path = path.substring(2);
-            if(path.equals("packaged_files.txt") || path.equals("save")
-                    || path.startsWith("save/")) continue;
-            if(path.startsWith("/") || path.contains("\\") || path.contains("../")) {
-                throw new IllegalStateException(
-                        "Open-source asset index contains unsafe path: " + path);
-            }
-            if(!indexedPaths.add(path)) {
-                throw new IllegalStateException(
-                        "Open-source asset index contains duplicate path: " + path);
-            }
-        }
+        final String index = Gdx.files.internal("packaged_files.txt").readString("UTF-8");
+        try {
+            return OpenSourceTestCompatibility.fromPackagedIndex(index,
+                    new OpenSourceTestCompatibility.AssetSource() {
+                        @Override
+                        public boolean exists(String path) {
+                            return Gdx.files.internal(path).exists();
+                        }
 
-        Map<String, byte[]> assets = new LinkedHashMap<String, byte[]>();
-        for(String path : indexedPaths) {
-            boolean directory = false;
-            for(String candidate : indexedPaths) {
-                if(candidate.startsWith(path + "/")) {
-                    directory = true;
-                    break;
-                }
-            }
-            if(directory) continue;
-            if(!Gdx.files.internal(path).exists()) {
-                throw new IllegalStateException(
-                        "Open-source asset index references missing file: " + path);
-            }
-            assets.put(path, Gdx.files.internal(path).readBytes());
+                        @Override
+                        public byte[] read(String path) {
+                            return Gdx.files.internal(path).readBytes();
+                        }
+                    });
         }
-        return DirectConnectCompatibility.forNormalizedOpenSourceAssets(assets);
+        catch(IOException ex) {
+            throw new IllegalStateException(ex.getMessage(), ex);
+        }
     }
 
     public void enterDirectConnectTestFloor() {

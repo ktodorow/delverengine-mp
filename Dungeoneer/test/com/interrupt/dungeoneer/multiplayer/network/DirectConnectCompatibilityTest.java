@@ -54,6 +54,33 @@ public class DirectConnectCompatibilityTest {
                         .getContentIdentity());
     }
 
+    @Test
+    public void packagedIndexProducesSameIdentityForGameAndLauncherSources()
+            throws Exception {
+        final Map<String, byte[]> assets = new LinkedHashMap<String, byte[]>();
+        assets.put("data/game.dat", bytes("game"));
+        assets.put("levels/test-level.bin", bytes("floor"));
+        String index = "# generated\n./\n./data\n./data/game.dat\n"
+                + "./levels\n./levels/test-level.bin\n./save\n./save/private.dat\n";
+
+        DirectConnectCompatibility indexed =
+                OpenSourceTestCompatibility.fromPackagedIndex(index,
+                        new OpenSourceTestCompatibility.AssetSource() {
+                            @Override
+                            public boolean exists(String path) {
+                                return assets.containsKey(path);
+                            }
+
+                            @Override
+                            public byte[] read(String path) {
+                                return assets.get(path);
+                            }
+                        });
+
+        assertEquals(DirectConnectCompatibility.forNormalizedOpenSourceAssets(assets)
+                .getContentIdentity(), indexed.getContentIdentity());
+    }
+
     private byte[] bytes(String value) {
         return value.getBytes(StandardCharsets.UTF_8);
     }

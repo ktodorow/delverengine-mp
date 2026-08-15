@@ -71,6 +71,28 @@ Run bounded-codec and live loopback coverage without graphics:
 .\gradlew.bat Dungeoneer:test --tests "com.interrupt.dungeoneer.multiplayer.network.*" --no-daemon
 ```
 
+Discover exact protocol/build/content-compatible Private Sessions on LAN. Discovery uses bounded UDP probes on same configurable numeric port as session traffic:
+
+```powershell
+.\gradlew.bat DungeoneerDesktop:discoverPrivateSessions --% -PsessionPort=37777 --no-daemon
+```
+
+Probe an explicit Host address. TCP and UDP results are reported independently; UDP is marked reachable only after current Delver Private Session reply:
+
+```powershell
+.\gradlew.bat DungeoneerDesktop:diagnoseDirectConnect --% -PsessionAddress=192.168.1.50 -PsessionPort=37777 --no-daemon
+```
+
+Print setup guidance without probing:
+
+```powershell
+.\gradlew.bat DungeoneerDesktop:directConnectNetworkHelp --% -PsessionPort=37777 --no-daemon
+```
+
+On Host PC, use trusted Windows Private network profile. If blocked, manually open **Windows Security > Firewall & network protection > Allow an app through firewall** and allow Delver Multiplayer, or development Java runtime, on Private networks. Prefer app exception over permanently open port and never disable firewall. Microsoft documents [network profiles and app exceptions](https://support.microsoft.com/en-us/windows/firewall-and-network-protection-in-the-windows-security-app-ec0844f7-aebd-0583-67fe-601ecf5d774f) and [why app exceptions are safer than open ports](https://support.microsoft.com/en-us/windows/security/firewall/risks-of-allowing-apps-through-windows-firewall).
+
+For internet Direct Connect, manually forward both TCP and UDP `37777`, or selected port, to Host PC. Router WAN address that differs from public address, is private, or falls in CGNAT shared range [`100.64.0.0/10`](https://www.rfc-editor.org/rfc/rfc6598) indicates another NAT layer may exist. Double NAT needs forwarding at both routers; ISP-controlled CGNAT makes ordinary forwarding impossible. Ask ISP for public address or use trusted private-network overlay/VPN tooling. Launcher never elevates, edits firewall rules, configures routers, invokes UPnP/NAT-PMP, or disables security controls.
+
 ### Owned v1.08 tutorial
 
 Owned Game Copy remains outside checkout and build output. Launcher can detect common Steam or GOG locations, browse to `delver.jar`, or accept explicit path. It hashes sorted whitelisted asset paths and bytes into normalized content identity before mounting approved data read-only. ZIP order, timestamps, compression, classes, native libraries, Steam files, JAR metadata, mods, and original saves do not affect identity and are never mounted. Unsafe archive paths reject entire copy.
