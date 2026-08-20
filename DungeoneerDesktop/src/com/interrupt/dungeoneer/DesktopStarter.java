@@ -9,6 +9,7 @@ import com.interrupt.dungeoneer.game.Options;
 import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.IdentityRecoveryFile;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentityStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.ProfileReconnectTokenStore;
@@ -24,6 +25,21 @@ import java.io.IOException;
 public class DesktopStarter {
     public static void main(String[] args) {
         DesktopLaunchOptions launchOptions = DesktopLaunchOptions.parse(args);
+        if(launchOptions.hasIdentityRecoveryUtility()) {
+            if(launchOptions.profileRoot == null) MultiplayerProfile.initializeDefault();
+            else MultiplayerProfile.initialize(launchOptions.profileRoot);
+            if(launchOptions.exportIdentityRecovery != null) {
+                IdentityRecoveryFile.exportCurrentProfile(launchOptions.exportIdentityRecovery);
+                System.out.println("Identity Recovery File exported: "
+                        + launchOptions.exportIdentityRecovery.getAbsolutePath());
+            }
+            else {
+                IdentityRecoveryFile.importIntoCurrentProfile(launchOptions.importIdentityRecovery);
+                System.out.println("Identity Recovery File imported into profile: "
+                        + MultiplayerProfile.getRoot().getAbsolutePath());
+            }
+            return;
+        }
         if(launchOptions.hasNetworkUtility()) {
             try {
                 DesktopNetworkLauncher.run(launchOptions, System.out);

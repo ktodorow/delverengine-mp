@@ -19,7 +19,9 @@ public final class CampaignRoster {
         SLOT_OCCUPIED,
         RECONNECT_DENIED,
         NICKNAME_TAKEN,
-        AVATAR_UNAVAILABLE
+        AVATAR_UNAVAILABLE,
+        RELINK_REQUIRED,
+        RELINK_DENIED
     }
 
     public static final class ClaimOutcome {
@@ -98,6 +100,13 @@ public final class CampaignRoster {
                     "Returning Launcher Identity reclaimed Campaign Slot " + updated.getNumber() + ".");
         }
 
+        CampaignSlot requestedExisting = request.getRequestedSlot() == 0 ? null
+                : getSlot(request.getRequestedSlot());
+        if(requestedExisting != null && request.getRequestedSlot() > 1
+                && request.getReconnectToken() == null) {
+            return outcome(ClaimStatus.RELINK_REQUIRED, null,
+                    "Requested occupied Campaign Slot requires explicit trusted Host relink.");
+        }
         if(slots.size() >= capacity) {
             return outcome(ClaimStatus.CAMPAIGN_FULL, null,
                     "Campaign Roster is full; unknown Launcher Identity cannot claim a slot.");
@@ -128,6 +137,34 @@ public final class CampaignRoster {
         sortSlots();
         return outcome(ClaimStatus.ADMITTED, approved,
                 "Host approved Campaign Slot " + approved.getNumber() + ".");
+    }
+
+    /**
+     * Replaces only a non-Host slot's private identity after a trusted recovery loss.
+     * Character and slot number remain intact; old credentials become unusable immediately.
+     */
+    public synchronized ClaimOutcome relink(SlotClaimRequest request, SecureRandom random) {
+        if(request == null) throw new IllegalArgumentException("Relink request cannot be null.");
+        if(random == null) throw new IllegalArgumentException("Secure random source cannot be null.");
+        int requestedSlot = request.getRequestedSlot();
+        CampaignSlot existing = getSlot(requestedSlot);
+        if(requestedSlot < 2 || existing == null) {
+            return outcome(ClaimStatus.RELINK_DENIED, null,
+                    "Host can relink only an occupied non-Host Campaign Slot.");
+        }
+        if(findSlot(request.getLauncherIdentity()) != null) {
+            return outcome(ClaimStatus.RELINK_DENIED, null,
+                    "Replacement Launcher Identity already owns a Campaign Slot.");
+        }
+        ClaimOutcome presentation = validatePresentation(request.getPresentation(), existing);
+        if(presentation != null) return presentation;
+
+        String token = nextUniqueToken(random);
+        CampaignSlot relinked = existing.withOwnership(request.getLauncherIdentity(), token,
+                request.getPresentation());
+        replace(existing, relinked);
+        return outcome(ClaimStatus.ADMITTED, relinked,
+                "Host explicitly re-linked Campaign Slot " + relinked.getNumber() + ".");
     }
 
     public synchronized void updateHostPresentation(LauncherIdentity hostIdentity,
@@ -217,6 +254,22 @@ public final class CampaignRoster {
         }
         for(int slot = 1; slot <= capacity; slot++) if(getSlot(slot) == null) return slot;
         return 0;
+    }
+
+    private String nextUniqueToken(SecureRandom random) {
+        String token;
+        do {
+            token = PrivateToken.randomHex(random);
+        }
+        while(hasReconnectToken(token));
+        return token;
+    }
+
+    private boolean hasReconnectToken(String token) {
+        for(CampaignSlot slot : slots) {
+            if(tokensEqual(slot.getReconnectToken(), token)) return true;
+        }
+        return false;
     }
 
     private void replace(CampaignSlot existing, CampaignSlot updated) {

@@ -416,9 +416,19 @@ public final class DirectConnectClient implements DirectConnectPeer {
             return;
         }
         PartyMemberStatus local = message.snapshot.getMember(campaignSlot);
-        if(local == null || local.getEntityId() == null
-                || !local.getEntityId().equals(localMovementEntityId)) {
+        if(local == null) {
             fail("Host Party status omitted local Campaign Slot.");
+            return;
+        }
+        if(local.getState() == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.DISCONNECTED) {
+            if(partyStatus == null || message.snapshot.getSequence() > partyStatus.getSequence()) {
+                partyStatus = message.snapshot;
+            }
+            return;
+        }
+        if(local.getEntityId() == null
+                || !local.getEntityId().equals(localMovementEntityId)) {
+            fail("Host Party status omitted local Active Floor Entity.");
             return;
         }
         if(partyStatus == null || message.snapshot.getSequence() > partyStatus.getSequence()) {

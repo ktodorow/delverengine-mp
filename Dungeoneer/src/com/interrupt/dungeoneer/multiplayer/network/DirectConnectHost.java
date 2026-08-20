@@ -55,6 +55,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.RectangularMovementCollisio
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
+import com.interrupt.dungeoneer.multiplayer.participant.ReconnectGrace;
 import com.interrupt.dungeoneer.multiplayer.communication.PartyChatMessage;
 import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 import com.interrupt.dungeoneer.multiplayer.communication.PauseRequest;
@@ -93,6 +94,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class DirectConnectHost implements DirectConnectPeer {
     private static final int SNAPSHOT_INTERVAL_TICKS =
             AuthoritativeHostSession.TICKS_PER_SECOND / 20;
+    public static final long RECONNECT_GRACE_TICKS =
+            AuthoritativeHostSession.TICKS_PER_SECOND * 10L;
 
     private final DirectConnectCompatibility compatibility;
     private final CampaignRoster roster;
@@ -103,10 +106,13 @@ public final class DirectConnectHost implements DirectConnectPeer {
     private final EventLoopGroup acceptGroup = new NioEventLoopGroup(1);
     private final EventLoopGroup networkGroup = new NioEventLoopGroup(2);
     private final SecureRandom random = new SecureRandom();
+    private final long reconnectGraceTicks;
     private final AtomicBoolean closing = new AtomicBoolean(false);
     private final String sessionId;
     private final Map<Channel, RemoteConnection> connections =
             new LinkedHashMap<Channel, RemoteConnection>();
+    private final Map<LauncherIdentity, GraceParticipant> reconnectingParticipants =
+            new LinkedHashMap<LauncherIdentity, GraceParticipant>();
 
     private volatile DirectConnectStatus status;
     private volatile Channel tcpListener;
@@ -127,15 +133,20 @@ public final class DirectConnectHost implements DirectConnectPeer {
     private long nextPauseSessionSequence;
 
     private DirectConnectHost(DirectConnectCompatibility compatibility, CampaignRoster roster,
-            CampaignRosterStore rosterStore, MovementCollisionWorld movementWorld) {
+            CampaignRosterStore rosterStore, MovementCollisionWorld movementWorld,
+            long reconnectGraceTicks) {
         if(compatibility == null) throw new IllegalArgumentException("Host compatibility cannot be null.");
         if(roster == null) throw new IllegalArgumentException("Campaign Roster cannot be null.");
         if(rosterStore == null) throw new IllegalArgumentException("Campaign Roster store cannot be null.");
         if(movementWorld == null) throw new IllegalArgumentException("Movement collision world cannot be null.");
+        if(reconnectGraceTicks < 1L) {
+            throw new IllegalArgumentException("Reconnect grace must contain at least one Host tick.");
+        }
         this.compatibility = compatibility;
         this.roster = roster;
         this.rosterStore = rosterStore;
         this.movementWorld = movementWorld;
+        this.reconnectGraceTicks = reconnectGraceTicks;
         sessionId = newSessionId(random);
         status = status(DirectConnectPhase.STARTING,
                 "Opening authoritative Campaign lobby listeners.", null, null);
@@ -153,8 +164,25 @@ public final class DirectConnectHost implements DirectConnectPeer {
         if(port < 0 || port > 65535) {
             throw new IllegalArgumentException("Host port must be between 0 and 65535.");
         }
+        return start(port, compatibility, roster, rosterStore, movementWorld,
+                RECONNECT_GRACE_TICKS);
+    }
+
+    static DirectConnectHost startForTest(int port, DirectConnectCompatibility compatibility,
+            CampaignRoster roster, CampaignRosterStore rosterStore,
+            MovementCollisionWorld movementWorld, long reconnectGraceTicks) {
+        return start(port, compatibility, roster, rosterStore, movementWorld,
+                reconnectGraceTicks);
+    }
+
+    private static DirectConnectHost start(int port, DirectConnectCompatibility compatibility,
+            CampaignRoster roster, CampaignRosterStore rosterStore,
+            MovementCollisionWorld movementWorld, long reconnectGraceTicks) {
+        if(port < 0 || port > 65535) {
+            throw new IllegalArgumentException("Host port must be between 0 and 65535.");
+        }
         DirectConnectHost host = new DirectConnectHost(compatibility, roster, rosterStore,
-                movementWorld);
+                movementWorld, reconnectGraceTicks);
         try {
             host.bind(port);
             return host;
@@ -179,11 +207,6 @@ public final class DirectConnectHost implements DirectConnectPeer {
                     }
                 });
 
-        ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(requestedPort)).syncUninterruptibly();
-        requireSuccess(tcpBind, "Could not bind Direct Connect TCP listener");
-        tcpListener = tcpBind.channel();
-        boundPort = ((InetSocketAddress)tcpListener.localAddress()).getPort();
-
         Bootstrap udp = new Bootstrap();
         udp.group(networkGroup)
                 .channel(NioDatagramChannel.class)
@@ -196,9 +219,26 @@ public final class DirectConnectHost implements DirectConnectPeer {
                     }
                 });
 
-        ChannelFuture udpBind = udp.bind(new InetSocketAddress(boundPort)).syncUninterruptibly();
-        requireSuccess(udpBind, "Could not bind Direct Connect UDP listener");
-        udpListener = udpBind.channel();
+        if(requestedPort == 0) {
+            ChannelFuture udpBind = udp.bind(new InetSocketAddress(0)).syncUninterruptibly();
+            requireSuccess(udpBind, "Could not bind Direct Connect UDP listener");
+            udpListener = udpBind.channel();
+            boundPort = ((InetSocketAddress)udpListener.localAddress()).getPort();
+
+            ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(boundPort)).syncUninterruptibly();
+            requireSuccess(tcpBind, "Could not bind Direct Connect TCP listener");
+            tcpListener = tcpBind.channel();
+        }
+        else {
+            ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(requestedPort)).syncUninterruptibly();
+            requireSuccess(tcpBind, "Could not bind Direct Connect TCP listener");
+            tcpListener = tcpBind.channel();
+            boundPort = ((InetSocketAddress)tcpListener.localAddress()).getPort();
+
+            ChannelFuture udpBind = udp.bind(new InetSocketAddress(boundPort)).syncUninterruptibly();
+            requireSuccess(udpBind, "Could not bind Direct Connect UDP listener");
+            udpListener = udpBind.channel();
+        }
         status = status(DirectConnectPhase.LISTENING,
                 "Campaign " + roster.getCampaignId() + " has " + roster.getSlots().size()
                         + "/" + roster.getCapacity() + " claimed slots. Waiting on TCP and UDP port "
@@ -213,16 +253,6 @@ public final class DirectConnectHost implements DirectConnectPeer {
     }
 
     private synchronized boolean acceptHello(ChannelHandlerContext context, ClientHello hello) {
-        if(sessionStarted) {
-            reject(context, RejectCode.NOT_IN_LOBBY,
-                    "Campaign Slot claims are closed after Active Floor play starts.");
-            return false;
-        }
-        if(connections.size() >= roster.getCapacity() - 1) {
-            reject(context, RejectCode.SESSION_FULL,
-                    "Session lobby already has its maximum remote connections.");
-            return false;
-        }
         if(hello.protocolVersion != DirectConnectProtocol.VERSION) {
             reject(context, RejectCode.PROTOCOL_MISMATCH,
                     "Protocol mismatch: Host requires " + DirectConnectProtocol.VERSION
@@ -259,9 +289,21 @@ public final class DirectConnectHost implements DirectConnectPeer {
                     "Launcher Identity is already connected to this Private Session.");
             return false;
         }
+        GraceParticipant reconnecting = reconnectingParticipants.get(launcherIdentity);
+        if(sessionStarted && reconnecting == null) {
+            reject(context, RejectCode.NOT_IN_LOBBY,
+                    "Active Floor accepts only an authenticated reconnect during grace.");
+            return false;
+        }
+        if(!sessionStarted && connections.size() >= roster.getCapacity() - 1) {
+            reject(context, RejectCode.SESSION_FULL,
+                    "Session lobby already has its maximum remote connections.");
+            return false;
+        }
 
         RemoteConnection connection = new RemoteConnection(context.channel(),
                 (InetSocketAddress)context.channel().remoteAddress(), launcherIdentity);
+        connection.reconnectGrace = reconnecting;
         connections.put(context.channel(), connection);
         context.writeAndFlush(new CampaignChallenge(sessionId, roster.getCampaignId(),
                 roster.getCapacity()));
@@ -293,12 +335,29 @@ public final class DirectConnectHost implements DirectConnectPeer {
         }
         connection.request = request;
 
-        ClaimOutcome outcome = roster.submit(request);
+        ClaimOutcome outcome;
+        if(sessionStarted) {
+            GraceParticipant reconnecting = connection.reconnectGrace;
+            if(reconnecting == null || request.getRequestedSlot() != 0
+                    && request.getRequestedSlot() != reconnecting.slot.getNumber()) {
+                reject(context, RejectCode.NOT_IN_LOBBY,
+                        "Active Floor reconnect must claim its original Campaign Slot.");
+                return;
+            }
+            SlotClaimRequest reclaim = new SlotClaimRequest(connection.launcherIdentity,
+                    reconnecting.slot.getPresentation(), reconnecting.slot.getNumber(),
+                    request.getReconnectToken());
+            outcome = roster.submit(reclaim);
+        }
+        else {
+            outcome = roster.submit(request);
+        }
         if(outcome.getStatus() == ClaimStatus.ADMITTED) {
-            if(!persistRoster(context.channel())) return;
+            if(!sessionStarted && !persistRoster(context.channel())) return;
             admit(connection, outcome.getSlot());
         }
-        else if(outcome.getStatus() == ClaimStatus.NEEDS_APPROVAL) {
+        else if(outcome.getStatus() == ClaimStatus.NEEDS_APPROVAL
+                || outcome.getStatus() == ClaimStatus.RELINK_REQUIRED) {
             context.writeAndFlush(new SlotPending(sessionId, outcome.getReason()));
             status = status(DirectConnectPhase.AWAITING_APPROVAL,
                     request.getPresentation().getNickname() + " (Identity "
@@ -312,9 +371,28 @@ public final class DirectConnectHost implements DirectConnectPeer {
     }
 
     public synchronized boolean approve(String launcherIdentity) {
+        if(sessionStarted) return false;
         RemoteConnection connection = findPending(launcherIdentity);
         if(connection == null) return false;
         ClaimOutcome outcome = roster.approve(connection.request, random);
+        if(outcome.getStatus() != ClaimStatus.ADMITTED) {
+            rejectClaim(connection.channel, outcome);
+            return false;
+        }
+        if(!persistRoster(connection.channel)) return false;
+        admit(connection, outcome.getSlot());
+        return true;
+    }
+
+    /**
+     * Host-only recovery action. Replaces a trusted Participant's lost private identity,
+     * rotates its reconnect credential, and admits only that pending lobby connection.
+     */
+    public synchronized boolean relinkTrustedParticipant(String launcherIdentity) {
+        if(sessionStarted) return false;
+        RemoteConnection connection = findPending(launcherIdentity);
+        if(connection == null || connection.request.getRequestedSlot() < 2) return false;
+        ClaimOutcome outcome = roster.relink(connection.request, random);
         if(outcome.getStatus() != ClaimStatus.ADMITTED) {
             rejectClaim(connection.channel, outcome);
             return false;
@@ -333,6 +411,26 @@ public final class DirectConnectHost implements DirectConnectPeer {
                 "Host declined " + connection.request.getPresentation().getNickname()
                         + "; Campaign Slot ownership was unchanged.",
                 connection.launcherIdentity.getFingerprint(), null);
+        return true;
+    }
+
+    /** Removes current connection without deleting persistent Campaign Slot or progression. */
+    public synchronized boolean kick(String launcherIdentity) {
+        if(launcherIdentity == null) return false;
+        RemoteConnection connection = findConnectionValue(launcherIdentity);
+        if(connection == null) return false;
+        connection.kicked = true;
+        if(sessionStarted && connection.movementDescriptor != null) {
+            returnParticipantToCampaignSlot(connection.movementDescriptor,
+                    "Host removed " + connection.movementDescriptor.getNickname() + " from Active Floor.");
+        }
+        connection.channel.writeAndFlush(new ServerDisconnect(
+                "Host removed connection. Campaign Slot and progression remain safe."))
+                .addListener(ChannelFutureListener.CLOSE);
+        status = status(sessionStarted ? DirectConnectPhase.READY : DirectConnectPhase.LISTENING,
+                "Host kicked a Participant; persistent Campaign Slot was preserved.",
+                connection.launcherIdentity.getFingerprint(),
+                sessionStarted ? GameApplication.OPEN_SOURCE_TEST_LEVEL : null);
         return true;
     }
 
@@ -468,7 +566,10 @@ public final class DirectConnectHost implements DirectConnectPeer {
                 try {
                     AuthoritativeHostSession session = movementSession;
                     if(session != null && sessionStarted && !closing.get()) {
-                        if(!isSessionPaused()) session.advanceOneTick();
+                        if(!isSessionPaused()) {
+                            session.advanceOneTick();
+                            expireReconnectGrace(session.getHostTick());
+                        }
                     }
                 }
                 catch(RuntimeException failure) {
@@ -549,6 +650,9 @@ public final class DirectConnectHost implements DirectConnectPeer {
 
     private void admit(RemoteConnection connection, CampaignSlot slot) {
         connection.slot = slot;
+        if(connection.reconnectGrace != null) {
+            connection.movementDescriptor = connection.reconnectGrace.descriptor;
+        }
         connection.udpToken = nextNonZeroLong(random);
         connection.channel.writeAndFlush(new ServerAccepted(sessionId, connection.udpToken,
                 roster.getCampaignId(), slot.getNumber(), slot.getReconnectToken()));
@@ -571,21 +675,25 @@ public final class DirectConnectHost implements DirectConnectPeer {
             respondToDiscovery((DiscoveryProbe)decoded, packet.sender());
             return;
         }
-        if(decoded instanceof UdpRegister && !sessionStarted) {
+        if(decoded instanceof UdpRegister) {
             UdpRegister register = (UdpRegister)decoded;
             if(!sessionId.equals(register.sessionId)) return;
 
             RemoteConnection connection = findConnection(register.udpToken);
             if(connection == null || !sameAddress(connection.tcpAddress, packet.sender())) return;
+            if(sessionStarted && connection.reconnectGrace == null) return;
             connection.udpAddress = packet.sender();
             try {
                 ByteBuf response = DirectConnectWire.encodeDatagram(udpListener.alloc(),
                         new UdpRegistered(sessionId, connection.udpToken));
                 udpListener.writeAndFlush(new DatagramPacket(response, connection.udpAddress));
-                status = status(DirectConnectPhase.LOBBY,
-                        "Campaign Slot " + connection.slot.getNumber()
-                                + " is TCP/UDP ready. Host may approve more claims or start play.",
-                        connection.launcherIdentity.getFingerprint(), null);
+                if(connection.reconnectGrace != null) completeReconnect(connection);
+                else {
+                    status = status(DirectConnectPhase.LOBBY,
+                            "Campaign Slot " + connection.slot.getNumber()
+                                    + " is TCP/UDP ready. Host may approve more claims or start play.",
+                            connection.launcherIdentity.getFingerprint(), null);
+                }
             }
             catch(ProtocolException ex) {
                 failConnection(connection, "Could not encode UDP registration response: "
@@ -644,24 +752,9 @@ public final class DirectConnectHost implements DirectConnectPeer {
         RemoteConnection connection = connections.remove(channel);
         if(connection == null || closing.get()) return;
         if(sessionStarted && connection.movementDescriptor != null) {
-            MovementEntityDescriptor descriptor = connection.movementDescriptor;
-            AuthoritativeMovementSimulation simulation = movementSimulation;
-            if(simulation != null) simulation.removeParticipant(descriptor.getParticipantId());
-            long lifecycleSequence = ++nextLifecycleSequence;
-            movementReplication.applyDespawn(lifecycleSequence, descriptor.getEntityId());
-            EntityDespawn despawn = new EntityDespawn(sessionId, lifecycleSequence,
-                    descriptor.getEntityId());
-            for(RemoteConnection remaining : connections.values()) {
-                if(remaining.channel.isActive() && remaining.movementDescriptor != null) {
-                    remaining.channel.writeAndFlush(despawn);
-                }
-            }
-            markPartyMemberDisconnected(descriptor.getCampaignSlot());
-            status = status(DirectConnectPhase.READY,
-                    descriptor.getNickname()
-                            + " left Active Floor; stable remote Avatar despawned.",
-                    descriptor.getParticipantId().getValue(),
-                    GameApplication.OPEN_SOURCE_TEST_LEVEL);
+            if(connection.kicked) return;
+            GraceParticipant existing = reconnectingParticipants.get(connection.launcherIdentity);
+            if(existing == null) beginReconnectGrace(connection);
             return;
         }
         if(status.getPhase() != DirectConnectPhase.DISCONNECTED) {
@@ -672,6 +765,21 @@ public final class DirectConnectHost implements DirectConnectPeer {
     }
 
     private void markPartyMemberDisconnected(int campaignSlot) {
+        replacePartyMember(campaignSlot, PartyMemberStateChange.DISCONNECTED, null);
+    }
+
+    private void markPartyMemberReconnecting(MovementEntityDescriptor descriptor) {
+        replacePartyMember(descriptor.getCampaignSlot(), PartyMemberStateChange.RECONNECTING,
+                descriptor.getEntityId());
+    }
+
+    private void markPartyMemberConnected(MovementEntityDescriptor descriptor) {
+        replacePartyMember(descriptor.getCampaignSlot(), PartyMemberStateChange.CONNECTED,
+                descriptor.getEntityId());
+    }
+
+    private void replacePartyMember(int campaignSlot, PartyMemberStateChange change,
+            NetworkEntityId entityId) {
         PartyStatusSnapshot current = partyStatus;
         if(current == null) return;
         List<PartyMemberStatus> updated =
@@ -679,17 +787,114 @@ public final class DirectConnectHost implements DirectConnectPeer {
         for(int index = 0; index < updated.size(); index++) {
             PartyMemberStatus member = updated.get(index);
             if(member.getCampaignSlot() == campaignSlot) {
-                updated.set(index, member.disconnected());
+                if(change == PartyMemberStateChange.DISCONNECTED) {
+                    updated.set(index, member.disconnected());
+                }
+                else if(change == PartyMemberStateChange.RECONNECTING) {
+                    updated.set(index, member.reconnecting());
+                }
+                else {
+                    updated.set(index, member.connected(entityId));
+                }
                 break;
             }
         }
         partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, updated);
         PartyStatusMessage message = new PartyStatusMessage(sessionId, partyStatus);
         for(RemoteConnection remaining : connections.values()) {
-            if(remaining.channel.isActive() && remaining.movementDescriptor != null) {
+            if(remaining.channel.isActive() && remaining.movementDescriptor != null
+                    && remaining.reconnectGrace == null) {
                 remaining.channel.writeAndFlush(message);
             }
         }
+    }
+
+    private void beginReconnectGrace(RemoteConnection connection) {
+        MovementEntityDescriptor descriptor = connection.movementDescriptor;
+        AuthoritativeHostSession session = movementSession;
+        long hostTick = session == null ? 0L : session.getHostTick();
+        ReconnectGrace grace = new ReconnectGrace(descriptor.getCampaignSlot(),
+                descriptor.getEntityId(), hostTick, hostTick + reconnectGraceTicks);
+        reconnectingParticipants.put(connection.launcherIdentity,
+                new GraceParticipant(connection.slot, descriptor, grace));
+        AuthoritativeMovementSimulation simulation = movementSimulation;
+        if(simulation != null) simulation.freezeParticipant(descriptor.getParticipantId());
+        markPartyMemberReconnecting(descriptor);
+        status = status(DirectConnectPhase.READY,
+                descriptor.getNickname() + " disconnected; frozen and invulnerable for "
+                        + reconnectGraceTicks + " unpaused Host ticks.",
+                descriptor.getParticipantId().getValue(), GameApplication.OPEN_SOURCE_TEST_LEVEL);
+    }
+
+    private synchronized void completeReconnect(RemoteConnection connection) {
+        GraceParticipant grace = connection.reconnectGrace;
+        if(grace == null || reconnectingParticipants.remove(connection.launcherIdentity) != grace) {
+            failConnection(connection, "Reconnect grace expired before UDP authentication completed.");
+            return;
+        }
+        AuthoritativeMovementSimulation simulation = movementSimulation;
+        if(simulation != null) simulation.resumeParticipant(grace.descriptor.getParticipantId());
+        markPartyMemberConnected(grace.descriptor);
+        connection.reconnectGrace = null;
+        for(MovementEntityDescriptor descriptor : movementReplication.getEntities()) {
+            connection.channel.write(new EntitySpawn(sessionId, descriptor));
+        }
+        connection.channel.write(new PartyStatusMessage(sessionId, partyStatus));
+        connection.channel.writeAndFlush(new SessionReady(sessionId,
+                getConnectedParticipantCount(), GameApplication.OPEN_SOURCE_TEST_LEVEL));
+        status = status(DirectConnectPhase.READY,
+                grace.descriptor.getNickname() + " reclaimed Campaign Slot "
+                        + grace.slot.getNumber() + " during reconnect grace.",
+                grace.descriptor.getParticipantId().getValue(),
+                GameApplication.OPEN_SOURCE_TEST_LEVEL);
+    }
+
+    private synchronized void expireReconnectGrace(long hostTick) {
+        List<LauncherIdentity> expired = new ArrayList<LauncherIdentity>();
+        for(Map.Entry<LauncherIdentity, GraceParticipant> entry
+                : reconnectingParticipants.entrySet()) {
+            if(entry.getValue().grace.getRemainingUnpausedTicks(hostTick) == 0L) {
+                expired.add(entry.getKey());
+            }
+        }
+        for(LauncherIdentity identity : expired) {
+            GraceParticipant grace = reconnectingParticipants.remove(identity);
+            if(grace == null) continue;
+            disconnectExpiredReconnect(grace);
+            returnParticipantToCampaignSlot(grace.descriptor,
+                    grace.descriptor.getNickname()
+                            + " reconnect grace expired; Campaign Slot returned safely.");
+        }
+    }
+
+    private void disconnectExpiredReconnect(GraceParticipant grace) {
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.reconnectGrace != grace) continue;
+            connection.reconnectGrace = null;
+            connection.movementDescriptor = null;
+            connection.kicked = true;
+            connection.channel.writeAndFlush(new ServerDisconnect(
+                    "Reconnect grace expired. Campaign Slot and progression remain safe."))
+                    .addListener(ChannelFutureListener.CLOSE);
+        }
+    }
+
+    private void returnParticipantToCampaignSlot(MovementEntityDescriptor descriptor,
+            String message) {
+        AuthoritativeMovementSimulation simulation = movementSimulation;
+        if(simulation != null) simulation.removeParticipant(descriptor.getParticipantId());
+        long lifecycleSequence = ++nextLifecycleSequence;
+        movementReplication.applyDespawn(lifecycleSequence, descriptor.getEntityId());
+        EntityDespawn despawn = new EntityDespawn(sessionId, lifecycleSequence,
+                descriptor.getEntityId());
+        for(RemoteConnection remaining : connections.values()) {
+            if(remaining.channel.isActive() && remaining.movementDescriptor != null) {
+                remaining.channel.writeAndFlush(despawn);
+            }
+        }
+        markPartyMemberDisconnected(descriptor.getCampaignSlot());
+        status = status(DirectConnectPhase.READY, message,
+                descriptor.getParticipantId().getValue(), GameApplication.OPEN_SOURCE_TEST_LEVEL);
     }
 
     private void rejectClaim(Channel channel, ClaimOutcome outcome) {
@@ -703,6 +908,8 @@ public final class DirectConnectHost implements DirectConnectPeer {
             case RECONNECT_DENIED: return RejectCode.RECONNECT_DENIED;
             case NICKNAME_TAKEN: return RejectCode.NICKNAME_TAKEN;
             case AVATAR_UNAVAILABLE: return RejectCode.AVATAR_UNAVAILABLE;
+            case RELINK_REQUIRED: return RejectCode.SLOT_OCCUPIED;
+            case RELINK_DENIED: return RejectCode.SLOT_OCCUPIED;
             default: return RejectCode.MALFORMED_HANDSHAKE;
         }
     }
@@ -742,6 +949,14 @@ public final class DirectConnectHost implements DirectConnectPeer {
             if(connection.launcherIdentity.equals(identity) && connection.channel.isActive()) {
                 return connection;
             }
+        }
+        return null;
+    }
+
+    private RemoteConnection findConnectionValue(String launcherIdentity) {
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.launcherIdentity.getValue().equals(launcherIdentity)
+                    && connection.channel.isActive()) return connection;
         }
         return null;
     }
@@ -788,6 +1003,14 @@ public final class DirectConnectHost implements DirectConnectPeer {
     @Override
     public PartyStatusSnapshot getPartyStatus() {
         return partyStatus;
+    }
+
+    /** Returns current Host protection state, or null after reconnect, kick, or expiry. */
+    public synchronized ReconnectGrace getReconnectGrace(int campaignSlot) {
+        for(GraceParticipant participant : reconnectingParticipants.values()) {
+            if(participant.grace.getCampaignSlot() == campaignSlot) return participant.grace;
+        }
+        return null;
     }
 
     @Override
@@ -898,6 +1121,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
         synchronized(this) {
             participants = new ArrayList<Channel>(connections.keySet());
             connections.clear();
+            reconnectingParticipants.clear();
         }
         for(Channel participant : participants) closeChannel(participant);
         closeChannel(udpListener);
@@ -1010,12 +1234,41 @@ public final class DirectConnectHost implements DirectConnectPeer {
         private InetSocketAddress udpAddress;
         private long udpToken;
         private MovementEntityDescriptor movementDescriptor;
+        private GraceParticipant reconnectGrace;
+        private boolean kicked;
 
         private RemoteConnection(Channel channel, InetSocketAddress tcpAddress,
                 LauncherIdentity launcherIdentity) {
             this.channel = channel;
             this.tcpAddress = tcpAddress;
             this.launcherIdentity = launcherIdentity;
+        }
+    }
+
+    private enum PartyMemberStateChange {
+        CONNECTED,
+        RECONNECTING,
+        DISCONNECTED
+    }
+
+    private static final class GraceParticipant {
+        private final CampaignSlot slot;
+        private final MovementEntityDescriptor descriptor;
+        private final ReconnectGrace grace;
+
+        private GraceParticipant(CampaignSlot slot, MovementEntityDescriptor descriptor,
+                ReconnectGrace grace) {
+            if(slot == null || descriptor == null || grace == null) {
+                throw new IllegalArgumentException("Reconnect grace participant is incomplete.");
+            }
+            if(slot.getNumber() != descriptor.getCampaignSlot()
+                    || descriptor.getEntityId() == null
+                    || !descriptor.getEntityId().equals(grace.getEntityId())) {
+                throw new IllegalArgumentException("Reconnect grace identity does not match Campaign Slot.");
+            }
+            this.slot = slot;
+            this.descriptor = descriptor;
+            this.grace = grace;
         }
     }
 

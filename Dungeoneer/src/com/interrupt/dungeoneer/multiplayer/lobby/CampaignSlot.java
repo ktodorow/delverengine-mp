@@ -25,6 +25,12 @@ public final class CampaignSlot {
         return new CampaignSlot(number, launcherIdentity, reconnectToken, updatedPresentation);
     }
 
+    CampaignSlot withOwnership(LauncherIdentity replacementIdentity,
+            String replacementReconnectToken, SlotPresentation replacementPresentation) {
+        return new CampaignSlot(number, replacementIdentity, replacementReconnectToken,
+                replacementPresentation);
+    }
+
     public int getNumber() {
         return number;
     }

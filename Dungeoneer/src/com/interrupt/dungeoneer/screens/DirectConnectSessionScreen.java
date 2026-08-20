@@ -91,10 +91,13 @@ public final class DirectConnectSessionScreen implements Screen {
             y -= 30f;
             if(!pending.isEmpty()) {
                 PendingSlotClaim claim = pending.get(0);
+                boolean relink = claim.getRequestedSlot() > 1
+                        && host.getRoster().getSlot(claim.getRequestedSlot()) != null;
                 font.draw(batch, "Pending: " + claim.getNickname() + " / "
                                 + claim.getAvatarId() + " / Identity "
                                 + claim.getLauncherIdentity().getFingerprint()
-                                + "   [A] Approve   [R] Reject",
+                                + (relink ? "   [L] Relink trusted slot   [R] Reject"
+                                        : "   [A] Approve   [R] Reject"),
                         textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
             }
             else if(host.canStartSession()) {
@@ -110,8 +113,14 @@ public final class DirectConnectSessionScreen implements Screen {
         DirectConnectHost host = (DirectConnectHost)peer;
         List<PendingSlotClaim> pending = host.getPendingClaims();
         if(!pending.isEmpty()) {
-            String identity = pending.get(0).getLauncherIdentity().getValue();
-            if(Gdx.input.isKeyJustPressed(Input.Keys.A)) host.approve(identity);
+            PendingSlotClaim claim = pending.get(0);
+            String identity = claim.getLauncherIdentity().getValue();
+            if(Gdx.input.isKeyJustPressed(Input.Keys.L)
+                    && claim.getRequestedSlot() > 1
+                    && host.getRoster().getSlot(claim.getRequestedSlot()) != null) {
+                host.relinkTrustedParticipant(identity);
+            }
+            else if(Gdx.input.isKeyJustPressed(Input.Keys.A)) host.approve(identity);
             else if(Gdx.input.isKeyJustPressed(Input.Keys.R)) host.decline(identity);
         }
         if(Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && host.canStartSession()) {

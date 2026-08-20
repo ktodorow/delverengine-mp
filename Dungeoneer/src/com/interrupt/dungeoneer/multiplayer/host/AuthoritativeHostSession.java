@@ -34,18 +34,25 @@ public final class AuthoritativeHostSession implements HostSessionCommandGateway
         pendingCommands.add(command);
     }
 
-    public synchronized void advanceOneTick() {
-        hostTick++;
-        HostSessionOutput output = new TickOutput(hostTick);
-        int commandCount = pendingCommands.size();
-        for(int i = 0; i < commandCount; i++) {
-            simulation.applyCommand(hostTick, pendingCommands.remove(), output);
-        }
+    public void advanceOneTick() {
+        final long tick;
+        final HostSessionSnapshot snapshot;
+        synchronized(this) {
+            hostTick++;
+            tick = hostTick;
+            HostSessionOutput output = new TickOutput(tick);
+            int commandCount = pendingCommands.size();
+            for(int i = 0; i < commandCount; i++) {
+                simulation.applyCommand(tick, pendingCommands.remove(), output);
+            }
 
-        simulation.tick(hostTick, FIXED_DELTA_SECONDS, output);
-        HostSessionSnapshot snapshot = simulation.snapshot(hostTick);
-        if(snapshot == null) throw new IllegalStateException("Host simulation returned a null snapshot.");
-        transport.publishSnapshot(hostTick, snapshot);
+            simulation.tick(tick, FIXED_DELTA_SECONDS, output);
+            snapshot = simulation.snapshot(tick);
+            if(snapshot == null) {
+                throw new IllegalStateException("Host simulation returned a null snapshot.");
+            }
+        }
+        transport.publishSnapshot(tick, snapshot);
     }
 
     public synchronized long getHostTick() {

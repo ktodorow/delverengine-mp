@@ -71,6 +71,25 @@ public final class PartyMemberStatus {
                 health, maximumHealth, remainingLives, PartyMemberState.DISCONNECTED);
     }
 
+    /** Keeps a frozen Active Floor body visible during bounded reconnect grace. */
+    public PartyMemberStatus reconnecting() {
+        if(entityId == null) {
+            throw new IllegalStateException(
+                    "A reconnecting Party member must retain its Active Floor Entity.");
+        }
+        return new PartyMemberStatus(campaignSlot, entityId, nickname, avatarId,
+                health, maximumHealth, remainingLives, PartyMemberState.RECONNECTING);
+    }
+
+    /** Restores an existing Campaign Slot to active control without changing its character state. */
+    public PartyMemberStatus connected(NetworkEntityId connectedEntityId) {
+        if(connectedEntityId == null) {
+            throw new IllegalArgumentException("Connected Party member requires an Active Floor Entity.");
+        }
+        return new PartyMemberStatus(campaignSlot, connectedEntityId, nickname, avatarId,
+                health, maximumHealth, remainingLives, PartyMemberState.CONNECTED);
+    }
+
     public int getCampaignSlot() {
         return campaignSlot;
     }

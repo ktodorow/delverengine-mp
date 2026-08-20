@@ -55,6 +55,7 @@ public final class DirectConnectMovementController {
         player.ya = authoritative.getVelocityY();
         player.za = authoritative.getVelocityZ();
         player.rot = authoritative.getRotation();
+        nextInputTick = Math.max(nextInputTick, authoritative.getLastProcessedInputTick() + 1L);
         reconciler.reset();
         interpolator.reset();
         lastReconciledSnapshot = latest.getSequence();
@@ -149,6 +150,7 @@ public final class DirectConnectMovementController {
         if(latest.getSequence() <= lastReconciledSnapshot) return;
         MovementEntityState authoritative = latest.getEntity(localId);
         if(authoritative == null) return;
+        nextInputTick = Math.max(nextInputTick, authoritative.getLastProcessedInputTick() + 1L);
         lastReconciledSnapshot = latest.getSequence();
 
         Reconciliation result = reconciler.reconcile(authoritative,

@@ -5,7 +5,8 @@ public enum PartyMemberState {
     CONNECTED(1, "CONNECTED"),
     DOWNED(2, "DOWNED"),
     SPECTATING(3, "SPECTATING"),
-    DISCONNECTED(4, "DISCONNECTED");
+    DISCONNECTED(4, "DISCONNECTED"),
+    RECONNECTING(5, "RECONNECTING");
 
     private final int wireId;
     private final String displayName;
@@ -24,7 +25,7 @@ public enum PartyMemberState {
     }
 
     public boolean isIncapacitated() {
-        return this == DOWNED || this == SPECTATING;
+        return this == DOWNED || this == SPECTATING || this == RECONNECTING;
     }
 
     public static PartyMemberState fromWireId(int wireId) {

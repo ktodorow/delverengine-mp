@@ -17,6 +17,8 @@ final class DesktopLaunchOptions {
     boolean discoverPrivateSessions;
     String diagnoseDirectConnectAddress;
     boolean networkHelp;
+    File exportIdentityRecovery;
+    File importIdentityRecovery;
     int sessionPort = com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.DEFAULT_PORT;
     File profileRoot;
     int campaignCapacity = 2;
@@ -106,6 +108,34 @@ final class DesktopLaunchOptions {
             }
             else if(argument.equalsIgnoreCase("--network-help")) {
                 options.networkHelp = true;
+            }
+            else if(argument.regionMatches(true, 0, "--export-identity-recovery=", 0,
+                    "--export-identity-recovery=".length())) {
+                options.exportIdentityRecovery = new File(requireValue(
+                        argument.substring("--export-identity-recovery=".length()),
+                        "Identity Recovery File path cannot be empty."));
+            }
+            else if(argument.equalsIgnoreCase("--export-identity-recovery")) {
+                if(i + 1 >= args.length || args[i + 1].startsWith("--")) {
+                    throw new IllegalArgumentException(
+                            "--export-identity-recovery requires a file path.");
+                }
+                options.exportIdentityRecovery = new File(requireValue(args[++i],
+                        "Identity Recovery File path cannot be empty."));
+            }
+            else if(argument.regionMatches(true, 0, "--import-identity-recovery=", 0,
+                    "--import-identity-recovery=".length())) {
+                options.importIdentityRecovery = new File(requireValue(
+                        argument.substring("--import-identity-recovery=".length()),
+                        "Identity Recovery File path cannot be empty."));
+            }
+            else if(argument.equalsIgnoreCase("--import-identity-recovery")) {
+                if(i + 1 >= args.length || args[i + 1].startsWith("--")) {
+                    throw new IllegalArgumentException(
+                            "--import-identity-recovery requires a file path.");
+                }
+                options.importIdentityRecovery = new File(requireValue(args[++i],
+                        "Identity Recovery File path cannot be empty."));
             }
             else if(argument.regionMatches(true, 0, "--session-port=", 0,
                     "--session-port=".length())) {
@@ -214,6 +244,17 @@ final class DesktopLaunchOptions {
             throw new IllegalArgumentException(
                     "Network discovery, diagnostics, or help cannot be combined with a game launch mode.");
         }
+        if(options.exportIdentityRecovery != null && options.importIdentityRecovery != null) {
+            throw new IllegalArgumentException(
+                    "Choose either --export-identity-recovery or --import-identity-recovery, not both.");
+        }
+        if(options.hasIdentityRecoveryUtility()
+                && (options.directHost || options.directConnectAddress != null
+                        || options.openSourceTestLevel || options.ownedTutorial
+                        || options.inspectOwnedCopy || options.hasNetworkUtility())) {
+            throw new IllegalArgumentException(
+                    "Identity Recovery import or export cannot be combined with a game or network utility mode.");
+        }
         if(options.directConnectAddress != null && options.campaignCapacitySpecified) {
             throw new IllegalArgumentException("Only Host chooses --campaign-capacity.");
         }
@@ -234,6 +275,10 @@ final class DesktopLaunchOptions {
 
     boolean hasNetworkUtility() {
         return discoverPrivateSessions || diagnoseDirectConnectAddress != null || networkHelp;
+    }
+
+    boolean hasIdentityRecoveryUtility() {
+        return exportIdentityRecovery != null || importIdentityRecovery != null;
     }
 
     private static int parsePort(String value) {

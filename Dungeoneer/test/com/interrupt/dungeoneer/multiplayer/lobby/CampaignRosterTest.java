@@ -11,6 +11,7 @@ import java.security.SecureRandom;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -66,9 +67,38 @@ public class CampaignRosterTest {
                 claim('2', "Owner", AvatarCatalog.HUMANOID_2, 2, token('f')));
 
         assertEquals(ClaimStatus.NICKNAME_TAKEN, sameNickname.getStatus());
-        assertEquals(ClaimStatus.SLOT_OCCUPIED, occupied.getStatus());
+        assertEquals(ClaimStatus.RELINK_REQUIRED, occupied.getStatus());
         assertEquals(ClaimStatus.RECONNECT_DENIED, wrongCredential.getStatus());
         assertEquals(owner.getLauncherIdentity(), roster.getSlot(2).getLauncherIdentity());
+    }
+
+    @Test
+    public void trustedHostRelinkRotatesLostIdentityWithoutMovingItsCampaignSlot() {
+        CampaignRoster roster = roster(3);
+        CampaignSlot owner = roster.approve(
+                claim('2', "Owner", AvatarCatalog.HUMANOID_2, 2, null),
+                new SecureRandom()).getSlot();
+
+        ClaimOutcome untrusted = roster.submit(
+                claim('3', "Recovered", AvatarCatalog.HUMANOID_3, 2, null));
+        ClaimOutcome relinked = roster.relink(
+                claim('3', "Recovered", AvatarCatalog.HUMANOID_3, 2, null),
+                new SecureRandom());
+        ClaimOutcome oldCredential = roster.submit(
+                claim('2', "Owner", AvatarCatalog.HUMANOID_2, 2,
+                        owner.getReconnectToken()));
+        ClaimOutcome hostRelink = roster.relink(
+                claim('4', "Not Host", AvatarCatalog.HUMANOID_4, 1, null),
+                new SecureRandom());
+
+        assertEquals(ClaimStatus.RELINK_REQUIRED, untrusted.getStatus());
+        assertEquals(owner.getNumber(), roster.getSlot(2).getNumber());
+        assertEquals(ClaimStatus.ADMITTED, relinked.getStatus());
+        assertEquals(identity('3'), relinked.getSlot().getLauncherIdentity());
+        assertNotEquals(owner.getReconnectToken(), relinked.getSlot().getReconnectToken());
+        assertEquals(ClaimStatus.SLOT_OCCUPIED, oldCredential.getStatus());
+        assertEquals(ClaimStatus.RELINK_DENIED, hostRelink.getStatus());
+        assertEquals(identity('1'), roster.getSlot(1).getLauncherIdentity());
     }
 
     @Test

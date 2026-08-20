@@ -102,6 +102,22 @@ public class DesktopLaunchOptionsTest {
     }
 
     @Test
+    public void parsesIdentityRecoveryUtilitiesWithoutLaunchingGame() {
+        DesktopLaunchOptions export = DesktopLaunchOptions.parse(new String[] {
+                "--export-identity-recovery", "C:\\Backups\\identity.properties",
+                "--profile-root=C:\\DelverProfiles\\Source"
+        });
+        assertTrue(export.hasIdentityRecoveryUtility());
+        assertEquals(new File("C:\\Backups\\identity.properties"), export.exportIdentityRecovery);
+
+        DesktopLaunchOptions imported = DesktopLaunchOptions.parse(new String[] {
+                "--import-identity-recovery=C:\\Backups\\identity.properties"
+        });
+        assertTrue(imported.hasIdentityRecoveryUtility());
+        assertEquals(new File("C:\\Backups\\identity.properties"), imported.importIdentityRecovery);
+    }
+
+    @Test
     public void rejectsNetworkUtilityCombinedWithGameLaunch() {
         assertParseFailure(new String[] {
                 "--discover-private-sessions", "--direct-host"
@@ -111,6 +127,13 @@ public class DesktopLaunchOptionsTest {
         }, "cannot be combined");
         assertParseFailure(new String[] { "--diagnose-direct-connect" },
                 "requires a Host address");
+        assertParseFailure(new String[] {
+                "--export-identity-recovery=backup.properties",
+                "--import-identity-recovery=backup.properties"
+        }, "either --export-identity-recovery or --import-identity-recovery");
+        assertParseFailure(new String[] {
+                "--export-identity-recovery=backup.properties", "--direct-host"
+        }, "cannot be combined");
     }
 
     private void assertParseFailure(String[] arguments, String expected) {

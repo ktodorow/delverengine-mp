@@ -156,6 +156,29 @@ public class AuthoritativeMovementSimulationTest {
         assertEquals(2L, simulation.getState(participant(1)).getLastProcessedInputTick());
     }
 
+    @Test
+    public void frozenParticipantRejectsInputsAndStaysAtItsAuthoritativePosition() {
+        AuthoritativeMovementSimulation simulation = simulation(1);
+        simulation.applyCommand(1L, command(1, 1L, 1f, 0f, 0f, false), NO_OUTPUT);
+        simulation.tick(1L, FIXED_DELTA, NO_OUTPUT);
+        MovementEntityState beforeFreeze = simulation.getState(participant(1));
+
+        simulation.freezeParticipant(participant(1));
+        simulation.applyCommand(2L, command(1, 2L, 1f, 0f, 0f, false), NO_OUTPUT);
+        simulation.tick(2L, FIXED_DELTA, NO_OUTPUT);
+        MovementEntityState frozen = simulation.getState(participant(1));
+
+        assertEquals(beforeFreeze.getX(), frozen.getX(), 0f);
+        assertEquals(beforeFreeze.getY(), frozen.getY(), 0f);
+        assertEquals(1L, frozen.getLastProcessedInputTick());
+        assertEquals(MovementState.IDLE, frozen.getMovementState());
+
+        simulation.resumeParticipant(participant(1));
+        simulation.applyCommand(3L, command(1, 2L, 1f, 0f, 0f, false), NO_OUTPUT);
+        simulation.tick(3L, FIXED_DELTA, NO_OUTPUT);
+        assertEquals(2L, simulation.getState(participant(1)).getLastProcessedInputTick());
+    }
+
     private AuthoritativeMovementSimulation simulation(int participants) {
         return new AuthoritativeMovementSimulation(
                 new RectangularMovementCollisionWorld(20f, 20f, 10f, 10f, 0.5f),

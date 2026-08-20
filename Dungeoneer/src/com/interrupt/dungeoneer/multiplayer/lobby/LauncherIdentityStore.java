@@ -47,6 +47,39 @@ public final class LauncherIdentityStore {
         }
     }
 
+    static void replace(File file, LauncherIdentity identity) {
+        if(file == null) throw new IllegalArgumentException("Launcher Identity file cannot be null.");
+        if(identity == null) throw new IllegalArgumentException("Launcher Identity cannot be null.");
+        File parent = file.getParentFile();
+        if(parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+            throw new IllegalStateException("Could not create Launcher Identity directory: " + parent);
+        }
+        File lockFile = new File(parent, file.getName() + ".lock");
+        try(RandomAccessFile lockAccess = new RandomAccessFile(lockFile, "rw");
+                FileLock ignored = lockAccess.getChannel().lock()) {
+            AtomicProperties.restrictToOwner(lockFile);
+            Properties properties = new Properties();
+            properties.setProperty("format", FORMAT);
+            properties.setProperty("launcherIdentity", identity.getValue());
+            AtomicProperties.store(file, properties,
+                    "Delver Multiplayer private Launcher Identity");
+        }
+        catch(IOException ex) {
+            throw new IllegalStateException("Could not lock Launcher Identity file: " + file, ex);
+        }
+    }
+
+    static File currentProfileFile() {
+        if(!MultiplayerProfile.isInitialized()) {
+            throw new IllegalStateException("Multiplayer profile is not initialized.");
+        }
+        return MultiplayerProfile.resolveWritableFile(IDENTITY_PATH).file();
+    }
+
+    static void replaceCurrentProfile(LauncherIdentity identity) {
+        replace(currentProfileFile(), identity);
+    }
+
     private static LauncherIdentity load(File file) {
         Properties properties = AtomicProperties.load(file, "Launcher Identity");
         if(!FORMAT.equals(properties.getProperty("format"))) {

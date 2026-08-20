@@ -59,7 +59,7 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         }
         MovementInputCommand movement = (MovementInputCommand)command;
         MutableMovement participant = participants.get(movement.getParticipantId());
-        if(participant == null) return;
+        if(participant == null || participant.frozen) return;
         MovementInputFrame input = movement.getInput();
         if(input.getInputTick() <= participant.lastProcessedInputTick) return;
         if(input.getInputTick() - participant.lastProcessedInputTick > MAX_INPUT_TICK_LEAD) return;
@@ -73,6 +73,7 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
     public synchronized void tick(long hostTick, float fixedDeltaSeconds,
             HostSessionOutput output) {
         for(MutableMovement participant : participants.values()) {
+            if(participant.frozen) continue;
             // One credit per Host tick bounds sustained movement to 60 Hz while
             // saved credits let delayed UDP bundles catch up in validated steps.
             participant.savedInputSteps = Math.min(MAX_SAVED_INPUT_STEPS,
@@ -110,6 +111,18 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
 
     public synchronized void removeParticipant(ParticipantId participantId) {
         if(participantId != null) participants.remove(participantId);
+    }
+
+    /** Stops accepted and queued inputs while Host protects disconnected character. */
+    public synchronized void freezeParticipant(ParticipantId participantId) {
+        MutableMovement participant = participants.get(participantId);
+        if(participant != null) participant.freeze();
+    }
+
+    /** Restores input processing after authenticated reconnect. */
+    public synchronized void resumeParticipant(ParticipantId participantId) {
+        MutableMovement participant = participants.get(participantId);
+        if(participant != null) participant.resume();
     }
 
     public synchronized MovementEntityState getState(ParticipantId participantId) {
@@ -230,6 +243,7 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         private float rotation;
         private boolean onFloor = true;
         private boolean jumpQueued;
+        private boolean frozen;
         private MovementState movementState = MovementState.IDLE;
 
         private MutableMovement(MovementEntityDescriptor descriptor, MovementSpawn spawn) {
@@ -244,6 +258,22 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
             return new MovementEntityState(descriptor.getEntityId(),
                     descriptor.getLifecycleSequence(), lastProcessedInputTick,
                     x, y, z, velocityX, velocityY, velocityZ, rotation, movementState);
+        }
+
+        private void freeze() {
+            input = null;
+            pendingInputs.clear();
+            savedInputSteps = 0;
+            velocityX = 0f;
+            velocityY = 0f;
+            velocityZ = 0f;
+            jumpQueued = false;
+            frozen = true;
+            movementState = MovementState.IDLE;
+        }
+
+        private void resume() {
+            frozen = false;
         }
     }
 
