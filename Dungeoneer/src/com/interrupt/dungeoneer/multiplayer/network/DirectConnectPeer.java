@@ -4,6 +4,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 
 import java.util.List;
@@ -22,6 +23,18 @@ public interface DirectConnectPeer extends AutoCloseable {
     List<MovementSnapshot> getMovementSnapshots();
 
     PartyStatusSnapshot getPartyStatus();
+
+    PartyCommunicationState getPartyCommunicationState();
+
+    void submitPartyChat(String text);
+
+    void requestPauseSession();
+
+    boolean isSessionPaused();
+
+    boolean canControlSessionPause();
+
+    void setSessionPaused(boolean paused);
 
     void submitMovementInput(MovementInputFrame input);
 

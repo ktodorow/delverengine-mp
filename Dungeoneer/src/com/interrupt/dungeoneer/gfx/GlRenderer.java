@@ -42,6 +42,8 @@ import com.interrupt.dungeoneer.gfx.drawables.*;
 import com.interrupt.dungeoneer.gfx.shaders.ShaderInfo;
 import com.interrupt.dungeoneer.gfx.shaders.WaterShaderInfo;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyChatMessage;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
@@ -49,6 +51,7 @@ import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
 import com.interrupt.dungeoneer.ui.PartyHudModel;
 import com.interrupt.dungeoneer.ui.PartyHudModel.Row;
+import com.interrupt.dungeoneer.ui.PartyNameplateVisibility;
 import com.interrupt.dungeoneer.partitioning.TriangleSpatialHash;
 import com.interrupt.dungeoneer.statuseffects.StatusEffect;
 import com.interrupt.dungeoneer.tiles.Tile;
@@ -163,6 +166,7 @@ public class GlRenderer {
 	protected Vector3 tempVector1 = new Vector3();
 	private final Vector3 partyLabelPosition = new Vector3();
 	private final Vector3 partyLabelDirection = new Vector3();
+	private static final float PARTY_NICKNAME_HEIGHT = 0.72f;
 	protected Vector3 tempLightWorkVector = new Vector3();
 
 	protected Color tempColor = new Color();
@@ -1623,6 +1627,7 @@ public class GlRenderer {
 		}
 
 		drawPartyHud();
+		drawPartyCommunication();
 	}
 
 	private void drawPartyHud() {
@@ -1640,6 +1645,7 @@ public class GlRenderer {
 				game.player.rot);
 		if(rows.isEmpty()) return;
 		drawRemoteNicknames(peer, latest);
+		if(!Gdx.input.isKeyPressed(com.badlogic.gdx.Input.Keys.TAB)) return;
 
 		float uiSize = Game.GetUiSize();
 		float fontSize = uiSize * 0.17f;
@@ -1664,9 +1670,10 @@ public class GlRenderer {
 					|| member.getEntityId().equals(peer.getLocalMovementEntityId())) continue;
 			MovementEntityState state = movement.getEntity(member.getEntityId());
 			if(state == null) continue;
-			partyLabelPosition.set(state.getX(), state.getZ() + 0.72f, state.getY());
+			partyLabelPosition.set(state.getX(), state.getZ() + PARTY_NICKNAME_HEIGHT, state.getY());
 			partyLabelDirection.set(partyLabelPosition).sub(camera.position);
-			if(partyLabelDirection.dot(camera.direction) <= 0f) continue;
+			if(partyLabelDirection.dot(camera.direction) <= 0f
+					|| !PartyNameplateVisibility.isWithinRange(partyLabelDirection.len())) continue;
 			camera.project(partyLabelPosition, 0, 0,
 					Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
 			drawCenteredTextAt(member.getNickname(),
@@ -1681,6 +1688,43 @@ public class GlRenderer {
 		if(row.getState() == PartyMemberState.DOWNED) return Color.YELLOW;
 		if(row.getState() == PartyMemberState.SPECTATING) return Color.LIGHT_GRAY;
 		return row.isLocal() ? Color.CYAN : Color.WHITE;
+	}
+
+	private void drawPartyCommunication() {
+		GameApplication application = GameApplication.instance;
+		if(application == null) return;
+		DirectConnectPeer peer = application.getDirectConnectPeer();
+		if(peer == null) return;
+		PartyCommunicationState communication = peer.getPartyCommunicationState();
+		if(communication == null) return;
+
+		float uiSize = Game.GetUiSize();
+		float fontSize = uiSize * 0.17f;
+		float left = -camera2D.viewportWidth / 2f + uiSize * 0.35f;
+		float y = camera2D.viewportHeight / 2f - uiSize * 0.45f;
+		if(communication.getPauseSession().isPaused()) {
+			drawCenteredText(peer.canControlSessionPause()
+					? "SESSION PAUSED - PRESS P TO RESUME"
+					: "SESSION PAUSED - HOST CONTROLS RESUME",
+					camera2D.viewportHeight * 0.18f, fontSize * 1.2f,
+					Color.YELLOW, Color.BLACK);
+		}
+
+		if(communication.getLatestPauseRequest() != null) {
+			drawText(communication.getLatestPauseRequest().getNickname()
+					+ " REQUESTED A PAUSE", left, y, fontSize, Color.YELLOW);
+			y -= uiSize * 0.28f;
+		}
+
+		List<PartyChatMessage> chatHistory = communication.getChatHistory();
+		int firstChat = Math.max(0, chatHistory.size() - 4);
+		for(int index = firstChat; index < chatHistory.size(); index++) {
+			PartyChatMessage message = chatHistory.get(index);
+			drawText(message.getNickname() + ": " + message.getText(), left, y,
+					fontSize, Color.WHITE, Color.BLACK);
+			y -= uiSize * 0.25f;
+		}
+
 	}
 
 	public void Render(Entity s) {

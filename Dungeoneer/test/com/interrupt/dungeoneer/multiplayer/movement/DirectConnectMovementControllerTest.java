@@ -1,6 +1,7 @@
 package com.interrupt.dungeoneer.multiplayer.movement;
 
 import com.interrupt.dungeoneer.entities.Player;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectStatus;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
@@ -53,6 +54,14 @@ public class DirectConnectMovementControllerTest {
         }
         @Override public List<MovementSnapshot> getMovementSnapshots() { return snapshots; }
         @Override public PartyStatusSnapshot getPartyStatus() { return null; }
+        @Override public PartyCommunicationState getPartyCommunicationState() {
+            return PartyCommunicationState.initial();
+        }
+        @Override public void submitPartyChat(String text) { }
+        @Override public void requestPauseSession() { }
+        @Override public boolean isSessionPaused() { return false; }
+        @Override public boolean canControlSessionPause() { return false; }
+        @Override public void setSessionPaused(boolean paused) { }
         @Override public void submitMovementInput(MovementInputFrame input) { }
         @Override public void close() { }
     }

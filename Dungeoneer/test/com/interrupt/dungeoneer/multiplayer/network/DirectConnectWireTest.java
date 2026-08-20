@@ -6,6 +6,9 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementState;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyChatMessage;
+import com.interrupt.dungeoneer.multiplayer.communication.PauseRequest;
+import com.interrupt.dungeoneer.multiplayer.communication.PauseSessionState;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientHello;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ProtocolException;
@@ -190,6 +193,33 @@ public class DirectConnectWireTest {
     }
 
     @Test
+    public void boundedPartyCommunicationRoundTripsWithoutEngineObjects() throws Exception {
+        DirectConnectWire.PartyChatSubmit submitted =
+                (DirectConnectWire.PartyChatSubmit)roundTrip(
+                        new DirectConnectWire.PartyChatSubmit("session", "Watch left."));
+        assertEquals("Watch left.", submitted.text);
+
+        DirectConnectWire.PartyChatDelivery chat =
+                (DirectConnectWire.PartyChatDelivery)roundTrip(
+                        new DirectConnectWire.PartyChatDelivery("session",
+                                new PartyChatMessage(1L, 2, "Friend", "Watch left.")));
+        assertEquals("Friend", chat.message.getNickname());
+        assertEquals("Watch left.", chat.message.getText());
+
+        DirectConnectWire.PauseRequestedMessage request =
+                (DirectConnectWire.PauseRequestedMessage)roundTrip(
+                        new DirectConnectWire.PauseRequestedMessage("session",
+                                new PauseRequest(3L, 2, "Friend")));
+        assertEquals(2, request.request.getCampaignSlot());
+
+        DirectConnectWire.PauseSessionStateMessage paused =
+                (DirectConnectWire.PauseSessionStateMessage)roundTrip(
+                        new DirectConnectWire.PauseSessionStateMessage("session",
+                                new PauseSessionState(4L, true)));
+        assertTrue(paused.state.isPaused());
+    }
+
+    @Test
     public void rejectsInvalidUtf8AndUnknownMessageTypes() throws Exception {
         ByteBuf invalidUtf8 = Unpooled.buffer();
         invalidUtf8.writeInt(DirectConnectProtocol.MAGIC);
@@ -214,6 +244,16 @@ public class DirectConnectWireTest {
         oversized.writeShort(DirectConnectProtocol.MAX_BUILD_ID_BYTES + 1);
         oversized.writeZero(DirectConnectProtocol.MAX_BUILD_ID_BYTES + 1);
         assertProtocolFailure(oversized, "build identity exceeded");
+    }
+
+    @Test
+    public void rejectsMalformedPartyCommunicationBeforeSessionCodeCanHandleIt()
+            throws Exception {
+        ByteBuf encoded = DirectConnectWire.encodeDatagram(
+                UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.PartyChatSubmit("session", "safe"));
+        encoded.setByte(encoded.writerIndex() - 2, '\n');
+        assertProtocolFailure(encoded, "Party chat cannot contain control characters");
     }
 
     private void assertProtocolFailure(ByteBuf message, String expected) throws Exception {

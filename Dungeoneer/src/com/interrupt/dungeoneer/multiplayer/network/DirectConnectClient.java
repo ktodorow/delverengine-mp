@@ -13,6 +13,11 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.MovementInputs;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.MovementSnapshotMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.PartyStatusMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.PartyChatDelivery;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.PartyChatSubmit;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.PauseRequestedMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.PauseRequestMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.PauseSessionStateMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ProtocolException;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerAccepted;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerDisconnect;
@@ -30,6 +35,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
@@ -103,6 +109,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile int udpRegistrationAttempts;
     private volatile NetworkEntityId localMovementEntityId;
     private volatile PartyStatusSnapshot partyStatus;
+    private volatile PartyCommunicationState partyCommunication =
+            PartyCommunicationState.initial();
     private long lastSubmittedMovementTick;
 
     private DirectConnectClient(String host, int port, LauncherIdentity launcherIdentity,
@@ -419,6 +427,35 @@ public final class DirectConnectClient implements DirectConnectPeer {
         becomeReadyIfComplete();
     }
 
+    private synchronized void partyChat(PartyChatDelivery delivery) {
+        if(!isReadySession(delivery.sessionId)) {
+            fail("Host returned Party chat outside current session.");
+            return;
+        }
+        partyCommunication = partyCommunication.withChat(delivery.message);
+    }
+
+    private synchronized void pauseRequested(PauseRequestedMessage delivery) {
+        if(!isReadySession(delivery.sessionId)) {
+            fail("Host returned Pause request outside current session.");
+            return;
+        }
+        partyCommunication = partyCommunication.withPauseRequest(delivery.request);
+    }
+
+    private synchronized void pauseSession(PauseSessionStateMessage delivery) {
+        if(!isReadySession(delivery.sessionId)) {
+            fail("Host returned Pause Session state outside current session.");
+            return;
+        }
+        partyCommunication = partyCommunication.withPauseSession(delivery.state);
+    }
+
+    private boolean isReadySession(String messageSessionId) {
+        return sessionId != null && sessionId.equals(messageSessionId)
+                && campaignSlot != 0;
+    }
+
     private synchronized void entitySpawn(EntitySpawn spawn) {
         if(sessionId == null || !sessionId.equals(spawn.sessionId)
                 || spawn.descriptor == null) {
@@ -539,6 +576,44 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     @Override
+    public PartyCommunicationState getPartyCommunicationState() {
+        return partyCommunication;
+    }
+
+    @Override
+    public synchronized void submitPartyChat(String text) {
+        PartyChatSubmit chat = new PartyChatSubmit(sessionId, text);
+        if(!canSendReliableSessionEvent()) return;
+        tcpChannel.writeAndFlush(chat);
+    }
+
+    @Override
+    public synchronized void requestPauseSession() {
+        if(!canSendReliableSessionEvent()) return;
+        tcpChannel.writeAndFlush(new PauseRequestMessage(sessionId));
+    }
+
+    @Override
+    public boolean isSessionPaused() {
+        return partyCommunication.getPauseSession().isPaused();
+    }
+
+    @Override
+    public boolean canControlSessionPause() {
+        return false;
+    }
+
+    @Override
+    public void setSessionPaused(boolean paused) {
+        throw new UnsupportedOperationException("Only Host can control Pause Session.");
+    }
+
+    private boolean canSendReliableSessionEvent() {
+        return status.getPhase() == DirectConnectPhase.READY && sessionId != null
+                && tcpChannel != null && tcpChannel.isActive();
+    }
+
+    @Override
     public synchronized void submitMovementInput(MovementInputFrame input) {
         if(input == null) throw new IllegalArgumentException("Movement input cannot be null.");
         if(input.getInputTick() <= lastSubmittedMovementTick) return;
@@ -653,6 +728,18 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof PartyStatusMessage && sessionId != null
                     && campaignSlot != 0) {
                 partyStatus((PartyStatusMessage)message);
+            }
+            else if(message instanceof PartyChatDelivery && sessionId != null
+                    && campaignSlot != 0) {
+                partyChat((PartyChatDelivery)message);
+            }
+            else if(message instanceof PauseRequestedMessage && sessionId != null
+                    && campaignSlot != 0) {
+                pauseRequested((PauseRequestedMessage)message);
+            }
+            else if(message instanceof PauseSessionStateMessage && sessionId != null
+                    && campaignSlot != 0) {
+                pauseSession((PauseSessionStateMessage)message);
             }
             else if(message instanceof EntitySpawn && sessionId != null
                     && campaignSlot != 0) {

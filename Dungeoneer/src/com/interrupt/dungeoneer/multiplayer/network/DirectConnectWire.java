@@ -6,6 +6,10 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementState;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyChatMessage;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationText;
+import com.interrupt.dungeoneer.multiplayer.communication.PauseRequest;
+import com.interrupt.dungeoneer.multiplayer.communication.PauseSessionState;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
@@ -48,6 +52,11 @@ final class DirectConnectWire {
     private static final int DISCOVERY_PROBE = 16;
     private static final int DISCOVERY_ANNOUNCEMENT = 17;
     private static final int PARTY_STATUS = 18;
+    private static final int PARTY_CHAT_SUBMIT = 19;
+    private static final int PARTY_CHAT_DELIVERY = 20;
+    private static final int PAUSE_REQUEST = 23;
+    private static final int PAUSE_REQUESTED = 24;
+    private static final int PAUSE_SESSION_STATE = 25;
 
     private DirectConnectWire() { }
 
@@ -325,6 +334,52 @@ final class DirectConnectWire {
                 output.writeByte(member.getRemainingLives());
                 output.writeByte(member.getState().getWireId());
             }
+        }
+        else if(message instanceof PartyChatSubmit) {
+            PartyChatSubmit chat = (PartyChatSubmit)message;
+            output.writeByte(PARTY_CHAT_SUBMIT);
+            writeString(output, chat.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            writeString(output, PartyCommunicationText.requireChat(chat.text),
+                    DirectConnectProtocol.MAX_PARTY_CHAT_BYTES, "Party chat");
+        }
+        else if(message instanceof PartyChatDelivery) {
+            PartyChatDelivery chat = (PartyChatDelivery)message;
+            PartyChatMessage delivery = chat.message;
+            output.writeByte(PARTY_CHAT_DELIVERY);
+            writeString(output, chat.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(delivery.getSequence());
+            output.writeByte(delivery.getCampaignSlot());
+            writeString(output, delivery.getNickname(), DirectConnectProtocol.MAX_NICKNAME_BYTES,
+                    "Nickname");
+            writeString(output, delivery.getText(), DirectConnectProtocol.MAX_PARTY_CHAT_BYTES,
+                    "Party chat");
+        }
+        else if(message instanceof PauseRequestMessage) {
+            PauseRequestMessage request = (PauseRequestMessage)message;
+            output.writeByte(PAUSE_REQUEST);
+            writeString(output, request.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+        }
+        else if(message instanceof PauseRequestedMessage) {
+            PauseRequestedMessage request = (PauseRequestedMessage)message;
+            PauseRequest delivery = request.request;
+            output.writeByte(PAUSE_REQUESTED);
+            writeString(output, request.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(delivery.getSequence());
+            output.writeByte(delivery.getCampaignSlot());
+            writeString(output, delivery.getNickname(), DirectConnectProtocol.MAX_NICKNAME_BYTES,
+                    "Nickname");
+        }
+        else if(message instanceof PauseSessionStateMessage) {
+            PauseSessionStateMessage pause = (PauseSessionStateMessage)message;
+            output.writeByte(PAUSE_SESSION_STATE);
+            writeString(output, pause.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(pause.state.getSequence());
+            output.writeBoolean(pause.state.isPaused());
         }
         else if(message instanceof ClientDisconnect) {
             output.writeByte(CLIENT_DISCONNECT);
@@ -661,6 +716,64 @@ final class DirectConnectWire {
                             + ex.getMessage(), ex);
                 }
                 break;
+            case PARTY_CHAT_SUBMIT:
+                message = new PartyChatSubmit(readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity"),
+                        requireChat(readString(input,
+                                DirectConnectProtocol.MAX_PARTY_CHAT_BYTES, "Party chat")));
+                break;
+            case PARTY_CHAT_DELIVERY:
+                String chatSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 9, "Party chat delivery identity");
+                long chatSequence = input.readLong();
+                int chatSlot = input.readUnsignedByte();
+                String chatNickname = readString(input,
+                        DirectConnectProtocol.MAX_NICKNAME_BYTES, "Nickname");
+                String chatText = requireChat(readString(input,
+                        DirectConnectProtocol.MAX_PARTY_CHAT_BYTES, "Party chat"));
+                try {
+                    message = new PartyChatDelivery(chatSession,
+                            new PartyChatMessage(chatSequence, chatSlot, chatNickname, chatText));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed Party chat: " + ex.getMessage(), ex);
+                }
+                break;
+            case PAUSE_REQUEST:
+                message = new PauseRequestMessage(readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity"));
+                break;
+            case PAUSE_REQUESTED:
+                String pauseRequestSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 9, "Pause request identity");
+                long pauseRequestSequence = input.readLong();
+                int pauseRequestSlot = input.readUnsignedByte();
+                String pauseRequestNickname = readString(input,
+                        DirectConnectProtocol.MAX_NICKNAME_BYTES, "Nickname");
+                try {
+                    message = new PauseRequestedMessage(pauseRequestSession,
+                            new PauseRequest(pauseRequestSequence, pauseRequestSlot,
+                                    pauseRequestNickname));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed Pause request: " + ex.getMessage(), ex);
+                }
+                break;
+            case PAUSE_SESSION_STATE:
+                String pauseSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 9, "Pause Session state");
+                try {
+                    message = new PauseSessionStateMessage(pauseSession,
+                            new PauseSessionState(input.readLong(), input.readBoolean()));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed Pause Session state: "
+                            + ex.getMessage(), ex);
+                }
+                break;
             case CLIENT_DISCONNECT:
                 message = new ClientDisconnect(readString(input,
                         DirectConnectProtocol.MAX_REASON_BYTES, "disconnect reason"));
@@ -715,6 +828,15 @@ final class DirectConnectWire {
             throws ProtocolException {
         if(bytes < 0 || input.readableBytes() < bytes) {
             throw new ProtocolException("Wire message ended inside " + label + ".");
+        }
+    }
+
+    private static String requireChat(String value) throws ProtocolException {
+        try {
+            return PartyCommunicationText.requireChat(value);
+        }
+        catch(IllegalArgumentException ex) {
+            throw new ProtocolException("Malformed Party chat: " + ex.getMessage(), ex);
         }
     }
 
@@ -973,6 +1095,57 @@ final class DirectConnectWire {
             }
             this.sessionId = sessionId;
             this.snapshot = snapshot;
+        }
+    }
+
+    static final class PartyChatSubmit implements Message {
+        final String sessionId;
+        final String text;
+
+        PartyChatSubmit(String sessionId, String text) {
+            this.sessionId = sessionId;
+            this.text = PartyCommunicationText.requireChat(text);
+        }
+    }
+
+    static final class PartyChatDelivery implements Message {
+        final String sessionId;
+        final PartyChatMessage message;
+
+        PartyChatDelivery(String sessionId, PartyChatMessage message) {
+            if(message == null) throw new IllegalArgumentException("Party chat cannot be null.");
+            this.sessionId = sessionId;
+            this.message = message;
+        }
+    }
+
+    static final class PauseRequestMessage implements Message {
+        final String sessionId;
+
+        PauseRequestMessage(String sessionId) {
+            this.sessionId = sessionId;
+        }
+    }
+
+    static final class PauseRequestedMessage implements Message {
+        final String sessionId;
+        final PauseRequest request;
+
+        PauseRequestedMessage(String sessionId, PauseRequest request) {
+            if(request == null) throw new IllegalArgumentException("Pause request cannot be null.");
+            this.sessionId = sessionId;
+            this.request = request;
+        }
+    }
+
+    static final class PauseSessionStateMessage implements Message {
+        final String sessionId;
+        final PauseSessionState state;
+
+        PauseSessionStateMessage(String sessionId, PauseSessionState state) {
+            if(state == null) throw new IllegalArgumentException("Pause Session state cannot be null.");
+            this.sessionId = sessionId;
+            this.state = state;
         }
     }
 

@@ -15,6 +15,7 @@ import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerRejected;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -207,6 +208,58 @@ public class DirectConnectIntegrationTest {
         finally {
             second.close();
             third.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void reliablePartyCommunicationUsesHostOwnedChatAndPauseControl()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("communication-floor");
+        HostFixture fixture = host(compatibility, 2, "communication");
+        DirectConnectClient client = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        try {
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitMovementSnapshots(client, 2);
+
+            client.submitPartyChat("Watch left.");
+            awaitChatCount(fixture.host, 1);
+            awaitChatCount(client, 1);
+            assertEquals("Friend", fixture.host.getPartyCommunicationState()
+                    .getChatHistory().get(0).getNickname());
+            assertEquals("Watch left.", client.getPartyCommunicationState()
+                    .getChatHistory().get(0).getText());
+
+            fixture.host.submitPartyChat("Moving in.");
+            awaitChatCount(client, 2);
+            assertEquals("Host", client.getPartyCommunicationState()
+                    .getChatHistory().get(1).getNickname());
+
+            client.requestPauseSession();
+            awaitPauseRequest(client, 2);
+            assertFalse(client.isSessionPaused());
+            assertFalse(client.canControlSessionPause());
+            try {
+                client.setSessionPaused(true);
+                fail("Participant changed Host-owned Pause Session state.");
+            }
+            catch(UnsupportedOperationException expected) { }
+
+            fixture.host.setSessionPaused(true);
+            awaitPauseState(client, true);
+            Thread.sleep(100L);
+            int pausedSnapshotCount = fixture.host.getMovementSnapshots().size();
+            Thread.sleep(200L);
+            assertEquals(pausedSnapshotCount, fixture.host.getMovementSnapshots().size());
+
+            fixture.host.setSessionPaused(false);
+            awaitPauseState(client, false);
+            awaitMovementSnapshotCount(fixture.host, pausedSnapshotCount + 1);
+        }
+        finally {
+            client.close();
             fixture.close();
         }
     }
@@ -539,6 +592,47 @@ public class DirectConnectIntegrationTest {
         fail("Timed out waiting for Campaign Slot " + campaignSlot
                 + " Party state " + expected + ".");
         return null;
+    }
+
+    private void awaitChatCount(DirectConnectPeer peer, int count) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(peer.getPartyCommunicationState().getChatHistory().size() >= count) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for " + count + " Party chat deliveries.");
+    }
+
+    private void awaitPauseRequest(DirectConnectPeer peer, int campaignSlot)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            PartyCommunicationState state = peer.getPartyCommunicationState();
+            if(state.getLatestPauseRequest() != null
+                    && state.getLatestPauseRequest().getCampaignSlot() == campaignSlot) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for Pause Session request.");
+    }
+
+    private void awaitPauseState(DirectConnectPeer peer, boolean paused)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(peer.isSessionPaused() == paused) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for Pause Session=" + paused + ".");
+    }
+
+    private void awaitMovementSnapshotCount(DirectConnectPeer peer, int count)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(peer.getMovementSnapshots().size() >= count) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for resumed authoritative movement.");
     }
 
     private void awaitAcknowledgedInput(DirectConnectClient client, long inputTick)

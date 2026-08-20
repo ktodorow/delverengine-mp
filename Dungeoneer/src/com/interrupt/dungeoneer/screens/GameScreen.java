@@ -1,6 +1,7 @@
 package com.interrupt.dungeoneer.screens;
 
 import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.Input;
 import com.badlogic.gdx.Screen;
 import com.interrupt.dungeoneer.Audio;
 import com.interrupt.dungeoneer.GameApplication;
@@ -13,7 +14,9 @@ import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.gfx.Tesselator;
 import com.interrupt.dungeoneer.metrics.MetricsCore;
 import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
+import com.interrupt.dungeoneer.overlays.PartyChatOverlay;
 
 import java.util.Map.Entry;
 
@@ -67,6 +70,8 @@ public class GameScreen implements Screen {
 
 		if(running) {
 			Game game = GameManager.getGame();
+			DirectConnectPeer directConnect = directConnectPeer();
+			handlePartyControls(directConnect);
 
 			if(resetDelta) {
 				resetDelta = false;
@@ -76,7 +81,8 @@ public class GameScreen implements Screen {
 			// set a maximum time between ticks (12 fps, wouldn't be playable anyway)
 			if(delta > 0.083f) delta = 0.083f;
 
-			if(!overlayManager.shouldPauseGame())
+			if((!overlayManager.shouldPauseGame() || directConnect != null)
+					&& (directConnect == null || !directConnect.isSessionPaused()))
 			{
 				gameManager.tick(delta * 60f);
 
@@ -92,7 +98,8 @@ public class GameScreen implements Screen {
 			if(game != null)
 				game.updateMouseInput();
 
-            if(networkMovementController != null && game != null) {
+			if(networkMovementController != null && game != null
+					&& (directConnect == null || !directConnect.isSessionPaused())) {
                 networkMovementController.update(game, input, delta);
             }
 
@@ -239,5 +246,23 @@ public class GameScreen implements Screen {
     public void setNetworkMovementController(
             DirectConnectMovementController networkMovementController) {
         this.networkMovementController = networkMovementController;
+    }
+
+    private DirectConnectPeer directConnectPeer() {
+        return GameApplication.instance == null ? null
+                : GameApplication.instance.getDirectConnectPeer();
+    }
+
+    private void handlePartyControls(DirectConnectPeer peer) {
+        if(peer == null || peer.getStatus().getPhase()
+                != com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY
+                || Gdx.input.getInputProcessor() != input) return;
+        if(Gdx.input.isKeyJustPressed(Input.Keys.T)) {
+            OverlayManager.instance.push(new PartyChatOverlay(peer));
+        }
+        else if(Gdx.input.isKeyJustPressed(Input.Keys.P)) {
+            if(peer.canControlSessionPause()) peer.setSessionPaused(!peer.isSessionPaused());
+            else peer.requestPauseSession();
+        }
     }
 }
