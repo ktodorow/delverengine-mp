@@ -12,6 +12,7 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.EntitySpaw
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.MovementInputs;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.MovementSnapshotMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.PartyStatusMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ProtocolException;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerAccepted;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerDisconnect;
@@ -27,6 +28,8 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementReplicationState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
@@ -99,6 +102,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile SessionReady readyMessage;
     private volatile int udpRegistrationAttempts;
     private volatile NetworkEntityId localMovementEntityId;
+    private volatile PartyStatusSnapshot partyStatus;
     private long lastSubmittedMovementTick;
 
     private DirectConnectClient(String host, int port, LauncherIdentity launcherIdentity,
@@ -397,6 +401,24 @@ public final class DirectConnectClient implements DirectConnectPeer {
         becomeReadyIfComplete();
     }
 
+    private synchronized void partyStatus(PartyStatusMessage message) {
+        if(sessionId == null || !sessionId.equals(message.sessionId)
+                || message.snapshot == null) {
+            fail("Host returned malformed Party status state.");
+            return;
+        }
+        PartyMemberStatus local = message.snapshot.getMember(campaignSlot);
+        if(local == null || local.getEntityId() == null
+                || !local.getEntityId().equals(localMovementEntityId)) {
+            fail("Host Party status omitted local Campaign Slot.");
+            return;
+        }
+        if(partyStatus == null || message.snapshot.getSequence() > partyStatus.getSequence()) {
+            partyStatus = message.snapshot;
+        }
+        becomeReadyIfComplete();
+    }
+
     private synchronized void entitySpawn(EntitySpawn spawn) {
         if(sessionId == null || !sessionId.equals(spawn.sessionId)
                 || spawn.descriptor == null) {
@@ -418,7 +440,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     private void becomeReadyIfComplete() {
-        if(!udpRegistered || readyMessage == null) return;
+        if(!udpRegistered || readyMessage == null || partyStatus == null) return;
         status = new DirectConnectStatus(DirectConnectPhase.READY,
                 "Host started play with " + readyMessage.participantCount
                         + " Participants. Entering shared open-source test floor.",
@@ -509,6 +531,11 @@ public final class DirectConnectClient implements DirectConnectPeer {
     @Override
     public List<MovementSnapshot> getMovementSnapshots() {
         return movementReplication.getSnapshots();
+    }
+
+    @Override
+    public PartyStatusSnapshot getPartyStatus() {
+        return partyStatus;
     }
 
     @Override
@@ -622,6 +649,10 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof SessionReady && sessionId != null
                     && campaignSlot != 0) {
                 sessionReady((SessionReady)message);
+            }
+            else if(message instanceof PartyStatusMessage && sessionId != null
+                    && campaignSlot != 0) {
+                partyStatus((PartyStatusMessage)message);
             }
             else if(message instanceof EntitySpawn && sessionId != null
                     && campaignSlot != 0) {

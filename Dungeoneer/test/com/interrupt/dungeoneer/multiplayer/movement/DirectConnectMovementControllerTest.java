@@ -3,6 +3,7 @@ package com.interrupt.dungeoneer.multiplayer.movement;
 import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 
 import org.junit.Test;
 
@@ -51,6 +52,7 @@ public class DirectConnectMovementControllerTest {
             return Collections.emptyList();
         }
         @Override public List<MovementSnapshot> getMovementSnapshots() { return snapshots; }
+        @Override public PartyStatusSnapshot getPartyStatus() { return null; }
         @Override public void submitMovementInput(MovementInputFrame input) { }
         @Override public void close() { }
     }

@@ -224,6 +224,10 @@ public class GameApplication extends Game {
         completedScreen.dispose();
     }
 
+    public DirectConnectPeer getDirectConnectPeer() {
+        return directConnectPeer;
+    }
+
     private void createGameplay(com.interrupt.dungeoneer.game.Game.StartMode startMode,
             boolean launchImmediately) {
 		instance = this;

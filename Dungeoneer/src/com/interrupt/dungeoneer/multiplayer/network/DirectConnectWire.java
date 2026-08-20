@@ -7,6 +7,9 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementState;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
@@ -44,6 +47,7 @@ final class DirectConnectWire {
     private static final int MOVEMENT_SNAPSHOT = 15;
     private static final int DISCOVERY_PROBE = 16;
     private static final int DISCOVERY_ANNOUNCEMENT = 17;
+    private static final int PARTY_STATUS = 18;
 
     private DirectConnectWire() { }
 
@@ -293,6 +297,33 @@ final class DirectConnectWire {
                 output.writeFloat(entity.getVelocityZ());
                 output.writeFloat(entity.getRotation());
                 output.writeByte(entity.getMovementState().getWireId());
+            }
+        }
+        else if(message instanceof PartyStatusMessage) {
+            PartyStatusMessage partyMessage = (PartyStatusMessage)message;
+            List<PartyMemberStatus> members = partyMessage.snapshot.getMembers();
+            if(members.isEmpty() || members.size() > DirectConnectProtocol.MAX_PARTY_MEMBERS) {
+                throw new ProtocolException("Party status member count is outside protocol bounds.");
+            }
+            output.writeByte(PARTY_STATUS);
+            writeString(output, partyMessage.sessionId,
+                    DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(partyMessage.snapshot.getSequence());
+            output.writeByte(members.size());
+            for(PartyMemberStatus member : members) {
+                output.writeByte(member.getCampaignSlot());
+                output.writeBoolean(member.getEntityId() != null);
+                if(member.getEntityId() != null) {
+                    output.writeLong(member.getEntityId().getValue());
+                }
+                writeString(output, member.getNickname(),
+                        DirectConnectProtocol.MAX_NICKNAME_BYTES, "Nickname");
+                writeString(output, member.getAvatarId(),
+                        DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity");
+                output.writeInt(member.getHealth());
+                output.writeInt(member.getMaximumHealth());
+                output.writeByte(member.getRemainingLives());
+                output.writeByte(member.getState().getWireId());
             }
         }
         else if(message instanceof ClientDisconnect) {
@@ -574,6 +605,59 @@ final class DirectConnectWire {
                 }
                 catch(IllegalArgumentException ex) {
                     throw new ProtocolException("Malformed movement snapshot: "
+                            + ex.getMessage(), ex);
+                }
+                break;
+            case PARTY_STATUS:
+                String partySession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 9, "Party status header");
+                long partySequence = input.readLong();
+                int partyMemberCount = input.readUnsignedByte();
+                if(partyMemberCount < 1
+                        || partyMemberCount > DirectConnectProtocol.MAX_PARTY_MEMBERS) {
+                    throw new ProtocolException(
+                            "Party status member count is outside protocol bounds.");
+                }
+                List<PartyMemberStatus> partyMembers =
+                        new ArrayList<PartyMemberStatus>();
+                for(int i = 0; i < partyMemberCount; i++) {
+                    requireReadable(input, 2, "Party member identity");
+                    int partySlot = input.readUnsignedByte();
+                    boolean hasPartyEntity = input.readBoolean();
+                    Long partyEntityValue = null;
+                    if(hasPartyEntity) {
+                        requireReadable(input, 8, "Party member Entity identity");
+                        partyEntityValue = input.readLong();
+                    }
+                    String partyNickname = readString(input,
+                            DirectConnectProtocol.MAX_NICKNAME_BYTES, "Nickname");
+                    String partyAvatar = readString(input,
+                            DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity");
+                    requireReadable(input, 10, "Party member status");
+                    int partyHealth = input.readInt();
+                    int partyMaximumHealth = input.readInt();
+                    int partyLives = input.readUnsignedByte();
+                    int partyState = input.readUnsignedByte();
+                    try {
+                        NetworkEntityId partyEntity = partyEntityValue == null
+                                ? null : new NetworkEntityId(partyEntityValue);
+                        partyMembers.add(new PartyMemberStatus(partySlot, partyEntity,
+                                partyNickname, partyAvatar, partyHealth,
+                                partyMaximumHealth, partyLives,
+                                PartyMemberState.fromWireId(partyState)));
+                    }
+                    catch(IllegalArgumentException ex) {
+                        throw new ProtocolException("Malformed Party status: "
+                                + ex.getMessage(), ex);
+                    }
+                }
+                try {
+                    message = new PartyStatusMessage(partySession,
+                            new PartyStatusSnapshot(partySequence, partyMembers));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed Party status: "
                             + ex.getMessage(), ex);
                 }
                 break;
@@ -874,6 +958,19 @@ final class DirectConnectWire {
 
         MovementSnapshotMessage(String sessionId, MovementSnapshot snapshot) {
             if(snapshot == null) throw new IllegalArgumentException("Movement snapshot cannot be null.");
+            this.sessionId = sessionId;
+            this.snapshot = snapshot;
+        }
+    }
+
+    static final class PartyStatusMessage implements Message {
+        final String sessionId;
+        final PartyStatusSnapshot snapshot;
+
+        PartyStatusMessage(String sessionId, PartyStatusSnapshot snapshot) {
+            if(snapshot == null) {
+                throw new IllegalArgumentException("Party status snapshot cannot be null.");
+            }
             this.sessionId = sessionId;
             this.snapshot = snapshot;
         }

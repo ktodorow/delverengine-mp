@@ -26,6 +26,7 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.EntitySpaw
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.MovementInputs;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.MovementSnapshotMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.PartyStatusMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ProtocolException;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.RejectCode;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerAccepted;
@@ -46,6 +47,8 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.movement.RectangularMovementCollisionWorld;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
@@ -104,7 +107,9 @@ public final class DirectConnectHost implements DirectConnectPeer {
     private volatile AuthoritativeMovementSimulation movementSimulation;
     private volatile AuthoritativeHostSession movementSession;
     private volatile ScheduledFuture<?> movementTask;
+    private volatile PartyStatusSnapshot partyStatus;
     private long nextLifecycleSequence;
+    private long nextPartyStatusSequence;
 
     private DirectConnectHost(DirectConnectCompatibility compatibility, CampaignRoster roster,
             CampaignRosterStore rosterStore, MovementCollisionWorld movementWorld) {
@@ -375,6 +380,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
                 localMovementEntityId = descriptor.getEntityId();
             }
         }
+        partyStatus = createPartyStatus(descriptors);
         for(RemoteConnection connection : connections.values()) {
             if(connection.slot != null && connection.udpAddress != null
                     && connection.channel.isActive()) {
@@ -384,6 +390,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
                         connection.movementDescriptor = descriptor;
                     }
                 }
+                connection.channel.write(new PartyStatusMessage(sessionId, partyStatus));
                 connection.channel.writeAndFlush(new SessionReady(sessionId, participantCount,
                         GameApplication.OPEN_SOURCE_TEST_LEVEL));
             }
@@ -419,6 +426,22 @@ public final class DirectConnectHost implements DirectConnectPeer {
                     slot.getPresentation().getAvatarId()));
         }
         return descriptors;
+    }
+
+    private PartyStatusSnapshot createPartyStatus(
+            List<MovementEntityDescriptor> descriptors) {
+        List<PartyMemberStatus> members = new ArrayList<PartyMemberStatus>();
+        for(CampaignSlot slot : roster.getSlots()) {
+            MovementEntityDescriptor descriptor = null;
+            for(MovementEntityDescriptor candidate : descriptors) {
+                if(candidate.getCampaignSlot() == slot.getNumber()) {
+                    descriptor = candidate;
+                    break;
+                }
+            }
+            members.add(PartyMemberStatus.initial(slot, descriptor));
+        }
+        return new PartyStatusSnapshot(++nextPartyStatusSequence, members);
     }
 
     private void startMovementTicks() {
@@ -565,6 +588,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
                     remaining.channel.writeAndFlush(despawn);
                 }
             }
+            markPartyMemberDisconnected(descriptor.getCampaignSlot());
             status = status(DirectConnectPhase.READY,
                     descriptor.getNickname()
                             + " left Active Floor; stable remote Avatar despawned.",
@@ -576,6 +600,27 @@ public final class DirectConnectHost implements DirectConnectPeer {
             status = status(DirectConnectPhase.DISCONNECTED,
                     "Participant TCP connection closed; persistent Campaign Slot was preserved.",
                     connection.launcherIdentity.getFingerprint(), null);
+        }
+    }
+
+    private void markPartyMemberDisconnected(int campaignSlot) {
+        PartyStatusSnapshot current = partyStatus;
+        if(current == null) return;
+        List<PartyMemberStatus> updated =
+                new ArrayList<PartyMemberStatus>(current.getMembers());
+        for(int index = 0; index < updated.size(); index++) {
+            PartyMemberStatus member = updated.get(index);
+            if(member.getCampaignSlot() == campaignSlot) {
+                updated.set(index, member.disconnected());
+                break;
+            }
+        }
+        partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, updated);
+        PartyStatusMessage message = new PartyStatusMessage(sessionId, partyStatus);
+        for(RemoteConnection remaining : connections.values()) {
+            if(remaining.channel.isActive() && remaining.movementDescriptor != null) {
+                remaining.channel.writeAndFlush(message);
+            }
         }
     }
 
@@ -670,6 +715,11 @@ public final class DirectConnectHost implements DirectConnectPeer {
     @Override
     public List<MovementSnapshot> getMovementSnapshots() {
         return movementReplication.getSnapshots();
+    }
+
+    @Override
+    public PartyStatusSnapshot getPartyStatus() {
+        return partyStatus;
     }
 
     @Override

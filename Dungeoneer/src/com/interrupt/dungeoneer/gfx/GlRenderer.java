@@ -42,6 +42,13 @@ import com.interrupt.dungeoneer.gfx.drawables.*;
 import com.interrupt.dungeoneer.gfx.shaders.ShaderInfo;
 import com.interrupt.dungeoneer.gfx.shaders.WaterShaderInfo;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.ui.PartyHudModel;
+import com.interrupt.dungeoneer.ui.PartyHudModel.Row;
 import com.interrupt.dungeoneer.partitioning.TriangleSpatialHash;
 import com.interrupt.dungeoneer.statuseffects.StatusEffect;
 import com.interrupt.dungeoneer.tiles.Tile;
@@ -154,6 +161,8 @@ public class GlRenderer {
 	public final Vector3 upVec = new Vector3(0, 1, 0);
 
 	protected Vector3 tempVector1 = new Vector3();
+	private final Vector3 partyLabelPosition = new Vector3();
+	private final Vector3 partyLabelDirection = new Vector3();
 	protected Vector3 tempLightWorkVector = new Vector3();
 
 	protected Color tempColor = new Color();
@@ -1612,6 +1621,66 @@ public class GlRenderer {
 		if(keystr != null && keystr.length() > 0) {
 			drawText(keystr, -camera2D.viewportWidth / 2 + healthSize / 2, -camera2D.viewportHeight / 2 + healthSize * 1.8f, healthSize, Color.WHITE);
 		}
+
+		drawPartyHud();
+	}
+
+	private void drawPartyHud() {
+		GameApplication application = GameApplication.instance;
+		if(application == null) return;
+		DirectConnectPeer peer = application.getDirectConnectPeer();
+		if(peer == null || peer.getPartyStatus() == null
+				|| peer.getLocalMovementEntityId() == null) return;
+
+		List<MovementSnapshot> snapshots = peer.getMovementSnapshots();
+		MovementSnapshot latest = snapshots.isEmpty()
+				? null : snapshots.get(snapshots.size() - 1);
+		List<Row> rows = PartyHudModel.build(peer.getPartyStatus(), latest,
+				peer.getLocalMovementEntityId(), game.player.x, game.player.y,
+				game.player.rot);
+		if(rows.isEmpty()) return;
+		drawRemoteNicknames(peer, latest);
+
+		float uiSize = Game.GetUiSize();
+		float fontSize = uiSize * 0.17f;
+		float right = camera2D.viewportWidth / 2f - uiSize * 0.2f;
+		float y = camera2D.viewportHeight / 2f - uiSize * 0.45f;
+		drawTextRightJustified("PARTY", right, y, fontSize, Color.WHITE, Color.BLACK);
+		y -= uiSize * 0.28f;
+		for(Row row : rows) {
+			Color rowColor = partyHudColor(row);
+			drawTextRightJustified(row.getDisplayText(), right, y,
+					fontSize, rowColor, Color.BLACK);
+			y -= uiSize * 0.25f;
+		}
+	}
+
+	private void drawRemoteNicknames(DirectConnectPeer peer,
+			MovementSnapshot movement) {
+		if(movement == null) return;
+		float fontSize = Game.GetUiSize() * 0.20f;
+		for(PartyMemberStatus member : peer.getPartyStatus().getMembers()) {
+			if(member.getEntityId() == null
+					|| member.getEntityId().equals(peer.getLocalMovementEntityId())) continue;
+			MovementEntityState state = movement.getEntity(member.getEntityId());
+			if(state == null) continue;
+			partyLabelPosition.set(state.getX(), state.getZ() + 0.72f, state.getY());
+			partyLabelDirection.set(partyLabelPosition).sub(camera.position);
+			if(partyLabelDirection.dot(camera.direction) <= 0f) continue;
+			camera.project(partyLabelPosition, 0, 0,
+					Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
+			drawCenteredTextAt(member.getNickname(),
+					partyLabelPosition.x - Gdx.graphics.getWidth() / 2f,
+					partyLabelPosition.y - Gdx.graphics.getHeight() / 2f,
+					fontSize, Color.WHITE, Color.BLACK);
+		}
+	}
+
+	private Color partyHudColor(Row row) {
+		if(row.getState() == PartyMemberState.DISCONNECTED) return Color.GRAY;
+		if(row.getState() == PartyMemberState.DOWNED) return Color.YELLOW;
+		if(row.getState() == PartyMemberState.SPECTATING) return Color.LIGHT_GRAY;
+		return row.isLocal() ? Color.CYAN : Color.WHITE;
 	}
 
 	public void Render(Entity s) {

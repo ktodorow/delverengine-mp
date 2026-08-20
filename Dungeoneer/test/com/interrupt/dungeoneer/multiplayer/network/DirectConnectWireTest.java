@@ -10,6 +10,9 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientHell
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ProtocolException;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -164,6 +167,26 @@ public class DirectConnectWireTest {
 
         assertEquals(16, decoded.inputs.size());
         assertEquals(16L, decoded.inputs.get(15).getInputTick());
+    }
+
+    @Test
+    public void boundedPartyStatusRoundTripsConnectedAndDisconnectedSlots()
+            throws Exception {
+        PartyStatusSnapshot party = new PartyStatusSnapshot(3L, Arrays.asList(
+                new PartyMemberStatus(1, new NetworkEntityId(1L), "Host",
+                        "humanoid-1", 8, 8, 3, PartyMemberState.CONNECTED),
+                new PartyMemberStatus(2, null, "Friend", "humanoid-2",
+                        4, 8, 2, PartyMemberState.DISCONNECTED)));
+
+        DirectConnectWire.PartyStatusMessage decoded =
+                (DirectConnectWire.PartyStatusMessage)roundTrip(
+                        new DirectConnectWire.PartyStatusMessage("session", party));
+
+        assertEquals(3L, decoded.snapshot.getSequence());
+        assertEquals(2, decoded.snapshot.getMembers().size());
+        assertEquals(4, decoded.snapshot.getMember(2).getHealth());
+        assertEquals(PartyMemberState.DISCONNECTED,
+                decoded.snapshot.getMember(2).getState());
     }
 
     @Test

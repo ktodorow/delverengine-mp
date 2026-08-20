@@ -11,6 +11,8 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerRejected;
 
@@ -172,6 +174,39 @@ public class DirectConnectIntegrationTest {
         }
         finally {
             client.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void reliablePartyStatusPreservesDisconnectedCampaignSlot() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("party-status-floor");
+        HostFixture fixture = host(compatibility, 3, "party-status");
+        DirectConnectClient second = approveClient(fixture, compatibility, '2', "Two",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient third = approveClient(fixture, compatibility, '3', "Three",
+                AvatarCatalog.HUMANOID_3);
+        try {
+            fixture.host.startSession();
+            awaitPhase(second, DirectConnectPhase.READY);
+            awaitPhase(third, DirectConnectPhase.READY);
+            assertEquals(3, third.getPartyStatus().getMembers().size());
+            assertEquals(PartyMemberState.CONNECTED,
+                    third.getPartyStatus().getMember(2).getState());
+            long connectedSequence = third.getPartyStatus().getSequence();
+
+            second.close();
+            PartyMemberStatus disconnected = awaitPartyState(third, 2,
+                    PartyMemberState.DISCONNECTED);
+
+            assertTrue(third.getPartyStatus().getSequence() > connectedSequence);
+            assertEquals("Two", disconnected.getNickname());
+            assertTrue(disconnected.getEntityId() == null);
+            assertEquals(3, disconnected.getRemainingLives());
+        }
+        finally {
+            second.close();
+            third.close();
             fixture.close();
         }
     }
@@ -489,6 +524,21 @@ public class DirectConnectIntegrationTest {
             Thread.sleep(10L);
         }
         fail("Timed out waiting for " + count + " authoritative movement snapshots.");
+    }
+
+    private PartyMemberStatus awaitPartyState(DirectConnectPeer peer, int campaignSlot,
+            PartyMemberState expected) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(peer.getPartyStatus() != null) {
+                PartyMemberStatus member = peer.getPartyStatus().getMember(campaignSlot);
+                if(member != null && member.getState() == expected) return member;
+            }
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for Campaign Slot " + campaignSlot
+                + " Party state " + expected + ".");
+        return null;
     }
 
     private void awaitAcknowledgedInput(DirectConnectClient client, long inputTick)
