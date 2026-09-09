@@ -1233,6 +1233,20 @@ public class Game {
 			if(equipOverSlot != null) break;
 		}
 
+        // A ground drag is only a visual selection until Host grants ownership.
+        if(mouseOverSlot == null && equipOverSlot == null
+                && Game.instance.player.cancelUnownedGroundDrag(dragging)) return DragAndDropResult.ignore;
+        if(Game.instance.player.requestGroundItemPlacement(dragging, mouseOverSlot, equipOverSlot)) {
+            return DragAndDropResult.ignore;
+        }
+        if(invLoc == null && equipLoc == null && Game.instance.player.ownsPhysicalItem(dragging)) {
+            int source = Game.instance.player.inventory.indexOf(dragging, true);
+            if(source >= 0) invLoc = source;
+            else for(java.util.Map.Entry<String, Item> entry : Game.instance.player.equippedItems.entrySet()) {
+                if(entry.getValue() == dragging) { equipLoc = entry.getKey(); break; }
+            }
+        }
+
 		if(equipOverSlot != null) {
 
 			if(!dragging.GetEquipLoc().equals(equipOverSlot)) return DragAndDropResult.invalid;
@@ -1327,6 +1341,8 @@ public class Game {
 			return DragAndDropResult.equip;
 		}
 
+        // Keep source slot intact until Host acknowledges; EquipLoc otherwise clears it first.
+        if(Game.instance.player.requestItemDrop(dragging)) return DragAndDropResult.ignore;
 		return DragAndDropResult.drop;
 	}
 

@@ -117,6 +117,10 @@ public class BasicTrigger extends Entity {
         }
     }
 
+    public void use(ParticipantContext participant) {
+        fire(participant, null);
+    }
+
     @Override
     public void use(Player p, float projx, float projy) {
         fire(localParticipant(p), null);

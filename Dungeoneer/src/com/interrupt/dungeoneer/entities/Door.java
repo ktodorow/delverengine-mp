@@ -18,8 +18,42 @@ import com.interrupt.dungeoneer.gfx.drawables.DrawableMesh;
 import com.interrupt.dungeoneer.gfx.drawables.DrawableSprite;
 import com.interrupt.dungeoneer.tiles.Tile;
 import com.interrupt.managers.StringManager;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
+import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
 
 public class Door extends Entity {
+    private transient ParticipantContext usingParticipant;
+    private transient DoorSnapshot networkSnapshot;
+    private transient java.util.function.BooleanSupplier spendPartyKey;
+
+    public void use(ParticipantContext participant) {
+        use(participant, null);
+    }
+
+    /** Host supplies shared key authority while trigger propagation retains activator. */
+    public void use(ParticipantContext participant, java.util.function.BooleanSupplier spendKey) {
+        usingParticipant = participant;
+        spendPartyKey = spendKey;
+        try { use((Player)null, 0f, 0f); }
+        finally { usingParticipant = null; spendPartyKey = null; }
+    }
+
+    public DoorSnapshot snapshot(long entityId, long revision) {
+        float progress = animateSpeed <= 0f ? 0f : Math.max(0f, Math.min(1f, animateTime / animateSpeed));
+        return new DoorSnapshot(entityId, revision, doorState.ordinal(), isLocked,
+                isActive, isSolid, x, y, z, rot, progress);
+    }
+
+    public void applyNetworkSnapshot(DoorSnapshot snapshot) {
+        networkSnapshot = snapshot;
+        doorState = DoorState.values()[snapshot.state];
+        isLocked = snapshot.locked;
+        isActive = snapshot.active;
+        isSolid = snapshot.solid;
+        x = snapshot.x; y = snapshot.y; z = snapshot.z; rot = snapshot.rotation;
+        animateTime = snapshot.animation * animateSpeed;
+    }
+
 	public enum DoorState {CLOSED, OPENING, OPEN, CLOSING, STUCK}
     public enum DoorOpenType {SLIDE, SLIDE_UP, ROTATE, ROTATE_UP}
     public enum DoorDirection {NORTH, SOUTH, EAST, WEST}
@@ -224,8 +258,8 @@ public class Door extends Entity {
                     doOpen(true);
             } else {
                 if (takesKey){
-                    if(p.keys > 0) {
-                        p.keys--;
+                    if(spendPartyKey != null ? spendPartyKey.getAsBoolean() : p != null && p.keys > 0) {
+                        if(spendPartyKey == null) p.keys--;
                         isLocked=false;
                         Game.ShowMessage(StringManager.get("entities.Door.unlockedText"), 3, 1f);
                         doOpen(true);
@@ -248,7 +282,7 @@ public class Door extends Entity {
             animateInterpolation = Interpolation.exp5;
             
         	doorState=DoorState.OPENING;
-        	if(fireTrigger) Game.instance.level.trigger(this, triggersId, "open");
+            if(fireTrigger) triggerDoor("open");
         	Audio.playPositionedSound(openSound, new Vector3(x, y, z), 0.4f, 10f);
         }
     }
@@ -260,11 +294,24 @@ public class Door extends Entity {
             animateSpeed = speed;
             
     		doorState=DoorState.CLOSING;
-    		if(fireTrigger) Game.instance.level.trigger(this, triggersId, "close");
+            if(fireTrigger) triggerDoor("close");
     		Audio.playPositionedSound(closingSound, new Vector3(x, y, z), 0.3f, 10f);
     	}
     }
 	
+    @Override
+    public void onTrigger(Entity instigator, String value, ParticipantContext participant) {
+        ParticipantContext previous = usingParticipant;
+        usingParticipant = participant;
+        try { onTrigger(instigator, value); }
+        finally { usingParticipant = previous; }
+    }
+
+    private void triggerDoor(String value) {
+        if(usingParticipant == null) Game.instance.level.trigger(this, triggersId, value);
+        else Game.instance.level.trigger(this, triggersId, value, usingParticipant);
+    }
+
 	private boolean hasRoomToOpen() {
 		if(doorType == DoorType.TRAPDOOR && doorOpenType == DoorOpenType.ROTATE) {
 			Entity encroaching = Game.instance.level.checkEntityCollision(x, y, z, collision, this);
@@ -285,7 +332,12 @@ public class Door extends Entity {
 
 	@Override
 	public void tick(Level level, float delta)
-	{		
+	{
+        if(networkSnapshot != null) {
+            applyNetworkSnapshot(networkSnapshot);
+            this.color = level.GetLightmapAt(x, y, z);
+            return;
+        }
 		isDynamic = false;
 		slideEffectTimer -= delta * 0.5f;
 		

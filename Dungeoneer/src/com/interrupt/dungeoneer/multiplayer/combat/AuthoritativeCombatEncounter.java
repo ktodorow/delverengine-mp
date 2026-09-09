@@ -233,6 +233,15 @@ public final class AuthoritativeCombatEncounter {
                 stateChanged, output);
     }
 
+    public synchronized void publishNativePresentation(long hostTick,
+            String sourceId, String targetId, CombatAction action, CombatPresentationPhase phase,
+            float originX, float originY, float originZ, float impactX, float impactY, float impactZ,
+            boolean stateChanged, ProjectileVisual visual, HostSessionOutput output) {
+        output.event(new CombatPresentationEvent(++presentationSequence, hostTick, sourceId,
+                targetId, action, phase, originX, originY, originZ, impactX, impactY, impactZ,
+                stateChanged, visual));
+    }
+
     public synchronized void recordNativeMonsterAttacker(long hostTick,
             String monsterId, ParticipantId attackerId) {
         MutableCombatant monster = monsters.get(monsterId);

@@ -1,5 +1,16 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.combat.CombatRequest;
+import com.interrupt.dungeoneer.multiplayer.combat.ProjectileVisual;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationPhase;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
+import com.interrupt.dungeoneer.multiplayer.participant.SharedPartyProgression;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantCharacterState;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
+import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
+import com.interrupt.dungeoneer.multiplayer.items.ItemRequest;
+import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
+import com.interrupt.dungeoneer.multiplayer.items.AuthoritativeItemWorld;
 import com.interrupt.dungeoneer.GameApplication;
 import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
 import com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeCombatEncounter;
@@ -57,6 +68,134 @@ public class DirectConnectIntegrationTest {
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     private int campaignStoreCounter;
+
+    @Test
+    public void reliableItemRequestsUseAuthenticatedParticipantAndConvergeAfterSharing() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("item-sharing");
+        HostFixture fixture = host(compatibility, 2, "item-sharing");
+        DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
+        try {
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            awaitPendingCount(fixture.host, 1);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            AuthoritativeItemWorld world = fixture.host.getItemWorld();
+            ParticipantId remote = null;
+            for(MovementEntityDescriptor descriptor
+                    : fixture.host.getMovementEntities()) {
+                world.registerParticipant(descriptor.getParticipantId(), 8);
+                if(descriptor.getCampaignSlot() == 2) remote = descriptor.getParticipantId();
+            }
+            assertNotNull(remote);
+            PhysicalItemState item =
+                    world.spawn("test-item", null, 1f, 1f, 0f);
+            fixture.host.publishPhysicalItems();
+            awaitPhysicalItem(client, item.entityId, null);
+            client.submitItemAction(1L, ItemAction.PICKUP,
+                    item.entityId);
+            ItemRequest request = awaitItemRequest(fixture.host);
+            assertEquals(remote, request.getParticipantId());
+            ParticipantContext participant =
+                    new ParticipantContext(remote,
+                            new ParticipantCharacterState(1, 1, 0, 0),
+                            new SharedPartyProgression());
+            AuthoritativeItemWorld.InteractionBoundary boundary =
+                    new AuthoritativeItemWorld.InteractionBoundary() {
+                public boolean canAct(ParticipantContext p) { return true; }
+                public boolean canReach(ParticipantContext p,
+                        float x, float y, float z) { return true; }
+                public boolean useObject(long id, ParticipantContext p) { return false; }
+            };
+            assertEquals(AuthoritativeItemWorld.Outcome.ACCEPTED,
+                    world.apply(request, participant, boundary));
+            fixture.host.publishPhysicalItems();
+            awaitPhysicalItem(client, item.entityId, remote);
+            client.submitCombatAction(1L, CombatAction.SPELL, 1f, 0f, 0f, 1f, item.entityId);
+            long shotDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            List<CombatRequest> shots = java.util.Collections.emptyList();
+            while(shots.isEmpty() && System.currentTimeMillis() < shotDeadline) {
+                shots = fixture.host.drainNativeCombatRequests();
+                if(shots.isEmpty()) Thread.sleep(10L);
+            }
+            assertEquals(1, shots.size());
+            assertEquals(item.entityId, shots.get(0).getWeaponEntityId());
+            assertEquals(remote, shots.get(0).getParticipantId());
+            ProjectileVisual visual =
+                    new ProjectileVisual(
+                            "sprite", 8, 0x0000ffff, 0.5f, 0.17f, true, true);
+            fixture.host.publishNativePresentation("participant:campaign-slot-1", "", CombatAction.SPELL,
+                    CombatPresentationPhase.ATTACK,
+                    1f, 1f, 0f, 2f, 1f, 0f, false, visual);
+            long visualDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(client.getCombatPresentationEvents().isEmpty()
+                    && System.currentTimeMillis() < visualDeadline) Thread.sleep(10L);
+            assertEquals(1, client.getCombatPresentationEvents().size());
+            assertEquals(0x0000ffff, client.getCombatPresentationEvents().get(0).getProjectileVisual().rgba);
+            client.submitItemAction(2L, ItemAction.DROP, item.entityId);
+            assertEquals(AuthoritativeItemWorld.Outcome.ACCEPTED,
+                    world.apply(awaitItemRequest(fixture.host), participant, boundary));
+            fixture.host.publishPhysicalItems();
+            awaitPhysicalItem(client, item.entityId, null);
+            assertEquals(1, client.getPhysicalItems().size());
+            world.registerEquipment(item.entityId, "ARMOR", false);
+            client.submitItemAction(3L, ItemAction.PICKUP, item.entityId);
+            assertEquals(AuthoritativeItemWorld.Outcome.ACCEPTED,
+                    world.apply(awaitItemRequest(fixture.host), participant, boundary));
+            client.submitItemAction(4L, ItemAction.EQUIP, item.entityId);
+            assertEquals(AuthoritativeItemWorld.Outcome.ACCEPTED,
+                    world.apply(awaitItemRequest(fixture.host), participant, boundary));
+            fixture.host.publishPhysicalItems();
+            long equipmentDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(client.getPhysicalItems().get(0).equipmentSlot.isEmpty()
+                    && System.currentTimeMillis() < equipmentDeadline) Thread.sleep(10L);
+            assertEquals("ARMOR", client.getPhysicalItems().get(0).equipmentSlot);
+
+            PhysicalItemState key = world.spawn("key", null, 1, 1, 0);
+            world.registerKey(key.entityId);
+            client.submitItemAction(5L, ItemAction.PICKUP, key.entityId);
+            assertEquals(AuthoritativeItemWorld.Outcome.ACCEPTED,
+                    world.apply(awaitItemRequest(fixture.host), participant, boundary));
+            fixture.host.publishPhysicalItems();
+            awaitPartyKeys(client, 1);
+            assertEquals(1, fixture.host.getPartyKeys());
+            assertTrue(world.spendPartyKey());
+            fixture.host.publishPhysicalItems();
+            awaitPartyKeys(client, 0);
+        }
+        finally { client.close(); fixture.close(); }
+    }
+
+    private void awaitPartyKeys(DirectConnectPeer peer, int expected) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(peer.getPartyKeys() != expected && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+        assertEquals(expected, peer.getPartyKeys());
+    }
+
+    private ItemRequest awaitItemRequest(DirectConnectHost host)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            List<ItemRequest> requests = host.drainItemRequests();
+            if(!requests.isEmpty()) return requests.get(0);
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("Host did not receive reliable item request.");
+    }
+
+    private void awaitPhysicalItem(DirectConnectPeer peer, long id, ParticipantId owner)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            for(PhysicalItemState state : peer.getPhysicalItems()) {
+                if(state.entityId == id && java.util.Objects.equals(owner, state.owner)) return;
+            }
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("Physical item ownership did not converge.");
+    }
 
     @Test
     public void refusedConnectionExplainsHowToStartHost() throws Exception {

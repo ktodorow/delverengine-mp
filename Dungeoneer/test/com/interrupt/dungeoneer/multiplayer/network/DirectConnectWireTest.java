@@ -1,5 +1,9 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
+import com.interrupt.dungeoneer.multiplayer.items.ItemProperties;
+import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
+import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
 import com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeCombatEncounter;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
@@ -37,6 +41,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -368,6 +373,80 @@ public class DirectConnectWireTest {
         finally {
             message.release();
         }
+    }
+
+    @Test
+    public void equipmentAndSharedKeysRoundTrip() throws Exception {
+        PhysicalItemState equipped = new PhysicalItemState(1, 2, "armor", new ParticipantId("slot-2"),
+                1, 1, 0, ItemProperties.DEFAULT, false, "ARMOR");
+        DirectConnectWire.ItemStateMessage item = (DirectConnectWire.ItemStateMessage)
+                roundTrip(new DirectConnectWire.ItemStateMessage("session", equipped));
+        assertEquals("ARMOR", item.state.equipmentSlot);
+        DirectConnectWire.PartyKeysMessage keys = (DirectConnectWire.PartyKeysMessage)
+                roundTrip(new DirectConnectWire.PartyKeysMessage("session", 7, 2));
+        assertEquals(7, keys.revision);
+        assertEquals(2, keys.count);
+    }
+
+    @Test
+    public void physicalItemOwnershipAndPropertiesRoundTrip() throws Exception {
+        PhysicalItemState state =
+                new PhysicalItemState(17L, 43L,
+                        "local-template", new ParticipantId("slot-2"), 2f, 3f, 0.5f,
+                        new ItemProperties(
+                                4, 7, "magic", "fine", 9, 3));
+        DirectConnectWire.ItemStateMessage decoded = (DirectConnectWire.ItemStateMessage)
+                roundTrip(new DirectConnectWire.ItemStateMessage("session", state));
+        assertEquals(17L, decoded.state.entityId);
+        assertEquals(43L, decoded.state.revision);
+        assertEquals(state.owner, decoded.state.owner);
+        assertEquals(9, decoded.state.properties.quantity);
+        assertEquals(3, decoded.state.properties.potionType);
+        assertEquals("magic", decoded.state.properties.suffix);
+        assertEquals(2f, decoded.state.x, 0f);
+        DirectConnectWire.ItemRequestMessage request = (DirectConnectWire.ItemRequestMessage)
+                roundTrip(new DirectConnectWire.ItemRequestMessage("session", 4L,
+                        ItemAction.DROP, 17L));
+        assertEquals(4L, request.requestId);
+        assertEquals(17L, request.entityId);
+    }
+
+    @Test
+    public void spentAndConsumedItemsRoundTrip() throws Exception {
+        DirectConnectWire.ItemRequestMessage request = (DirectConnectWire.ItemRequestMessage)
+                roundTrip(new DirectConnectWire.ItemRequestMessage("session", 8L,
+                        ItemAction.SPEND, 17L, 1, 2));
+        assertEquals(1, request.condition);
+        assertEquals(2, request.quantity);
+        DirectConnectWire.ItemStateMessage state = (DirectConnectWire.ItemStateMessage)
+                roundTrip(new DirectConnectWire.ItemStateMessage("session",
+                        new PhysicalItemState(
+                                17L, 9L, "potion", null, 1, 1, 0,
+                                ItemProperties.DEFAULT, true)));
+        assertTrue(state.state.consumed);
+        assertNull(state.state.owner);
+    }
+
+    @Test
+    public void unownedItemAndMovingDoorRoundTrip() throws Exception {
+        DirectConnectWire.ItemStateMessage item = (DirectConnectWire.ItemStateMessage)
+                roundTrip(new DirectConnectWire.ItemStateMessage("session",
+                        new PhysicalItemState(
+                                1L, 1L, "local-template", null, 1f, 2f, 0.5f)));
+        assertNull(item.state.owner);
+        DirectConnectWire.DoorStateMessage door = (DirectConnectWire.DoorStateMessage)
+                roundTrip(new DirectConnectWire.DoorStateMessage("session",
+                        new DoorSnapshot(
+                                1000000L, 5L, 1, false, true, false, 1f, 2f, 0.5f, 40f, 0.5f)));
+        assertEquals(1000000L, door.state.entityId);
+        assertEquals(0.5f, door.state.animation, 0f);
+        assertFalse(door.state.solid);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void exhaustedItemRequestIdCannotBeEncoded() {
+        new DirectConnectWire.ItemRequestMessage("session", Long.MAX_VALUE,
+                ItemAction.PICKUP, 1L);
     }
 
     private DirectConnectWire.Message roundTrip(DirectConnectWire.Message message)

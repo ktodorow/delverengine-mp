@@ -17,6 +17,7 @@ public final class CombatPresentationEvent implements HostSessionEvent {
     private final float impactY;
     private final float impactZ;
     private final boolean stateChanged;
+    private final ProjectileVisual projectileVisual;
 
     public CombatPresentationEvent(long sequence, long hostTick, String sourceId,
             String targetId, CombatAction action, float originX, float originY,
@@ -34,6 +35,15 @@ public final class CombatPresentationEvent implements HostSessionEvent {
             String targetId, CombatAction action, CombatPresentationPhase phase,
             float originX, float originY, float originZ, float impactX,
             float impactY, float impactZ, boolean stateChanged) {
+        this(sequence, hostTick, sourceId, targetId, action, phase, originX, originY, originZ,
+                impactX, impactY, impactZ, stateChanged, null);
+    }
+
+    public CombatPresentationEvent(long sequence, long hostTick, String sourceId,
+            String targetId, CombatAction action, CombatPresentationPhase phase,
+            float originX, float originY, float originZ, float impactX,
+            float impactY, float impactZ, boolean stateChanged, ProjectileVisual projectileVisual) {
+        this.projectileVisual = projectileVisual;
         if(sequence < 1L || hostTick < 0L || sourceId == null
                 || sourceId.trim().isEmpty() || targetId == null || action == null
                 || phase == null
@@ -56,6 +66,7 @@ public final class CombatPresentationEvent implements HostSessionEvent {
         this.stateChanged = stateChanged;
     }
 
+    public ProjectileVisual getProjectileVisual() { return projectileVisual; }
     public long getSequence() { return sequence; }
     public long getHostTick() { return hostTick; }
     public String getSourceId() { return sourceId; }

@@ -1,5 +1,6 @@
 package com.interrupt.dungeoneer;
 
+import com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController;
 import com.badlogic.gdx.Application;
 import com.badlogic.gdx.Game;
 import com.badlogic.gdx.Gdx;
@@ -254,6 +255,9 @@ public class GameApplication extends Game {
                 directConnectPeer, directConnectMovementController,
                 OwnedGameCopyMount.isMounted());
         mainScreen.setNetworkCombatController(directConnectCombatController);
+        DirectConnectItemController items = new DirectConnectItemController(directConnectPeer);
+        directConnectCombatController.setWeaponResolver(items);
+        mainScreen.setNetworkItemController(items);
         completedScreen.dispose();
     }
 

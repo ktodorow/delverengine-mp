@@ -14,6 +14,7 @@ import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.gfx.Tesselator;
 import com.interrupt.dungeoneer.metrics.MetricsCore;
 import com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController;
+import com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController;
 import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
@@ -49,6 +50,7 @@ public class GameScreen implements Screen {
     private Game.StartMode startMode = Game.StartMode.NORMAL;
     private DirectConnectMovementController networkMovementController;
     private DirectConnectCombatController networkCombatController;
+    private DirectConnectItemController networkItemController;
     
     public GameScreen(Level level, GameManager gameManager, GameInput input) {
     	this.gameManager = gameManager;
@@ -86,6 +88,7 @@ public class GameScreen implements Screen {
 			if((!overlayManager.shouldPauseGame() || directConnect != null)
 					&& (directConnect == null || !directConnect.isSessionPaused()))
 			{
+                if(networkItemController != null) networkItemController.prepare(game);
 				if(networkCombatController != null && game != null) {
 					networkCombatController.prepare(game);
 				}
@@ -110,6 +113,8 @@ public class GameScreen implements Screen {
 			if(networkCombatController != null && game != null) {
 				networkCombatController.update(game);
 			}
+
+            if(networkItemController != null) networkItemController.update(game);
 
 			// draw the game
 			gameManager.render();
@@ -248,6 +253,7 @@ public class GameScreen implements Screen {
     public void dispose() {
         if(networkMovementController != null) networkMovementController.dispose();
         if(networkCombatController != null) networkCombatController.dispose();
+        if(networkItemController != null) networkItemController.dispose();
 		Audio.disposeAudio(null);
 		if(editorLevel != null) GameApplication.editorRunning = false;
 	}
@@ -260,6 +266,10 @@ public class GameScreen implements Screen {
     public void setNetworkCombatController(
             DirectConnectCombatController networkCombatController) {
         this.networkCombatController = networkCombatController;
+    }
+
+    public void setNetworkItemController(DirectConnectItemController controller) {
+        networkItemController = controller;
     }
 
     private DirectConnectPeer directConnectPeer() {

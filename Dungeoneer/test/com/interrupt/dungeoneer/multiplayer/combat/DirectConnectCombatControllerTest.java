@@ -172,7 +172,7 @@ public class DirectConnectCombatControllerTest {
     private CombatPresentationEvent event(long sequence, String sourceId,
             CombatAction action) {
         return new CombatPresentationEvent(sequence, sequence * 3L, sourceId,
-                AuthoritativeCombatEncounter.SHARED_MONSTER_ID, action,
+                AuthoritativeCombatEncounter.SHARED_MONSTER_ID, action, CombatPresentationPhase.ATTACK,
                 1f, 2f, 0.5f, 5f, 6f, 0.25f, true);
     }
 

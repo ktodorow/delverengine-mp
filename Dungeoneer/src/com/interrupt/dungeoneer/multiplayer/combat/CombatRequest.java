@@ -18,6 +18,7 @@ public final class CombatRequest implements HostSessionCommand {
     private final float aimY;
     private final float aimZ;
     private final float attackPower;
+    private final long weaponEntityId;
 
     public CombatRequest(ParticipantId participantId, long requestId,
             CombatAction action, String targetId) {
@@ -41,6 +42,7 @@ public final class CombatRequest implements HostSessionCommand {
         aimY = 0f;
         aimZ = 0f;
         attackPower = 1f;
+        weaponEntityId = 0L;
     }
 
     public CombatRequest(ParticipantId participantId, long requestId,
@@ -51,6 +53,14 @@ public final class CombatRequest implements HostSessionCommand {
     public CombatRequest(ParticipantId participantId, long requestId,
             CombatAction action, float aimX, float aimY, float aimZ,
             float attackPower) {
+        this(participantId, requestId, action, aimX, aimY, aimZ, attackPower, 0L);
+    }
+
+    public CombatRequest(ParticipantId participantId, long requestId,
+            CombatAction action, float aimX, float aimY, float aimZ,
+            float attackPower, long weaponEntityId) {
+        if(weaponEntityId < 0L) throw new IllegalArgumentException("Invalid weapon identity.");
+        this.weaponEntityId = weaponEntityId;
         if(participantId == null) throw new IllegalArgumentException("Participant ID cannot be null.");
         if(!isValidRequestId(requestId)) {
             throw new IllegalArgumentException("Combat request ID is outside valid bounds.");
@@ -88,6 +98,7 @@ public final class CombatRequest implements HostSessionCommand {
     public float getAimX() { return aimX; }
     public float getAimY() { return aimY; }
     public float getAimZ() { return aimZ; }
+    public long getWeaponEntityId() { return weaponEntityId; }
     public float getAttackPower() { return attackPower; }
 
     public static boolean isValidRequestId(long requestId) {

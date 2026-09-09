@@ -1,5 +1,9 @@
 package com.interrupt.dungeoneer.multiplayer.combat;
 
+import com.badlogic.gdx.graphics.Color;
+import com.interrupt.dungeoneer.entities.Item;
+import com.interrupt.dungeoneer.entities.spells.Spell;
+import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.badlogic.gdx.math.Vector3;
 import com.badlogic.gdx.utils.Array;
 import com.interrupt.dungeoneer.entities.Entity;
@@ -18,7 +22,6 @@ import com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile;
 import com.interrupt.dungeoneer.entities.projectiles.Missile;
 import com.interrupt.dungeoneer.entities.projectiles.Projectile;
 import com.interrupt.dungeoneer.entities.projectiles.ProjectileImpactListener;
-import com.interrupt.dungeoneer.entities.spells.MagicMissile;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
@@ -59,8 +62,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             new IdentityHashMap<Monster, CombatAction>();
     private final Map<String, Spikes> traps = new LinkedHashMap<String, Spikes>();
     private final Map<Spikes, String> trapIds = new IdentityHashMap<Spikes, String>();
-    private final Map<String, Weapon> authoritativeWeapons =
-            new LinkedHashMap<String, Weapon>();
+    private CombatWeaponResolver weaponResolver;
     private final Map<ParticipantId, Player> authoritativePlayers =
             new LinkedHashMap<ParticipantId, Player>();
     private final Map<Entity, ProjectilePresentation> projectilePresentations =
@@ -103,7 +105,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     public void update(Game game) {
         if(game == null || game.player == null || game.level == null) return;
         prepare(game);
-        if(nativeAuthority != null && !monsters.isEmpty()) {
+        if(nativeAuthority != null) {
             resolveNativeCombatRequests();
             synchronizeNativeMonsters();
             attachNativeProjectiles();
@@ -111,6 +113,8 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         applySnapshot(peer.getCombatSnapshot());
         replayPresentations(game.level, localCombatantId());
     }
+
+    public void setWeaponResolver(CombatWeaponResolver resolver) { weaponResolver = resolver; }
 
     public void dispose() {
         detachFromPlayer();
@@ -140,8 +144,10 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         CombatAction action = classify(weapon, weapon.getDamageType());
         ParticipantId participantId = localParticipantId();
         if(participantId != null) participantActions.put(participantId, action);
+        long weaponId = weaponResolver == null ? 0L : weaponResolver.identity(weapon);
+        if(weaponResolver != null && weaponId == 0L) return;
         peer.submitCombatAction(takeNextRequestId(), action,
-                direction.x, direction.z, direction.y, attackPower);
+                direction.x, direction.z, direction.y, attackPower, weaponId);
     }
 
     @Override
@@ -289,7 +295,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 presentation.sourceId, impactTargetId(hit), presentation.action,
                 CombatPresentationPhase.IMPACT,
                 presentation.originX, presentation.originY, presentation.originZ,
-                impactX, impactY, impactZ, false);
+                impactX, impactY, impactZ, false, presentation.visual);
     }
 
     void replayPresentations(Level level, String localCombatantId) {
@@ -319,12 +325,14 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             participantActions.put(participantId, action);
             Entity source = participantEntity(participantId);
             if(source == null || !source.isActive) continue;
-            Weapon weapon = authoritativeWeapon(participantId, action);
+            Weapon weapon = weaponResolver == null ? authoritativeWeapon(participantId, action)
+                    : weaponResolver.ownedWeapon(participantId, request.getWeaponEntityId());
+            if(weapon == null || classify(weapon, weapon.getDamageType()) != action) continue;
             float maximumRange = action == CombatAction.MELEE && weapon != null
                     ? Math.max(ATTACK_TRACE_STEP, weapon.reach * 1.5f)
                     : action.getMaximumRange();
             NativeTrace trace = traceMonsters(source, request, maximumRange);
-            nativeAuthority.publishNativePresentation(
+            if(action == CombatAction.MELEE) nativeAuthority.publishNativePresentation(
                     AuthoritativeCombatEncounter.participantTargetId(participantId),
                     trace.monsterId == null ? "" : trace.monsterId,
                     action, CombatPresentationPhase.ATTACK,
@@ -357,13 +365,18 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
 
     private NativeTrace traceMonsters(Entity source, CombatRequest request,
             float maximumRange) {
+        return traceMonsters(source, request, maximumRange, ATTACK_ORIGIN_HEIGHT);
+    }
+
+    private NativeTrace traceMonsters(Entity source, CombatRequest request,
+            float maximumRange, float originHeight) {
         float length = (float)Math.sqrt(request.getAimX() * request.getAimX()
                 + request.getAimY() * request.getAimY()
                 + request.getAimZ() * request.getAimZ());
         float directionX = request.getAimX() / length;
         float directionY = request.getAimY() / length;
         float directionZ = request.getAimZ() / length;
-        float originZ = source.z + ATTACK_ORIGIN_HEIGHT;
+        float originZ = source.z + originHeight;
         float previousX = source.x;
         float previousY = source.y;
         float previousZ = originZ;
@@ -425,16 +438,16 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
 
     private void spawnNativeSpell(Entity source, ParticipantId participantId,
             NativeTrace trace, Wand wand) {
-        NativeMagicMissile spell = new NativeMagicMissile();
+        // Preserve configured spell class, colour, appearance, spread, speed, and impact effects.
+        Spell spell =
+                (Spell)
+                        KryoSerializer.copyObject(wand.spell);
         spell.baseDamage = wand.getBaseDamage();
         spell.randDamage = wand.getRandDamage();
         spell.damageType = wand.getDamageType();
-        MagicMissileProjectile projectile = spell.makeNetworkProjectile(source,
-                new Vector3(trace.directionX, trace.directionZ, trace.directionY),
+        spell.doCast(source, new Vector3(trace.directionX, trace.directionZ, trace.directionY),
                 new Vector3(source.x, source.y, source.z));
-        projectile.ignorePlayerCollision = true;
-        attachedLevel.entities.add(projectile);
-        attachNativeProjectile(projectile);
+        attachNativeProjectiles();
     }
 
     private void attachNativeProjectiles() {
@@ -459,6 +472,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 || (!(projectile instanceof Projectile)
                         && !(projectile instanceof Missile))) return;
 
+        if(projectile instanceof Missile && !((Missile)projectile).isInFlight()) return;
         ParticipantId participantId = participantId(projectile);
         Monster sourceMonster = nativeMonsterInstigator(projectile);
         Entity source = participantId == null ? sourceMonster
@@ -471,10 +485,26 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 ? lastMonsterActions.get(sourceMonster)
                 : participantActions.get(participantId);
         if(action == null) action = projectileAction(projectile);
+        float speed = (float)Math.sqrt(projectile.xa * projectile.xa
+                + projectile.ya * projectile.ya + projectile.za * projectile.za);
+        ProjectileVisual visual = speed > 0f ? new ProjectileVisual(
+                projectile.spriteAtlas != null ? projectile.spriteAtlas
+                        : projectile.artType == null ? "sprite" : projectile.artType.toString(),
+                projectile.tex, Color.rgba8888(projectile.color),
+                Math.max(0.001f, projectile.scale), Math.min(64f, speed),
+                projectile.blendMode == Entity.BlendMode.ADD, projectile.fullbrite) : null;
         ProjectilePresentation presentation = new ProjectilePresentation(
-                sourceId, action, source.x, source.y,
-                source.z + ATTACK_ORIGIN_HEIGHT);
+                sourceId, action, projectile.x, projectile.y, projectile.z, visual);
         projectilePresentations.put(projectile, presentation);
+        if(visual != null) {
+            ParticipantId traceActor = participantId == null ? new ParticipantId("projectile-trace") : participantId;
+            NativeTrace trace = traceMonsters(projectile, new CombatRequest(traceActor, 1L, action,
+                    projectile.xa / speed, projectile.ya / speed, projectile.za / speed),
+                    action.getMaximumRange(), 0f);
+            nativeAuthority.publishNativePresentation(sourceId, "", action, CombatPresentationPhase.ATTACK,
+                    projectile.x, projectile.y, projectile.z,
+                    trace.impactX, trace.impactY, trace.impactZ, false, visual);
+        }
         if(projectile instanceof Projectile) {
             ((Projectile)projectile).setMultiplayerImpactListener(this);
         }
@@ -519,19 +549,10 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     }
 
     private Weapon authoritativeWeapon(ParticipantId participantId, CombatAction action) {
-        if(participantId == null || action == null) return null;
-        String key = participantId.getValue() + ":" + action.name();
-        Weapon weapon = authoritativeWeapons.get(key);
-        if(weapon != null) return weapon;
-        if(action == CombatAction.MELEE) weapon = new Sword();
-        else if(action == CombatAction.PROJECTILE) weapon = new Bow();
-        else if(action == CombatAction.SPELL) {
-            Wand wand = new Wand();
-            wand.damageType = DamageType.MAGIC;
-            weapon = wand;
-        }
-        if(weapon != null) authoritativeWeapons.put(key, weapon);
-        return weapon;
+        if(participantId == null || action == null || attachedPlayer == null
+                || !participantId.equals(localParticipantId())) return null;
+        Item held = attachedPlayer.GetHeldItem();
+        return held instanceof Weapon ? (Weapon)held : null;
     }
 
     private Player authoritativePlayer(ParticipantId participantId) {
@@ -975,7 +996,6 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             clearNativeProjectile(projectile);
         }
         projectilePresentations.clear();
-        authoritativeWeapons.clear();
         authoritativePlayers.clear();
         attachedLevel = null;
     }
@@ -1093,8 +1113,11 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         private final float originY;
         private final float originZ;
 
+        private final ProjectileVisual visual;
+
         private ProjectilePresentation(String sourceId, CombatAction action,
-                float originX, float originY, float originZ) {
+                float originX, float originY, float originZ, ProjectileVisual visual) {
+            this.visual = visual;
             this.sourceId = sourceId;
             this.action = action;
             this.originX = originX;
@@ -1117,10 +1140,4 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         }
     }
 
-    private static final class NativeMagicMissile extends MagicMissile {
-        private MagicMissileProjectile makeNetworkProjectile(Entity owner,
-                Vector3 direction, Vector3 position) {
-            return makeProjectile(position, direction, doAttackRoll(), owner);
-        }
-    }
 }

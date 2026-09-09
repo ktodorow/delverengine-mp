@@ -147,6 +147,14 @@ public class ButtonModel extends Model {
 		}
 	}
 
+    public void use(ParticipantContext participant) {
+        if(!animating && triggerStatus == TriggerStatus.WAITING) {
+            animating = true;
+            animationTime = 0;
+            animatingParticipant = participant;
+        }
+    }
+
 	@Override
 	public void use(Player p, float projx, float projy) {
 		if(animating == false && triggerStatus == TriggerStatus.WAITING) {

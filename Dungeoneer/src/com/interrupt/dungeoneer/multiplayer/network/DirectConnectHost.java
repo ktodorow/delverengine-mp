@@ -1,5 +1,13 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.combat.ProjectileVisual;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementObstacle;
+import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld;
+import com.interrupt.dungeoneer.multiplayer.items.AuthoritativeItemWorld;
+import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
+import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
+import com.interrupt.dungeoneer.multiplayer.items.ItemRequest;
+import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
 import com.interrupt.dungeoneer.GameApplication;
 import com.interrupt.dungeoneer.multiplayer.host.AuthoritativeHostSession;
 import com.interrupt.dungeoneer.multiplayer.host.HostDisconnectOutcome;
@@ -160,6 +168,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private volatile PartyStatusSnapshot partyStatus;
     private volatile PartyCommunicationState partyCommunication =
             PartyCommunicationState.initial();
+    private final AuthoritativeItemWorld itemWorld = new AuthoritativeItemWorld();
+    private final List<ItemRequest> pendingItemRequests = new ArrayList<ItemRequest>();
+    private final Map<Long, Long> publishedItemRevisions = new LinkedHashMap<Long, Long>();
+    private final Map<Long, DoorSnapshot> doorSnapshots = new LinkedHashMap<Long, DoorSnapshot>();
     private long nextLifecycleSequence;
     private long nextPartyStatusSequence;
     private long nextPartyChatSequence;
@@ -675,6 +687,85 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         publishPauseRequest(connection.movementDescriptor);
     }
 
+    private synchronized void itemAction(ChannelHandlerContext context,
+            DirectConnectWire.ItemRequestMessage message) {
+        RemoteConnection connection = activeConnection(context, message.sessionId, "Item action");
+        if(connection == null || connection.reconnectGrace != null || isSessionPaused()) return;
+        enqueueItemRequest(new ItemRequest(connection.movementDescriptor.getParticipantId(),
+                message.requestId, message.action, message.entityId, message.condition, message.quantity));
+    }
+
+    private void enqueueItemRequest(ItemRequest request) {
+        if(pendingItemRequests.size() < 256) pendingItemRequests.add(request);
+    }
+
+    /** Render-thread bridge drains bounded intents; it alone touches native floor objects. */
+    public synchronized List<ItemRequest> drainItemRequests() {
+        List<ItemRequest> requests = new ArrayList<ItemRequest>(pendingItemRequests);
+        pendingItemRequests.clear();
+        return requests;
+    }
+
+    public AuthoritativeItemWorld getItemWorld() { return itemWorld; }
+
+    @Override
+    public List<PhysicalItemState> getPhysicalItems() { return itemWorld.snapshot(); }
+
+    @Override
+    public long getNextItemRequestId() {
+        MovementEntityDescriptor descriptor = hostMovementDescriptor();
+        return descriptor == null ? 1L : itemWorld.nextRequestId(descriptor.getParticipantId());
+    }
+
+    @Override
+    public synchronized void submitItemAction(long requestId, ItemAction action, long entityId) {
+        submitItemAction(requestId, action, entityId, 0, 0);
+    }
+
+    @Override
+    public synchronized void submitItemAction(long requestId, ItemAction action, long entityId,
+            int condition, int quantity) {
+        MovementEntityDescriptor descriptor = hostMovementDescriptor();
+        if(descriptor == null || !sessionStarted || isSessionPaused()) return;
+        enqueueItemRequest(new ItemRequest(descriptor.getParticipantId(), requestId, action,
+                entityId, condition, quantity));
+    }
+
+    @Override
+    public synchronized List<DoorSnapshot> getDoorSnapshots() {
+        return new ArrayList<DoorSnapshot>(doorSnapshots.values());
+    }
+
+    public void setDoorObstacles(java.util.List<MovementObstacle> obstacles) {
+        if(movementWorld instanceof LevelMovementCollisionWorld) {
+            ((LevelMovementCollisionWorld)movementWorld)
+                    .setDoorObstacles(obstacles);
+        }
+    }
+
+    public synchronized void publishDoor(DoorSnapshot state) {
+        doorSnapshots.put(state.entityId, state);
+        broadcast(new DirectConnectWire.DoorStateMessage(sessionId, state));
+    }
+
+    private long publishedKeyRevision = -1L;
+
+    @Override public int getPartyKeys() { return itemWorld.getPartyKeys(); }
+
+    public synchronized void publishPhysicalItems() {
+        long keyRevision = itemWorld.getKeyRevision();
+        if(publishedKeyRevision != keyRevision) {
+            publishedKeyRevision = keyRevision;
+            broadcast(new DirectConnectWire.PartyKeysMessage(sessionId, keyRevision, itemWorld.getPartyKeys()));
+        }
+        for(PhysicalItemState item : itemWorld.snapshot()) {
+            Long previous = publishedItemRevisions.get(item.entityId);
+            if(previous != null && previous == item.revision) continue;
+            publishedItemRevisions.put(item.entityId, item.revision);
+            broadcast(new DirectConnectWire.ItemStateMessage(sessionId, item));
+        }
+    }
+
     private synchronized void combatAction(ChannelHandlerContext context,
             CombatActionRequestMessage request) {
         RemoteConnection connection = activeConnection(context, request.sessionId, "Combat action");
@@ -685,7 +776,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     ? new CombatRequest(connection.movementDescriptor.getParticipantId(),
                             request.requestId, request.action,
                             request.aimX, request.aimY, request.aimZ,
-                            request.attackPower)
+                            request.attackPower, request.weaponEntityId)
                     : new CombatRequest(connection.movementDescriptor.getParticipantId(),
                             request.requestId, request.action, request.targetId);
             session.submit(command);
@@ -993,10 +1084,18 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             connection.channel.write(new CombatStateMessage(sessionId,
                     encounter.getSnapshot(session == null ? 0L : session.getHostTick())));
         }
+        connection.channel.write(new DirectConnectWire.PartyKeysMessage(sessionId,
+                itemWorld.getKeyRevision(), itemWorld.getPartyKeys()));
+        for(DoorSnapshot door : doorSnapshots.values()) {
+            connection.channel.write(new DirectConnectWire.DoorStateMessage(sessionId, door));
+        }
+        for(PhysicalItemState item : itemWorld.snapshot()) {
+            connection.channel.write(new DirectConnectWire.ItemStateMessage(sessionId, item));
+        }
         connection.channel.writeAndFlush(new SessionReady(sessionId,
                 getConnectedParticipantCount(), encounter == null ? 1L
                         : encounter.getNextRequestId(grace.descriptor.getParticipantId()),
-                sharedFloorId()));
+                itemWorld.nextRequestId(grace.descriptor.getParticipantId()), sharedFloorId()));
         status = status(DirectConnectPhase.READY,
                 grace.descriptor.getNickname() + " reclaimed Campaign Slot "
                         + grace.slot.getNumber() + " during reconnect grace.",
@@ -1244,12 +1343,18 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     @Override
     public void submitCombatAction(long requestId, CombatAction action,
             float aimX, float aimY, float aimZ, float attackPower) {
+        submitCombatAction(requestId, action, aimX, aimY, aimZ, attackPower, 0L);
+    }
+
+    @Override
+    public void submitCombatAction(long requestId, CombatAction action,
+            float aimX, float aimY, float aimZ, float attackPower, long weaponEntityId) {
         MovementEntityDescriptor descriptor = hostMovementDescriptor();
         AuthoritativeHostSession session = movementSession;
         if(descriptor == null || session == null || !sessionStarted || closing.get()
                 || isSessionPaused()) return;
         session.submit(new CombatRequest(descriptor.getParticipantId(), requestId,
-                action, aimX, aimY, aimZ, attackPower));
+                action, aimX, aimY, aimZ, attackPower, weaponEntityId));
     }
 
     @Override
@@ -1389,6 +1494,18 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     action, phase, originX, originY, originZ,
                     impactX, impactY, impactZ, stateChanged, nativeCombatOutput);
         }
+    }
+
+    @Override
+    public void publishNativePresentation(String sourceId, String targetId,
+            CombatAction action, CombatPresentationPhase phase,
+            float originX, float originY, float originZ,
+            float impactX, float impactY, float impactZ, boolean stateChanged,
+            ProjectileVisual visual) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) encounter.publishNativePresentation(currentHostTick(), sourceId, targetId,
+                action, phase, originX, originY, originZ, impactX, impactY, impactZ,
+                stateChanged, visual, nativeCombatOutput);
     }
 
     private long currentHostTick() {
@@ -1658,6 +1775,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             else if(message instanceof PauseRequestMessage && helloAccepted && sessionStarted) {
                 pauseRequested(context, (PauseRequestMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.ItemRequestMessage
+                    && helloAccepted && sessionStarted) {
+                itemAction(context, (DirectConnectWire.ItemRequestMessage)message);
             }
             else if(message instanceof CombatActionRequestMessage && helloAccepted && sessionStarted) {
                 combatAction(context, (CombatActionRequestMessage)message);

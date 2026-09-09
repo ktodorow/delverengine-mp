@@ -197,6 +197,12 @@ public class Hud {
 				refresh();
 			}
 			else if(Game.instance.input.getPointerX(uiTouchPointer) > Gdx.graphics.getWidth() - uiSize && Game.instance.input.getPointerY(uiTouchPointer) < uiSize) {
+                if(Game.instance.player.requestGroundItemPlacement(dragging, null, null)) {
+                    dragging = null;
+                    Game.dragging = null;
+                    refresh();
+                    return;
+                }
 				// dropping item into inventory
 				boolean foundSlot = false;
 				for(int i = 6; i < Game.instance.player.inventorySize; i++) {
@@ -211,10 +217,15 @@ public class Hud {
 						dragging = null;
 
 						Game.hudManager.backpack.refresh();
+                        break;
 					}
 				}
 				if(!foundSlot) Game.ShowMessage(StringManager.get("ui.Hud.noRoomText"), 0.6f, 1f);
 			}
+            else if(Game.instance.player.cancelUnownedGroundDrag(dragging)) {
+                dragging = null;
+                Game.dragging = null;
+            }
 			else {
 
 				Vector3 levelIntersection = new Vector3();

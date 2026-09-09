@@ -174,9 +174,12 @@ public class Trigger extends Entity {
 			Game.ShowUseMessage(MessageFormat.format(StringManager.get("entities.Trigger.mobileUseText"), useText, this.getUseVerb()));
 		}
 	}
-	
-	@Override
-	public void use(Player p, float projx, float projy) {
+    public void use(ParticipantContext participant) {
+        fire(participant, null);
+    }
+
+    @Override
+    public void use(Player p, float projx, float projy) {
 		fire(localParticipant(p), null);
 	}
 

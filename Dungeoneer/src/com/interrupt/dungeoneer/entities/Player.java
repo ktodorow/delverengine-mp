@@ -998,10 +998,10 @@ public class Player extends Actor {
 					// drag item
 					if(touching.isActive) {
 						if(touching instanceof Key || touching instanceof Gold) {
-							touching.use(this, 0, 0);
+							useEntity(touching, 0, 0);
 						}
 						else {
-							touching.isActive = false;
+							if(itemAuthorityListener == null) touching.isActive = false;
 							Game.hud.dragging = (Item)touching;
 							Game.dragging = Game.hud.dragging;
 							Game.hud.refresh();
@@ -1009,7 +1009,7 @@ public class Player extends Actor {
 					}
 				}
 				else if (touching != null && !(touching instanceof Stairs) && !(touching instanceof Door)) {
-					touching.use(this, Game.camera.direction.x, Game.camera.direction.z);
+					useEntity(touching, Game.camera.direction.x, Game.camera.direction.z);
 				}
 			}
 		}
@@ -1645,14 +1645,14 @@ public class Player extends Actor {
 				Entity e = entities.get(i);
 				if(e instanceof Item || e instanceof Stairs) {
 					if(Math.abs(x - e.x) < 0.5f && Math.abs(y - e.y) < 0.5f && Math.abs(z - e.z) < 1f) {
-						e.use(this, 0, 0);
+						useEntity(e, 0, 0);
 						Game.ShowMessage("", 1);
 						return;
 					}
 				}
 				else if(e instanceof Door) {
 					if(Math.abs(x - e.x) < 1f && Math.abs(y - e.y) < 1f && Math.abs(z - e.z) < 1f) {
-						e.use(this, 0, 0);
+						useEntity(e, 0, 0);
 						Game.ShowMessage("", 1);
 						return;
 					}
@@ -1660,7 +1660,7 @@ public class Player extends Actor {
 				else if(e instanceof Trigger) {
 					Trigger trigger = (Trigger)e;
 					if(trigger.triggerType == TriggerType.USE && Math.abs(x - e.x) < 0.8f && Math.abs(y - e.y) < 0.8f) {
-						e.use(this, 0, 0);
+						useEntity(e, 0, 0);
 						Game.ShowMessage("", 1);
 						return;
 					}
@@ -1668,14 +1668,14 @@ public class Player extends Actor {
 				else if(e instanceof ButtonModel) {
 					ButtonModel trigger = (ButtonModel)e;
 					if(Math.abs(x - e.x) < 0.8f && Math.abs(y - e.y) < 0.8f) {
-						e.use(this, 0, 0);
+						useEntity(e, 0, 0);
 						Game.ShowMessage("", 1);
 						return;
 					}
 				}
 				else if(e instanceof Actor) {
 					if(Math.abs(x - e.x) < 0.8f && Math.abs(y - e.y) < 0.8f) {
-						e.use(this, 0, 0);
+						useEntity(e, 0, 0);
 						Game.ShowMessage("", 1);
 						return;
 					}
@@ -1693,7 +1693,7 @@ public class Player extends Actor {
 		{
 			float projx = ( 0f * (float)Math.cos(rot) + (float)Math.sin(rot)) * 1f;
 			float projy = ((float)Math.cos(rot) - 0f * (float)Math.sin(rot)) * 1f;
-			centered.use(this, projx, projy);
+			useEntity(centered, projx, projy);
 			return;
 		}
 
@@ -1728,7 +1728,7 @@ public class Player extends Actor {
 		{
 			float projx = ( 0 * (float)Math.cos(rot) + (float)Math.sin(rot)) * 1;
 			float projy = ((float)Math.cos(rot) - 0 * (float)Math.sin(rot)) * 1;
-			centered.use(this, projx, projy);
+			useEntity(centered, projx, projy);
 			return;
 		}
 
@@ -1794,6 +1794,7 @@ public class Player extends Actor {
 		}
 		else
 		{
+            if(itemAuthorityListener != null && itemAuthorityListener.drop(held)) return;
 			dropItem(held, lvl, attackPower);
 			heldItem = null;
 
@@ -1814,6 +1815,7 @@ public class Player extends Actor {
 		Item held = GetHeldItem();
 		if(held == null) return;
 
+        if(itemAuthorityListener != null && itemAuthorityListener.drop(held)) return;
 		dropItem(heldItem, level, 2f);
 		heldItem = null;
 
@@ -1826,9 +1828,81 @@ public class Player extends Actor {
 		held.tossItem(level, attackPower);
 	}
 
+    public interface ItemAuthorityListener {
+        boolean pickup(Item item);
+        default boolean pickupInto(Item item, Integer inventorySlot, String equipmentSlot) {
+            return pickup(item);
+        }
+        boolean drop(Item item);
+        boolean use(Entity entity, float x, float y);
+    }
+
+    private transient ItemAuthorityListener itemAuthorityListener;
+
+    public void setItemAuthorityListener(ItemAuthorityListener listener) {
+        itemAuthorityListener = listener;
+    }
+
+    public boolean requestItemPickup(Item item) {
+        return itemAuthorityListener != null && itemAuthorityListener.pickup(item);
+    }
+
+    /** Ownership spans backpack and equipment; dragging never creates a new owner. */
+    public boolean ownsPhysicalItem(Item item) {
+        return item != null && (inventory.contains(item, true) || equippedItems.containsValue(item));
+    }
+
+    public boolean requestItemDrop(Item item) {
+        return item != null && itemAuthorityListener != null && itemAuthorityListener.drop(item);
+    }
+
+    public boolean cancelUnownedGroundDrag(Item item) {
+        return itemAuthorityListener != null && !ownsPhysicalItem(item);
+    }
+
+    public boolean requestGroundItemPlacement(Item item, Integer inventorySlot, String equipmentSlot) {
+        return !ownsPhysicalItem(item) && itemAuthorityListener != null
+                && itemAuthorityListener.pickupInto(item, inventorySlot, equipmentSlot);
+    }
+
+    public void removeAuthoritativeItem(Item item) {
+        for(java.util.Map.Entry<String, Item> entry : equippedItems.entrySet()) {
+            if(entry.getValue() == item) entry.setValue(null);
+        }
+        removeFromInventory(item);
+        if(Game.dragging == item) Game.dragging = null;
+        if(Game.hud != null && Game.hud.dragging == item) {
+            Game.hud.dragging = null;
+            Game.hud.refresh();
+        }
+        Game.RefreshUI();
+    }
+
+    public void useEntity(Entity entity, float x, float y) {
+        if(itemAuthorityListener == null || !itemAuthorityListener.use(entity, x, y)) {
+            entity.use(this, x, y);
+        }
+    }
+
+    /** Apply one Host-owned identity without merging distinct physical stacks. */
+    public boolean addAuthoritativeItemToInventory(Item item) {
+        if(inventory.contains(item, true)) return true;
+        for(int i = 0; i < inventorySize; i++) {
+            if(i == inventory.size) inventory.add(null);
+            if(inventory.get(i) != null) continue;
+            inventory.set(i, item);
+            if(heldItem == null && item instanceof Weapon) equip(item);
+            item.onPickup();
+            Game.RefreshUI();
+            return true;
+        }
+        return false;
+    }
+
 	public Item dropItem(Integer invLocation, Level level, float throwPower) {
 		if(invLocation == null || invLocation < 0 || invLocation >= inventory.size) return null;
 		Item itm = inventory.get(invLocation);
+        if(itm != null && itemAuthorityListener != null && itemAuthorityListener.drop(itm)) return null;
 		dropItem(itm, level, throwPower);
 		if(invLocation == selectedBarItem) selectedBarItem = null;
 
@@ -1880,6 +1954,7 @@ public class Player extends Actor {
 
 	public void dropItem(Item itm, Level level, float throwPower) {
         if(itm == null) return;
+        if(itemAuthorityListener != null && itemAuthorityListener.drop(itm)) return;
 
 		float projx = (0 * (float)Math.cos(rot) + 1 * (float)Math.sin(rot)) * 1;
 		float projy = (1 * (float)Math.cos(rot) - 0 * (float)Math.sin(rot)) * 1;

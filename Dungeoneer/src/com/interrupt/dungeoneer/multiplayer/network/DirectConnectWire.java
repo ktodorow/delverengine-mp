@@ -1,7 +1,14 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
+import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
+import com.interrupt.dungeoneer.multiplayer.items.ItemProperties;
+import com.interrupt.dungeoneer.multiplayer.items.ItemRequest;
+import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
+
 import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
+import com.interrupt.dungeoneer.multiplayer.combat.ProjectileVisual;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationPhase;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatRequest;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
@@ -68,6 +75,10 @@ final class DirectConnectWire {
     private static final int COMBAT_ACTION_REQUEST = 26;
     private static final int COMBAT_STATE = 27;
     private static final int COMBAT_PRESENTATION = 28;
+    private static final int ITEM_REQUEST = 29;
+    private static final int ITEM_STATE = 30;
+    private static final int DOOR_STATE = 31;
+    private static final int PARTY_KEYS = 32;
 
     private DirectConnectWire() { }
 
@@ -247,6 +258,7 @@ final class DirectConnectWire {
                 throw new ProtocolException("Combat request ID floor is outside protocol bounds.");
             }
             output.writeLong(ready.nextCombatRequestId);
+            output.writeLong(ready.nextItemRequestId);
             writeString(output, ready.floorId, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
                     "floor identity");
         }
@@ -323,6 +335,60 @@ final class DirectConnectWire {
                 output.writeByte(entity.getMovementState().getWireId());
             }
         }
+        else if(message instanceof DoorStateMessage) {
+            DoorStateMessage messageState = (DoorStateMessage)message;
+            DoorSnapshot state = messageState.state;
+            output.writeByte(DOOR_STATE);
+            writeString(output, messageState.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(state.entityId); output.writeLong(state.revision);
+            output.writeByte(state.state); output.writeBoolean(state.locked);
+            output.writeBoolean(state.active); output.writeBoolean(state.solid);
+            output.writeFloat(state.x); output.writeFloat(state.y); output.writeFloat(state.z);
+            output.writeFloat(state.rotation); output.writeFloat(state.animation);
+        }
+        else if(message instanceof ItemRequestMessage) {
+            ItemRequestMessage request = (ItemRequestMessage)message;
+            output.writeByte(ITEM_REQUEST);
+            writeString(output, request.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(request.requestId);
+            output.writeByte(request.action.getWireId());
+            output.writeLong(request.entityId);
+            output.writeByte(request.condition);
+            output.writeInt(request.quantity);
+        }
+        else if(message instanceof PartyKeysMessage) {
+            PartyKeysMessage keys = (PartyKeysMessage)message;
+            output.writeByte(PARTY_KEYS);
+            writeString(output, keys.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(keys.revision);
+            output.writeInt(keys.count);
+        }
+        else if(message instanceof ItemStateMessage) {
+            ItemStateMessage messageState = (ItemStateMessage)message;
+            PhysicalItemState state = messageState.state;
+            output.writeByte(ITEM_STATE);
+            writeString(output, messageState.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(state.entityId);
+            output.writeLong(state.revision);
+            writeString(output, state.templateId, PhysicalItemState.MAX_TEMPLATE_BYTES, "item template");
+            output.writeBoolean(state.owner != null);
+            if(state.owner != null) writeString(output, state.owner.getValue(),
+                    DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES, "item owner");
+            output.writeFloat(state.x);
+            output.writeFloat(state.y);
+            output.writeFloat(state.z);
+            output.writeBoolean(state.consumed);
+            writeString(output, state.equipmentSlot, 32, "equipment slot");
+            output.writeByte(state.properties.condition);
+            output.writeInt(state.properties.level);
+            output.writeInt(state.properties.quantity);
+            output.writeByte(state.properties.potionType);
+            writeString(output, state.properties.suffix, 128, "item suffix");
+            writeString(output, state.properties.prefix, 128, "item prefix");
+        }
         else if(message instanceof CombatActionRequestMessage) {
             CombatActionRequestMessage request = (CombatActionRequestMessage)message;
             output.writeByte(COMBAT_ACTION_REQUEST);
@@ -336,6 +402,7 @@ final class DirectConnectWire {
                 output.writeFloat(request.aimY);
                 output.writeFloat(request.aimZ);
                 output.writeFloat(request.attackPower);
+                output.writeLong(request.weaponEntityId);
             }
             else {
                 writeString(output, request.targetId,
@@ -401,6 +468,14 @@ final class DirectConnectWire {
             output.writeFloat(event.getImpactY());
             output.writeFloat(event.getImpactZ());
             output.writeBoolean(event.isStateChanged());
+            ProjectileVisual visual = event.getProjectileVisual();
+            output.writeBoolean(visual != null);
+            if(visual != null) {
+                writeString(output, visual.atlas, 128, "projectile atlas");
+                output.writeInt(visual.texture); output.writeInt(visual.rgba);
+                output.writeFloat(visual.scale); output.writeFloat(visual.speed);
+                output.writeBoolean(visual.additive); output.writeBoolean(visual.fullbrite);
+            }
         }
         else if(message instanceof PartyStatusMessage) {
             PartyStatusMessage partyMessage = (PartyStatusMessage)message;
@@ -501,6 +576,71 @@ final class DirectConnectWire {
         int type = input.readUnsignedByte();
         Message message;
         switch(type) {
+            case DOOR_STATE:
+                String doorSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                        "session identity");
+                requireReadable(input, 40, "door state");
+                try {
+                    message = new DoorStateMessage(doorSession, new DoorSnapshot(input.readLong(),
+                            input.readLong(), input.readUnsignedByte(), input.readBoolean(),
+                            input.readBoolean(), input.readBoolean(), input.readFloat(),
+                            input.readFloat(), input.readFloat(), input.readFloat(), input.readFloat()));
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid door state.", invalid);
+                }
+                break;
+            case ITEM_REQUEST:
+                String itemRequestSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 22, "physical item request");
+                try {
+                    message = new ItemRequestMessage(itemRequestSession, input.readLong(),
+                            ItemAction.fromWireId(input.readUnsignedByte()), input.readLong(),
+                            input.readUnsignedByte(), input.readInt());
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid physical item request.", invalid);
+                }
+                break;
+            case PARTY_KEYS:
+                String keySession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 12, "Party Keys");
+                try { message = new PartyKeysMessage(keySession, input.readLong(), input.readInt()); }
+                catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid Party Keys.", invalid); }
+                break;
+            case ITEM_STATE:
+                String itemStateSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 16, "physical item identity");
+                long itemEntityId = input.readLong();
+                long itemRevision = input.readLong();
+                String itemTemplate = readString(input, PhysicalItemState.MAX_TEMPLATE_BYTES,
+                        "item template");
+                requireReadable(input, 1, "physical item ownership");
+                String itemOwnerValue = input.readBoolean() ? readString(input,
+                        DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES, "item owner") : null;
+                requireReadable(input, 13, "physical item position");
+                float itemX = input.readFloat(), itemY = input.readFloat(), itemZ = input.readFloat();
+                boolean itemConsumed = input.readBoolean();
+                String equipmentSlot = readString(input, 32, "equipment slot");
+                requireReadable(input, 10, "physical item properties");
+                int itemCondition = input.readUnsignedByte(), itemLevel = input.readInt();
+                int itemQuantity = input.readInt();
+                int potionType = input.readByte();
+                String itemSuffix = readString(input, 128, "item suffix");
+                String itemPrefix = readString(input, 128, "item prefix");
+                try {
+                    message = new ItemStateMessage(itemStateSession, new PhysicalItemState(
+                            itemEntityId, itemRevision, itemTemplate,
+                            itemOwnerValue == null ? null : new ParticipantId(itemOwnerValue), itemX, itemY, itemZ,
+                            new ItemProperties(itemCondition, itemLevel, itemSuffix, itemPrefix, itemQuantity, potionType),
+                            itemConsumed, equipmentSlot));
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid physical item state.", invalid);
+                }
+                break;
             case DISCOVERY_PROBE:
                 requireReadable(input, 12, "discovery probe identity");
                 long probeNonce = input.readLong();
@@ -647,8 +787,11 @@ final class DirectConnectWire {
                     throw new ProtocolException(
                             "Combat request ID floor is outside protocol bounds.");
                 }
+                requireReadable(input, 8, "item request ID floor");
+                long nextItemRequestId = input.readLong();
+                if(nextItemRequestId < 1L) throw new ProtocolException("Invalid item request ID floor.");
                 message = new SessionReady(readySession, participantCount,
-                        nextCombatRequestId,
+                        nextCombatRequestId, nextItemRequestId,
                         readString(input, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
                                 "floor identity"));
                 break;
@@ -773,11 +916,11 @@ final class DirectConnectWire {
                 boolean directedCombat = input.readBoolean();
                 try {
                     if(directedCombat) {
-                        requireReadable(input, 16, "directed combat aim and attack power");
+                        requireReadable(input, 24, "directed combat aim, attack power and weapon");
                         message = new CombatActionRequestMessage(combatRequestSession,
                                 combatRequestId, CombatAction.fromWireId(combatAction),
                                 input.readFloat(), input.readFloat(), input.readFloat(),
-                                input.readFloat());
+                                input.readFloat(), input.readLong());
                     }
                     else {
                         String combatTarget = readString(input,
@@ -871,7 +1014,7 @@ final class DirectConnectWire {
                 String presentationTarget = readString(input,
                         DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
                         "combat target identity");
-                requireReadable(input, 27, "combat presentation phase, action and transform");
+                requireReadable(input, 28, "combat presentation phase, action and transform");
                 int presentationPhase = input.readUnsignedByte();
                 int presentationAction = input.readUnsignedByte();
                 float presentationOriginX = input.readFloat();
@@ -881,7 +1024,15 @@ final class DirectConnectWire {
                 float presentationImpactY = input.readFloat();
                 float presentationImpactZ = input.readFloat();
                 boolean presentationChanged = input.readBoolean();
+                boolean hasProjectileVisual = input.readBoolean();
                 try {
+                    ProjectileVisual visual = null;
+                    if(hasProjectileVisual) {
+                        String atlas = readString(input, 128, "projectile atlas");
+                        requireReadable(input, 18, "projectile visual");
+                        visual = new ProjectileVisual(atlas, input.readInt(), input.readInt(),
+                                input.readFloat(), input.readFloat(), input.readBoolean(), input.readBoolean());
+                    }
                     message = new CombatPresentationMessage(presentationSession,
                             new CombatPresentationEvent(presentationSequence,
                                     presentationTick, presentationSource,
@@ -891,7 +1042,7 @@ final class DirectConnectWire {
                                     presentationOriginX, presentationOriginY,
                                     presentationOriginZ, presentationImpactX,
                                     presentationImpactY, presentationImpactZ,
-                                    presentationChanged));
+                                    presentationChanged, visual));
                 }
                 catch(IllegalArgumentException ex) {
                     throw new ProtocolException("Malformed combat presentation: "
@@ -1261,10 +1412,18 @@ final class DirectConnectWire {
         final String sessionId;
         final int participantCount;
         final long nextCombatRequestId;
+        final long nextItemRequestId;
         final String floorId;
 
         SessionReady(String sessionId, int participantCount, long nextCombatRequestId,
                 String floorId) {
+            this(sessionId, participantCount, nextCombatRequestId, 1L, floorId);
+        }
+
+        SessionReady(String sessionId, int participantCount, long nextCombatRequestId,
+                long nextItemRequestId, String floorId) {
+            if(nextItemRequestId < 1L) throw new IllegalArgumentException("Invalid item request ID floor.");
+            this.nextItemRequestId = nextItemRequestId;
             if(nextCombatRequestId < 1L) {
                 throw new IllegalArgumentException("Combat request ID floor must be positive.");
             }
@@ -1336,6 +1495,7 @@ final class DirectConnectWire {
         final float aimY;
         final float aimZ;
         final float attackPower;
+        final long weaponEntityId;
 
         CombatActionRequestMessage(String sessionId, long requestId,
                 CombatAction action, String targetId) {
@@ -1353,6 +1513,7 @@ final class DirectConnectWire {
             aimY = 0f;
             aimZ = 0f;
             attackPower = 1f;
+            weaponEntityId = 0L;
         }
 
         CombatActionRequestMessage(String sessionId, long requestId,
@@ -1363,6 +1524,14 @@ final class DirectConnectWire {
         CombatActionRequestMessage(String sessionId, long requestId,
                 CombatAction action, float aimX, float aimY, float aimZ,
                 float attackPower) {
+            this(sessionId, requestId, action, aimX, aimY, aimZ, attackPower, 0L);
+        }
+
+        CombatActionRequestMessage(String sessionId, long requestId,
+                CombatAction action, float aimX, float aimY, float aimZ,
+                float attackPower, long weaponEntityId) {
+            if(weaponEntityId < 0L) throw new IllegalArgumentException("Invalid weapon identity.");
+            this.weaponEntityId = weaponEntityId;
             float aimLengthSquared = aimX * aimX + aimY * aimY + aimZ * aimZ;
             if(!CombatRequest.isValidRequestId(requestId) || action == null
                     || !action.isDirected() || !isFinite(aimX) || !isFinite(aimY)
@@ -1471,6 +1640,61 @@ final class DirectConnectWire {
 
         PauseSessionStateMessage(String sessionId, PauseSessionState state) {
             if(state == null) throw new IllegalArgumentException("Pause Session state cannot be null.");
+            this.sessionId = sessionId;
+            this.state = state;
+        }
+    }
+
+    static final class PartyKeysMessage implements Message {
+        final String sessionId;
+        final long revision;
+        final int count;
+        PartyKeysMessage(String sessionId, long revision, int count) {
+            if(revision < 0 || count < 0 || count > 1000000) throw new IllegalArgumentException("Invalid Party Keys.");
+            this.sessionId = sessionId; this.revision = revision; this.count = count;
+        }
+    }
+
+    static final class DoorStateMessage implements Message {
+        final String sessionId;
+        final DoorSnapshot state;
+        DoorStateMessage(String sessionId, DoorSnapshot state) {
+            if(state == null) throw new IllegalArgumentException("Door state is required.");
+            this.sessionId = sessionId;
+            this.state = state;
+        }
+    }
+
+    static final class ItemRequestMessage implements Message {
+        final String sessionId;
+        final long requestId, entityId;
+        final ItemAction action;
+        final int condition, quantity;
+
+        ItemRequestMessage(String sessionId, long requestId, ItemAction action, long entityId) {
+            this(sessionId, requestId, action, entityId, 0, 0);
+        }
+
+        ItemRequestMessage(String sessionId, long requestId, ItemAction action, long entityId,
+                int condition, int quantity) {
+            // Validate without trusting a Participant identity supplied by the sender.
+            new ItemRequest(new ParticipantId("wire-validation"), requestId, action, entityId,
+                    condition, quantity);
+            this.condition = condition;
+            this.quantity = quantity;
+            this.sessionId = sessionId;
+            this.requestId = requestId;
+            this.action = action;
+            this.entityId = entityId;
+        }
+    }
+
+    static final class ItemStateMessage implements Message {
+        final String sessionId;
+        final PhysicalItemState state;
+
+        ItemStateMessage(String sessionId, PhysicalItemState state) {
+            if(state == null) throw new IllegalArgumentException("Physical item state is required.");
             this.sessionId = sessionId;
             this.state = state;
         }

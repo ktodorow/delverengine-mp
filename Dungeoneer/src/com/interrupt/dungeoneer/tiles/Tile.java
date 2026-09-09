@@ -94,11 +94,15 @@ public class Tile implements Serializable {
 	private static transient Plane PLANE_NE = new Plane(new Vector3(0.5f,-0.5f,0), 0f);
 	private static transient Plane PLANE_NW = new Plane(new Vector3(-0.5f,-0.5f,0), -0.701710677f);
 	
-	private static transient Vector3 tempVector1 = new Vector3();
-	private static transient Vector3 tempVector2 = new Vector3();
-	private static transient Vector3 tempVector3 = new Vector3();
-	private static transient Vector3 tempVector4 = new Vector3();
-	private static transient Vector3 tempVector5 = new Vector3();
+	// Host movement and native rendering query tiles concurrently. Keep scratch
+	// vectors per thread so ceiling, floor, and angled-wall math cannot overwrite
+	// another thread's in-progress collision query.
+	private static final ThreadLocal<Vector3[]> scratchVectors = new ThreadLocal<Vector3[]>() {
+		@Override protected Vector3[] initialValue() {
+			return new Vector3[] { new Vector3(), new Vector3(), new Vector3(),
+					new Vector3(), new Vector3() };
+		}
+	};
 	
 	static {
 		PLANE_SE.d = -PLANE_SE.normal.x;
@@ -187,6 +191,7 @@ public class Tile implements Serializable {
 	}
 	
 	public float getFloorHeight(float x, float y) {
+		Vector3[] scratch = scratchVectors.get();
 		
 		// check if flat, can skip most checks if it is
 		if(slopeNE == slopeNW && slopeNE == slopeSE && slopeNE == slopeSW) {
@@ -201,9 +206,9 @@ public class Tile implements Serializable {
 
 		// check which part of the triangle we're in
 		if (x + y < 1) {        // lower right
-			Vector3 AA = tempVector1.set(0, 0, getNEFloorHeight());
-			Vector3 AB = tempVector2.set(1 - 0, 0 - 0, getNWFloorHeight() - getNEFloorHeight());
-			Vector3 AC = tempVector3.set(0 - 0, 1 - 0, getSEFloorHeight() - getNEFloorHeight());
+			Vector3 AA = scratch[0].set(0, 0, getNEFloorHeight());
+			Vector3 AB = scratch[1].set(1 - 0, 0 - 0, getNWFloorHeight() - getNEFloorHeight());
+			Vector3 AC = scratch[2].set(0 - 0, 1 - 0, getSEFloorHeight() - getNEFloorHeight());
 
 			AA.add(AB.scl(x));
 			AA.add(AC.scl(y));
@@ -212,9 +217,9 @@ public class Tile implements Serializable {
 			x = (x - 1) * -1f;
 			y = (y - 1) * -1f;
 
-			Vector3 AA = tempVector1.set(1, 1, getSWFloorHeight());
-			Vector3 AB = tempVector2.set(0 - 1, 1 - 1, getSEFloorHeight() - getSWFloorHeight());
-			Vector3 AC = tempVector3.set(1 - 1, 0 - 1, getNWFloorHeight() - getSWFloorHeight());
+			Vector3 AA = scratch[0].set(1, 1, getSWFloorHeight());
+			Vector3 AB = scratch[1].set(0 - 1, 1 - 1, getSEFloorHeight() - getSWFloorHeight());
+			Vector3 AC = scratch[2].set(1 - 1, 0 - 1, getNWFloorHeight() - getSWFloorHeight());
 
 			AA.add(AB.scl(x));
 			AA.add(AC.scl(y));
@@ -248,6 +253,7 @@ public class Tile implements Serializable {
 	}
 	
 	public float getCeilHeight(float x, float y) {
+		Vector3[] scratch = scratchVectors.get();
 		
 		// check if flat, can skip most checks if it is
 		if(ceilSlopeNE == ceilSlopeNW && ceilSlopeNE == ceilSlopeSE && ceilSlopeNE == ceilSlopeSW) return ceilSlopeNE + ceilHeight;
@@ -257,9 +263,9 @@ public class Tile implements Serializable {
 		
 		// check which part of the triangle we're in
 		if (x + y < 1) {        // lower right
-			Vector3 AA = tempVector1.set(0, 0, getNECeilHeight());
-			Vector3 AB = tempVector2.set(1 - 0, 0 - 0, getNWCeilHeight() - getNECeilHeight());
-			Vector3 AC = tempVector3.set(0 - 0, 1 - 0, getSECeilHeight() - getNECeilHeight());
+			Vector3 AA = scratch[0].set(0, 0, getNECeilHeight());
+			Vector3 AB = scratch[1].set(1 - 0, 0 - 0, getNWCeilHeight() - getNECeilHeight());
+			Vector3 AC = scratch[2].set(0 - 0, 1 - 0, getSECeilHeight() - getNECeilHeight());
 
 			AA.add(AB.scl(x));
 			AA.add(AC.scl(y));
@@ -268,9 +274,9 @@ public class Tile implements Serializable {
 			x = (x - 1) * -1f;
 			y = (y - 1) * -1f;
 
-			Vector3 AA = tempVector1.set(1, 1, getSWCeilHeight());
-			Vector3 AB = tempVector2.set(0 - 1, 1 - 1, getSECeilHeight() - getSWCeilHeight());
-			Vector3 AC = tempVector3.set(1 - 1, 0 - 1, getNWCeilHeight() - getSWCeilHeight());
+			Vector3 AA = scratch[0].set(1, 1, getSWCeilHeight());
+			Vector3 AB = scratch[1].set(0 - 1, 1 - 1, getSECeilHeight() - getSWCeilHeight());
+			Vector3 AC = scratch[2].set(1 - 1, 0 - 1, getNWCeilHeight() - getSWCeilHeight());
 
 			AA.add(AB.scl(x));
 			AA.add(AC.scl(y));
@@ -279,6 +285,7 @@ public class Tile implements Serializable {
 	}
 	
 	public void getFloorNormal(float x, float y, Vector3 normal) {
+		Vector3[] scratch = scratchVectors.get();
 		// check if flat, can skip most checks if it is
 		if(slopeNE == slopeNW && slopeNE == slopeSE && slopeNE == slopeSW) {
 			normal.set(0, 0, 1);
@@ -290,15 +297,15 @@ public class Tile implements Serializable {
 		
 		// check which part of the triangle we're in
 		if(x + y < 1) {		// lower right
-			Vector3 AB = tempVector1.set(1 - 0, 0 - 0, getNWFloorHeight() - getNEFloorHeight());
-			Vector3 AC = tempVector2.set(0 - 0, 1 - 0, getSEFloorHeight() - getNEFloorHeight());
+			Vector3 AB = scratch[0].set(1 - 0, 0 - 0, getNWFloorHeight() - getNEFloorHeight());
+			Vector3 AC = scratch[1].set(0 - 0, 1 - 0, getSEFloorHeight() - getNEFloorHeight());
 			
 			normal.set(AB.crs(AC).nor());
 			return;
 		}
 		else { 				// upper left
-			Vector3 AB = tempVector1.set(0 - 1, 1 - 1, getSEFloorHeight() - getSWFloorHeight());
-			Vector3 AC = tempVector2.set(1 - 1, 0 - 1, getNWFloorHeight() - getSWFloorHeight());
+			Vector3 AB = scratch[0].set(0 - 1, 1 - 1, getSEFloorHeight() - getSWFloorHeight());
+			Vector3 AC = scratch[1].set(1 - 1, 0 - 1, getNWFloorHeight() - getSWFloorHeight());
 			
 			normal.set(AB.crs(AC).nor());
 			return;
@@ -638,6 +645,7 @@ public class Tile implements Serializable {
 	
 	public boolean collidesWithAngles(float startX, float startY, float x, float y, Vector3 collision, int tileX, int tileY, Collision hitLoc)
 	{
+		Vector3[] scratch = scratchVectors.get();
 		Plane checkPlane = null;
 		
 		if(tileSpaceType == TileSpaceType.OPEN_SE) {
@@ -659,7 +667,7 @@ public class Tile implements Serializable {
 			float flooredX = (float) (x - Math.floor(x));
 			float flooredY = (float) (y - Math.floor(y));
 			
-			Vector3 point = tempVector1.set(flooredX, flooredY, 0);
+			Vector3 point = scratch[0].set(flooredX, flooredY, 0);
 			
 			if(checkPlane.testPoint(point) == PlaneSide.Back) {
 				if(hitLoc != null) hitLoc.setHitNormal(checkPlane.normal);
@@ -706,6 +714,7 @@ public class Tile implements Serializable {
 	
 	public boolean pointBehindAngle(float x, float y)
 	{
+		Vector3[] scratch = scratchVectors.get();
 		Plane checkPlane = null;
 		
 		if(tileSpaceType == TileSpaceType.OPEN_SE) {
@@ -727,7 +736,7 @@ public class Tile implements Serializable {
 			float flooredX = (float) (x - Math.floor(x));
 			float flooredY = (float) (y - Math.floor(y));
 			
-			Vector3 point = tempVector2.set(flooredX, flooredY, 0);
+			Vector3 point = scratch[1].set(flooredX, flooredY, 0);
 			
 			if(checkPlane.testPoint(point) == PlaneSide.Back) {
 				return true;
@@ -739,6 +748,7 @@ public class Tile implements Serializable {
 	
 	public boolean checkAngledWallCollision(float startX, float startY, float x, float y, int tileX, int tileY, Entity e)
 	{
+		Vector3[] scratch = scratchVectors.get();
 		Plane checkPlane = null;
 		
 		float backToX = x - startX;
@@ -861,7 +871,7 @@ public class Tile implements Serializable {
 			float flooredX = (float) (x - Math.floor(x));
 			float flooredY = (float) (y - Math.floor(y));
 			
-			Vector3 point = tempVector1.set(flooredX, flooredY, 0);
+			Vector3 point = scratch[0].set(flooredX, flooredY, 0);
 			
 			if(checkPlane.testPoint(point) == PlaneSide.Back)
 			{
@@ -907,23 +917,24 @@ public class Tile implements Serializable {
 	
 	public static Vector3 ProjectPointOnPlane(Vector3 point, Plane plane)
 	{
+		Vector3[] scratch = scratchVectors.get();
 
 	  // Plane's formula is A + B + C + D = 0 where (A, B, C) is the plane's normal
 
 	  // and D is distance to origin along plane's normal. Therefore, D * (A, B, C) is a point on the plane.
 
-	  Vector3 pointOnPlane = tempVector1.set(plane.normal).scl(plane.d / plane.normal.len());
+	  Vector3 pointOnPlane = scratch[0].set(plane.normal).scl(plane.d / plane.normal.len());
 
 	
 	  // Vector from some point on the plane to the passed in point.
 
-	  Vector3 testVector = pointOnPlane.add(tempVector2.set(point).scl(-1f));
+	  Vector3 testVector = pointOnPlane.add(scratch[1].set(point).scl(-1f));
 
 	 
 
 	  // Cos(theta) = A.B / |A||B|
 
-	  float cosTheta = tempVector3.set(testVector).nor().dot(new Vector3(plane.normal).scl(-1f));
+	  float cosTheta = scratch[2].set(testVector).nor().dot(new Vector3(plane.normal).scl(-1f));
 	 
 
 	  // using Cos(theta) = Adjacent / Hypotenuse.
@@ -932,9 +943,9 @@ public class Tile implements Serializable {
 
 	  //Vector3 projectedPoint = new Vector3(point).add(new Vector3(plane.normal).scl((testVector.len() * cosTheta)).scl(-1f));
 	  
-	  Vector3 newTestVec = tempVector4.set(plane.normal).scl(testVector.len() * cosTheta).scl(-1f);
+	  Vector3 newTestVec = scratch[3].set(plane.normal).scl(testVector.len() * cosTheta).scl(-1f);
 	  
-	  Vector3 projectedPoint = tempVector5.set(point).add(newTestVec);
+	  Vector3 projectedPoint = scratch[4].set(point).add(newTestVec);
 
 	  return projectedPoint;
 

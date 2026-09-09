@@ -1,5 +1,10 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.items.AuthoritativeItemWorld;
+import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
+import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
+import com.interrupt.dungeoneer.multiplayer.items.ItemRequest;
+import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore;
@@ -121,6 +126,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile CombatSnapshot combatSnapshot;
     private volatile PartyCommunicationState partyCommunication =
             PartyCommunicationState.initial();
+    private int partyKeys;
+    private long keyRevision = -1L;
+    private final java.util.Map<Long, PhysicalItemState> physicalItems =
+            new java.util.LinkedHashMap<Long, PhysicalItemState>();
+    private final java.util.Map<Long, DoorSnapshot> doorSnapshots =
+            new java.util.LinkedHashMap<Long, DoorSnapshot>();
+    private long nextItemRequestId = 1L;
     private long lastSubmittedMovementTick;
 
     private DirectConnectClient(String host, int port, LauncherIdentity launcherIdentity,
@@ -416,6 +428,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
             fail("Host returned malformed session-ready state.");
             return;
         }
+        nextItemRequestId = Math.max(nextItemRequestId, ready.nextItemRequestId);
         readyMessage = ready;
         becomeReadyIfComplete();
     }
@@ -682,10 +695,81 @@ public final class DirectConnectClient implements DirectConnectPeer {
     @Override
     public synchronized void submitCombatAction(long requestId, CombatAction action,
             float aimX, float aimY, float aimZ, float attackPower) {
+        submitCombatAction(requestId, action, aimX, aimY, aimZ, attackPower, 0L);
+    }
+
+    @Override
+    public synchronized void submitCombatAction(long requestId, CombatAction action,
+            float aimX, float aimY, float aimZ, float attackPower, long weaponEntityId) {
         CombatActionRequestMessage request = new CombatActionRequestMessage(sessionId, requestId,
-                action, aimX, aimY, aimZ, attackPower);
+                action, aimX, aimY, aimZ, attackPower, weaponEntityId);
         if(!canSendReliableSessionEvent()) return;
         tcpChannel.writeAndFlush(request);
+    }
+
+    @Override
+    public synchronized List<DoorSnapshot> getDoorSnapshots() {
+        return new ArrayList<DoorSnapshot>(doorSnapshots.values());
+    }
+
+    private synchronized void doorState(DirectConnectWire.DoorStateMessage message) {
+        if(!sessionId.equals(message.sessionId)) {
+            fail("Door state belongs to another session.");
+            return;
+        }
+        DoorSnapshot previous = doorSnapshots.get(message.state.entityId);
+        if(previous == null && doorSnapshots.size() >= 4096) {
+            fail("Door count exceeds session bound.");
+            return;
+        }
+        if(previous == null || previous.revision < message.state.revision) {
+            doorSnapshots.put(message.state.entityId, message.state);
+        }
+    }
+
+    @Override
+    public synchronized List<PhysicalItemState> getPhysicalItems() {
+        return new ArrayList<PhysicalItemState>(physicalItems.values());
+    }
+
+    @Override
+    public synchronized long getNextItemRequestId() { return nextItemRequestId; }
+
+    @Override
+    public synchronized void submitItemAction(long requestId, ItemAction action, long entityId) {
+        submitItemAction(requestId, action, entityId, 0, 0);
+    }
+
+    @Override
+    public synchronized void submitItemAction(long requestId, ItemAction action, long entityId,
+            int condition, int quantity) {
+        DirectConnectWire.ItemRequestMessage request = new DirectConnectWire.ItemRequestMessage(
+                sessionId, requestId, action, entityId, condition, quantity);
+        if(!canSendReliableSessionEvent() || isSessionPaused()) return;
+        nextItemRequestId = Math.max(nextItemRequestId, requestId + 1L);
+        tcpChannel.writeAndFlush(request);
+    }
+
+    @Override public synchronized int getPartyKeys() { return partyKeys; }
+
+    private synchronized void partyKeys(DirectConnectWire.PartyKeysMessage message) {
+        if(!sessionId.equals(message.sessionId)) { fail("Party Keys belong to another session."); return; }
+        if(message.revision > keyRevision) { partyKeys = message.count; keyRevision = message.revision; }
+    }
+
+    private synchronized void physicalItem(DirectConnectWire.ItemStateMessage message) {
+        if(!sessionId.equals(message.sessionId)) {
+            fail("Physical item state belongs to another session.");
+            return;
+        }
+        PhysicalItemState previous = physicalItems.get(message.state.entityId);
+        if(previous == null && physicalItems.size() >= AuthoritativeItemWorld.MAX_ITEMS) {
+            fail("Physical item count exceeds session bound.");
+            return;
+        }
+        if(previous == null || previous.revision < message.state.revision) {
+            physicalItems.put(message.state.entityId, message.state);
+        }
     }
 
     private boolean canSendReliableSessionEvent() {
@@ -808,6 +892,18 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof PartyStatusMessage && sessionId != null
                     && campaignSlot != 0) {
                 partyStatus((PartyStatusMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.DoorStateMessage && sessionId != null
+                    && campaignSlot != 0) {
+                doorState((DirectConnectWire.DoorStateMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.PartyKeysMessage && sessionId != null
+                    && campaignSlot != 0) {
+                partyKeys((DirectConnectWire.PartyKeysMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.ItemStateMessage && sessionId != null
+                    && campaignSlot != 0) {
+                physicalItem((DirectConnectWire.ItemStateMessage)message);
             }
             else if(message instanceof CombatStateMessage && sessionId != null
                     && campaignSlot != 0) {

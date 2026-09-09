@@ -60,4 +60,12 @@ public interface NativeCombatAuthority {
         publishNativePresentation(sourceId, targetId, action,
                 originX, originY, originZ, impactX, impactY, impactZ, stateChanged);
     }
+    default void publishNativePresentation(String sourceId, String targetId,
+            CombatAction action, CombatPresentationPhase phase,
+            float originX, float originY, float originZ,
+            float impactX, float impactY, float impactZ, boolean stateChanged,
+            ProjectileVisual visual) {
+        publishNativePresentation(sourceId, targetId, action, phase, originX, originY, originZ,
+                impactX, impactY, impactZ, stateChanged);
+    }
 }

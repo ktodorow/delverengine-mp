@@ -59,6 +59,10 @@ public class Missile extends Item implements Directional {
     /** Is missile stuck in something? */
     boolean stuck = false;
 
+    public boolean isInFlight() {
+        return !stuck && (Math.abs(xa) > 0.00001f || Math.abs(ya) > 0.00001f || Math.abs(za) > 0.00001f);
+    }
+
     /** Stack type. */
     public String stackType = "ARROW";
 

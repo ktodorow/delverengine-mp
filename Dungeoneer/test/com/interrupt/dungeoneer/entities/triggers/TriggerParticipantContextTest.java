@@ -35,6 +35,17 @@ public class TriggerParticipantContextTest {
     }
 
     @Test
+    public void explicitObjectUseRetainsParticipantAcrossDelay() {
+        RecordingTrigger trigger = new RecordingTrigger();
+        trigger.triggerDelay = 2f;
+        ParticipantContext beta = new ParticipantContext(new ParticipantId("beta"),
+                new ParticipantCharacterState(2f, 3f, 0f, 0f), new SharedPartyProgression());
+        trigger.use(beta);
+        trigger.tick(null, 2f);
+        assertSame(beta, trigger.observedParticipant);
+    }
+
+    @Test
     public void retainsInitiatingParticipantAcrossTriggerDelay() {
         RecordingTrigger trigger = new RecordingTrigger();
         trigger.triggerDelay = 2f;

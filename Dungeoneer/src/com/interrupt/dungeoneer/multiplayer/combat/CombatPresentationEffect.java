@@ -32,7 +32,8 @@ public final class CombatPresentationEffect extends Entity {
         impactY = event.getImpactY();
         impactZ = event.getImpactZ();
         travelTicks = travelTicks(event);
-        baseScale = event.getPhase() == CombatPresentationPhase.IMPACT ? 0.5f
+        baseScale = event.getProjectileVisual() != null ? event.getProjectileVisual().scale
+                : event.getPhase() == CombatPresentationPhase.IMPACT ? 0.5f
                 : event.getAction() == CombatAction.MELEE ? 0.42f : 0.28f;
 
         z = travelTicks > 0f ? originZ : impactZ;
@@ -48,6 +49,14 @@ public final class CombatPresentationEffect extends Entity {
         blendMode = BlendMode.ADD;
         scale = baseScale;
         color = color(event.getAction(), event.isStateChanged());
+        ProjectileVisual visual = event.getProjectileVisual();
+        if(visual != null) {
+            spriteAtlas = visual.atlas;
+            tex = visual.texture;
+            fullbrite = visual.fullbrite;
+            blendMode = visual.additive ? BlendMode.ADD : BlendMode.OPAQUE;
+            color = new Color(visual.rgba);
+        }
     }
 
     public boolean isTravelling() {
@@ -84,6 +93,7 @@ public final class CombatPresentationEffect extends Entity {
         float dy = event.getImpactY() - event.getOriginY();
         float dz = event.getImpactZ() - event.getOriginZ();
         float distance = (float)Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if(event.getProjectileVisual() != null) return distance / event.getProjectileVisual().speed;
         return Math.max(4f, Math.min(18f, distance * 2f));
     }
 
