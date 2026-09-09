@@ -147,6 +147,7 @@ public class MagicMissileProjectile extends Projectile {
 	public void hitEffect()	{
 		if(!isActive) return;
 
+		explosion.setOwner(owner);
         explosion.initExplosion(x, y, z + yOffset, splashForce, splashRadius);
 
 		if (this.explosion.color == null) {

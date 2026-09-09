@@ -1,16 +1,19 @@
 package com.interrupt.dungeoneer.entities;
 
 import com.badlogic.gdx.math.Vector3;
+import com.badlogic.gdx.utils.Array;
 import com.interrupt.dungeoneer.Audio;
 import com.interrupt.dungeoneer.entities.items.Weapon;
 import com.interrupt.dungeoneer.game.CachePools;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.Options;
+import com.interrupt.dungeoneer.gfx.animation.AnimationAction;
 import com.interrupt.dungeoneer.gfx.animation.SpriteAnimation;
 import com.interrupt.dungeoneer.tiles.Tile;
 import com.interrupt.managers.MonsterManager;
 
+import java.util.HashMap;
 import java.util.Random;
 
 public class Corpse extends Entity {
@@ -24,6 +27,12 @@ public class Corpse extends Entity {
 	protected ProjectedDecal bloodPoolDecal = null;
 
 	int hp = 10;
+	private transient boolean networkReplica = false;
+	private transient boolean networkOriginalDynamic = true;
+	private transient boolean networkStateInitialized = false;
+	private transient float networkX;
+	private transient float networkY;
+	private transient float networkZ;
 
 	public Corpse() { }
 
@@ -140,6 +149,7 @@ public class Corpse extends Entity {
 
 	@Override
 	public void hit(float projx, float projy, int damage, float knockback, Weapon.DamageType damageType, Entity instigator) {
+		if(networkReplica) return;
 		super.hit(projx, projy, damage, knockback, damageType, instigator);
 		float force = Math.min(knockback, 0.075f);
 		this.applyPhysicsImpulse(new Vector3(projx * force, projy * force, 0));
@@ -168,6 +178,19 @@ public class Corpse extends Entity {
 	@Override
 	public void tick(Level level, float delta)
 	{
+		if(networkReplica) {
+			if(networkStateInitialized) {
+				float distanceSquared = (networkX - x) * (networkX - x)
+						+ (networkY - y) * (networkY - y);
+				float interpolation = distanceSquared > 9f
+						? 1f : Math.min(1f, delta * 0.35f);
+				x += (networkX - x) * interpolation;
+				y += (networkY - y) * interpolation;
+				z += (networkZ - z) * interpolation;
+			}
+			if(animation != null && animation.playing) animateNetwork(animation, delta);
+			return;
+		}
 		super.tick(level, delta);
 
 		if(animation != null && animation.playing) {
@@ -180,7 +203,61 @@ public class Corpse extends Entity {
 		this.animation.play();
 	}
 
+	private void animateNetwork(SpriteAnimation animation, float delta) {
+		HashMap<String, Array<AnimationAction>> actions = animation.actions;
+		try {
+			animation.actions = null;
+			animation.animate(delta, this);
+		}
+		finally {
+			animation.actions = actions;
+		}
+	}
+
+	public void setNetworkReplica(boolean networkReplica) {
+		if(this.networkReplica == networkReplica) return;
+		this.networkReplica = networkReplica;
+		if(networkReplica) {
+			networkOriginalDynamic = isDynamic;
+			isDynamic = false;
+			networkStateInitialized = false;
+			networkX = x;
+			networkY = y;
+			networkZ = z;
+		}
+		else {
+			isDynamic = networkOriginalDynamic;
+			networkStateInitialized = false;
+		}
+	}
+
+	public boolean isNetworkReplica() {
+		return networkReplica;
+	}
+
+	public boolean isGibbed() {
+		return hidden;
+	}
+
+	public void applyNetworkState(float targetX, float targetY, float targetZ) {
+		if(!networkReplica) return;
+		networkX = targetX;
+		networkY = targetY;
+		networkZ = targetZ;
+		if(!networkStateInitialized) {
+			networkStateInitialized = true;
+			x = targetX;
+			y = targetY;
+			z = targetZ;
+		}
+	}
+
+	public void applyNetworkGib() {
+		if(networkReplica) gib();
+	}
+
 	public void gib() {
+		if(hidden) return;
 		hidden = true;
 		isDynamic = false;
 		isSolid = false;

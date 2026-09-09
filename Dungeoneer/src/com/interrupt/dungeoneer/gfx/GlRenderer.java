@@ -44,11 +44,16 @@ import com.interrupt.dungeoneer.gfx.shaders.WaterShaderInfo;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
 import com.interrupt.dungeoneer.multiplayer.communication.PartyChatMessage;
 import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
+import com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeCombatEncounter;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatantSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.MonsterSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.ui.PartyHudModel;
 import com.interrupt.dungeoneer.ui.PartyHudModel.Row;
 import com.interrupt.dungeoneer.ui.PartyNameplateVisibility;
@@ -1716,6 +1721,35 @@ public class GlRenderer {
 			y -= uiSize * 0.28f;
 		}
 
+		CombatSnapshot combat = peer.getCombatSnapshot();
+		CombatantSnapshot localCombatant = localCombatant(peer, combat);
+		int totalEnemies = 0;
+		int livingEnemies = 0;
+		int enemyHealth = 0;
+		int enemyMaximumHealth = 0;
+		if(combat != null) {
+			for(MonsterSnapshot registered : combat.getMonsters()) {
+				CombatantSnapshot enemy = combat.getCombatant(registered.getId());
+				if(enemy == null) continue;
+				totalEnemies++;
+				enemyHealth += enemy.getHealth();
+				enemyMaximumHealth += enemy.getMaximumHealth();
+				if(enemy.isLiving()) livingEnemies++;
+			}
+		}
+		if(totalEnemies > 0) {
+			drawText("ENEMIES ALIVE " + livingEnemies + "/" + totalEnemies
+					+ " - HEALTH " + enemyHealth + "/" + enemyMaximumHealth,
+					left, y, fontSize, Color.ORANGE, Color.BLACK);
+			y -= uiSize * 0.25f;
+		}
+		if(localCombatant != null) {
+			drawText("YOUR HEALTH " + localCombatant.getHealth() + "/"
+					+ localCombatant.getMaximumHealth(), left, y, fontSize,
+					Color.WHITE, Color.BLACK);
+			y -= uiSize * 0.25f;
+		}
+
 		List<PartyChatMessage> chatHistory = communication.getChatHistory();
 		int firstChat = Math.max(0, chatHistory.size() - 4);
 		for(int index = firstChat; index < chatHistory.size(); index++) {
@@ -1725,6 +1759,18 @@ public class GlRenderer {
 			y -= uiSize * 0.25f;
 		}
 
+	}
+
+	private CombatantSnapshot localCombatant(DirectConnectPeer peer, CombatSnapshot combat) {
+		if(combat == null || peer.getPartyStatus() == null
+				|| peer.getLocalMovementEntityId() == null) return null;
+		for(PartyMemberStatus member : peer.getPartyStatus().getMembers()) {
+			if(peer.getLocalMovementEntityId().equals(member.getEntityId())) {
+				return combat.getCombatant(AuthoritativeCombatEncounter.participantTargetId(
+						new ParticipantId("campaign-slot-" + member.getCampaignSlot())));
+			}
+		}
+		return null;
 	}
 
 	public void Render(Entity s) {

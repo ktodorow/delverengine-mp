@@ -11,7 +11,16 @@ import com.interrupt.dungeoneer.gfx.drawables.DrawableMesh;
 import com.interrupt.helpers.AnimationHelper;
 
 public class Spikes extends Model {
+    public interface MultiplayerTrapListener {
+        void addMultiplayerTargets(Spikes spikes, Array<Entity> colliding);
+        boolean hasNearbyMovingMultiplayerTarget(Spikes spikes, Vector3 sensorSize);
+        void onTrapActivated(Spikes spikes);
+    }
+
     protected AnimationHelper animation = null;
+    private transient MultiplayerTrapListener multiplayerTrapListener;
+    private transient boolean networkReplica = false;
+    private transient float networkReplicaReverseTimer = 0f;
 
     protected enum SpikeType { STATIC, LOOPING, PROXIMITY, TRIGGERED }
 
@@ -42,18 +51,20 @@ public class Spikes extends Model {
     @Override
     public void tick(Level level, float delta) {
 
-        if(spikeType != SpikeType.STATIC) {
-            if (animation == null) {
-                animation = new AnimationHelper(new Vector3(), new Vector3(), new Vector3(0, 0, 0.5f), new Vector3(), 10f);
-                animation.setAnimationPosition(0f);
-                animation.reverse();
+        if(networkReplica) {
+            tickNetworkReplica(level, delta);
+            return;
+        }
 
-                reverseTimer = startOffset;
-            }
+        if(spikeType != SpikeType.STATIC) {
+            ensureAnimation();
 
             animation.tickAnimation(delta);
 
             Array<Entity> colliding = level.getEntitiesColliding(this);
+            if(multiplayerTrapListener != null) {
+                multiplayerTrapListener.addMultiplayerTargets(this, colliding);
+            }
 
             // remove entities that we're no longer colliding with from the ignore list
             for (int i = 0; i < hitAlready.size; i++) {
@@ -96,11 +107,7 @@ public class Spikes extends Model {
                 else if(animation.isReversed() && reverseTimer > startDelay) {
                     if((spikeType == SpikeType.PROXIMITY && entitiesNearby(level)) ||
                             spikeType == SpikeType.LOOPING) {
-                        hitAlready.clear();
-                        animation.reverse();
-                        reverseTimer = 0f;
-
-                        Audio.playPositionedSound("trap/trap_spike.mp3", new Vector3(x,y,z), 0.5f - (Game.rand.nextFloat() * 0.05f), 8f);
+                        activateTrap();
                     }
                 }
             }
@@ -111,6 +118,9 @@ public class Spikes extends Model {
         else {
             // these spikes are just static
             Array<Entity> colliding = level.getEntitiesColliding(this);
+            if(multiplayerTrapListener != null) {
+                multiplayerTrapListener.addMultiplayerTargets(this, colliding);
+            }
 
             // remove entities that we're no longer colliding with from the ignore list
             for (int i = 0; i < hitAlready.size; i++) {
@@ -141,11 +151,10 @@ public class Spikes extends Model {
 
     @Override
     public void onTrigger(Entity instigator, String value) {
+        if(networkReplica) return;
+        ensureAnimation();
         if(animation.isReversed() && reverseTimer > startDelay) {
-            hitAlready.clear();
-            animation.reverse();
-            reverseTimer = 0f;
-            Audio.playPositionedSound("trap/trap_spike.mp3", new Vector3(x,y,z), 0.5f - (Game.rand.nextFloat() * 0.05f), 8f);
+            activateTrap();
         }
     }
 
@@ -158,7 +167,82 @@ public class Spikes extends Model {
                     return true;
             }
         }
-        return false;
+        return multiplayerTrapListener != null
+                && multiplayerTrapListener.hasNearbyMovingMultiplayerTarget(
+                        this, proximitySensorSize);
+    }
+
+    public void setMultiplayerTrapListener(MultiplayerTrapListener listener) {
+        multiplayerTrapListener = listener;
+    }
+
+    public void clearMultiplayerTrapListener(MultiplayerTrapListener listener) {
+        if(multiplayerTrapListener == listener) multiplayerTrapListener = null;
+    }
+
+    public void setNetworkReplica(boolean networkReplica) {
+        this.networkReplica = networkReplica;
+        multiplayerTrapListener = null;
+        hitAlready.clear();
+        if(networkReplica && spikeType != SpikeType.STATIC) {
+            ensureAnimation();
+            animation.setAnimationPosition(0f);
+            if(!animation.isReversed()) animation.reverse();
+            hidden = true;
+            networkReplicaReverseTimer = 0f;
+        }
+    }
+
+    public boolean isNetworkReplica() { return networkReplica; }
+
+    public void playNetworkActivation() {
+        if(!networkReplica || spikeType == SpikeType.STATIC) return;
+        ensureAnimation();
+        if(animation.isReversed()) {
+            hitAlready.clear();
+            animation.reverse();
+            networkReplicaReverseTimer = 0f;
+            Audio.playPositionedSound("trap/trap_spike.mp3", new Vector3(x,y,z),
+                    0.5f - (Game.rand.nextFloat() * 0.05f), 8f);
+        }
+    }
+
+    private void ensureAnimation() {
+        if(animation != null) return;
+        animation = new AnimationHelper(new Vector3(), new Vector3(),
+                new Vector3(0, 0, 0.5f), new Vector3(), 10f);
+        animation.setAnimationPosition(0f);
+        animation.reverse();
+        reverseTimer = startOffset;
+    }
+
+    private void activateTrap() {
+        hitAlready.clear();
+        animation.reverse();
+        reverseTimer = 0f;
+        Audio.playPositionedSound("trap/trap_spike.mp3", new Vector3(x,y,z),
+                0.5f - (Game.rand.nextFloat() * 0.05f), 8f);
+        if(multiplayerTrapListener != null) {
+            multiplayerTrapListener.onTrapActivated(this);
+        }
+    }
+
+    private void tickNetworkReplica(Level level, float delta) {
+        if(spikeType == SpikeType.STATIC) {
+            tickAttached(level, delta);
+            return;
+        }
+        ensureAnimation();
+        animation.tickAnimation(delta);
+        if(animation.isDonePlaying() && !animation.isReversed()) {
+            networkReplicaReverseTimer += delta;
+            if(networkReplicaReverseTimer > reverseDelay) {
+                animation.reverse();
+                networkReplicaReverseTimer = 0f;
+            }
+        }
+        hidden = animation.getAnimationPosition() <= 0f;
+        tickAttached(level, delta);
     }
 
     public Vector3 getSpikeDirection() {

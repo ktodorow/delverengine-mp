@@ -90,6 +90,13 @@ public final class PartyMemberStatus {
                 health, maximumHealth, remainingLives, PartyMemberState.CONNECTED);
     }
 
+    /** Projects Host-authoritative combat health without changing lifecycle state. */
+    public PartyMemberStatus withHealth(int authoritativeHealth,
+            int authoritativeMaximumHealth) {
+        return new PartyMemberStatus(campaignSlot, entityId, nickname, avatarId,
+                authoritativeHealth, authoritativeMaximumHealth, remainingLives, state);
+    }
+
     public int getCampaignSlot() {
         return campaignSlot;
     }

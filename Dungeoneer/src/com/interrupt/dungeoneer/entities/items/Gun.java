@@ -107,6 +107,10 @@ public class Gun extends Weapon {
         if(p.handAnimation != null) p.handAnimation.stop();
         p.playAttackAnimation(this, attackPower);
 
+        Vector3 attackDirection = getCrosshairDirection(-0.4f);
+        if(attackDirection == null) attackDirection = Game.camera.direction;
+        notifyWeaponAttack(p, attackDirection, attackPower);
+
         if(projectile != null) {
             doProjectileFire(p, lvl);
         }

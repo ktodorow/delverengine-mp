@@ -75,6 +75,10 @@ public final class OwnedGameCopyMount implements AutoCloseable {
         return active != null;
     }
 
+    public static synchronized OwnedGameCopyCompatibility getCompatibility() {
+        return active == null ? null : active.ownedGameCopy.getCompatibility();
+    }
+
     public static synchronized void unmount() {
         if(active == null) return;
         try {

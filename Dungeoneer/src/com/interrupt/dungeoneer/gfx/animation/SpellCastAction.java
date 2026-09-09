@@ -3,9 +3,7 @@ package com.interrupt.dungeoneer.gfx.animation;
 import com.badlogic.gdx.math.Vector3;
 import com.interrupt.dungeoneer.entities.Entity;
 import com.interrupt.dungeoneer.entities.Monster;
-import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.entities.spells.Spell;
-import com.interrupt.dungeoneer.game.Game;
 
 public class SpellCastAction extends AnimationAction {
 	
@@ -24,9 +22,11 @@ public class SpellCastAction extends AnimationAction {
 	public void doAction(Entity instigator) {
 		if(instigator instanceof Monster) {
 			Monster m = (Monster)instigator;
-			Player player = Game.instance.player;
+			Entity target = m.getAttackTarget();
+			if(target == null || !target.isActive) return;
 			
-			Vector3 dir = new Vector3(player.x, player.z, player.y).sub(m.x, m.z + m.projectileOffset, m.y).nor();
+			Vector3 dir = new Vector3(target.x, target.z, target.y)
+					.sub(m.x, m.z + m.projectileOffset, m.y).nor();
 			spell.cast(m, dir);
 		}
 	}

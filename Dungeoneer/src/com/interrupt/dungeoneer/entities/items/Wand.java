@@ -93,6 +93,7 @@ public class Wand extends Weapon {
 
 		Vector3 direction = getCrosshairDirection(-0.3f);
 		if(direction == null) direction = Game.camera.direction;
+		notifyWeaponAttack(p, direction, attackPower);
 		
 		spell.damageType = damageType;
 		spell.baseDamage = getBaseDamage();

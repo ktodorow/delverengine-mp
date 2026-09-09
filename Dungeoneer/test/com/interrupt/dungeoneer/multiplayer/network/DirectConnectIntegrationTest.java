@@ -2,6 +2,10 @@ package com.interrupt.dungeoneer.multiplayer.network;
 
 import com.interrupt.dungeoneer.GameApplication;
 import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
+import com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeCombatEncounter;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
@@ -13,6 +17,8 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerRejected;
 import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
@@ -39,6 +45,7 @@ import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -96,6 +103,30 @@ public class DirectConnectIntegrationTest {
             assertEquals(GameApplication.OPEN_SOURCE_TEST_LEVEL,
                     client.getStatus().getFloorId());
             assertEquals(2, client.getCampaignSlot());
+        }
+        finally {
+            client.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void ownedCompatibilityReportsOwnedTutorialAsSharedFloor() throws Exception {
+        DirectConnectCompatibility compatibility = new DirectConnectCompatibility(
+                DirectConnectProtocol.BUILD_ID, "delver-owned-assets-v1",
+                "0000000000000000000000000000000000000000000000000000000000000000");
+        HostFixture fixture = host(compatibility, 2, "owned-floor");
+        DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
+        try {
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            awaitPendingCount(fixture.host, 1);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            assertEquals("owned-game-copy-tutorial", client.getStatus().getFloorId());
         }
         finally {
             client.close();
@@ -173,6 +204,165 @@ public class DirectConnectIntegrationTest {
                 assertEquals(3L, snapshots.get(i).getHostTick()
                         - snapshots.get(i - 1).getHostTick());
             }
+        }
+        finally {
+            client.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void twoParticipantsObserveOneHostAuthoritativeCombatResult() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("combat-floor");
+        HostFixture fixture = host(compatibility, 2, "combat");
+        DirectConnectClient client = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        try {
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitCombatSnapshot(client);
+            assertEquals(24, combatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
+
+            submitDirectedAtMonster(client, 1L, CombatAction.MELEE);
+            awaitCombatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 20);
+            awaitCombatPresentations(client, 1);
+            assertEquals(20, combatHealth(fixture.host,
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
+            assertEquals(1, fixture.host.getCombatPresentationEvents().size());
+            assertEquals(CombatAction.MELEE,
+                    client.getCombatPresentationEvents().get(0).getAction());
+
+            submitDirectedAtMonster(fixture.host, 1L, CombatAction.SPELL);
+            awaitCombatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 15);
+            awaitCombatPresentations(client, 2);
+            submitDirectedAtMonster(client, 1L, CombatAction.PROJECTILE);
+            Thread.sleep(100L);
+            assertEquals(15, combatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
+            assertEquals(15, combatHealth(fixture.host,
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
+            assertEquals(2, client.getCombatPresentationEvents().size());
+            assertEquals(2, fixture.host.getCombatPresentationEvents().size());
+        }
+        finally {
+            client.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void twoClientsConvergeOnFriendlyFireBenefitsHazardsAndDeath() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("combat-policy-floor");
+        HostFixture fixture = host(compatibility, 3, "combat-policy");
+        DirectConnectClient second = approveClient(fixture, compatibility, '2', "Two",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient third = approveClient(fixture, compatibility, '3', "Three",
+                AvatarCatalog.HUMANOID_3);
+        String secondTarget = AuthoritativeCombatEncounter.participantTargetId(
+                new ParticipantId("campaign-slot-2"));
+        try {
+            fixture.host.startSession();
+            awaitPhase(second, DirectConnectPhase.READY);
+            awaitPhase(third, DirectConnectPhase.READY);
+            awaitCombatSnapshot(second);
+            awaitCombatSnapshot(third);
+            awaitPartyHealth(second, 2, 8);
+            awaitPartyHealth(third, 2, 8);
+
+            second.submitCombatAction(1L, CombatAction.SELF_DAMAGE, secondTarget);
+            awaitCombatHealth(third, secondTarget, 6);
+            awaitPartyHealth(second, 2, 6);
+            awaitPartyHealth(third, 2, 6);
+            awaitPartyHealth(fixture.host, 2, 6);
+            second.submitCombatAction(2L, CombatAction.ENVIRONMENTAL_HAZARD, secondTarget);
+            awaitCombatHealth(third, secondTarget, 4);
+            awaitCombatCadence(fixture.host, CombatAction.ENVIRONMENTAL_HAZARD);
+
+            third.submitCombatAction(1L, CombatAction.BENEFICIAL_SPELL, secondTarget);
+            awaitCombatHealth(second, secondTarget, 7);
+            awaitCombatHealth(third, secondTarget, 7);
+            awaitCombatHealth(fixture.host, secondTarget, 7);
+            awaitPartyHealth(second, 2, 7);
+            awaitPartyHealth(third, 2, 7);
+            awaitPartyHealth(fixture.host, 2, 7);
+
+            submitDirectedAtParticipant(third, 2L, CombatAction.MELEE, 2);
+            awaitCombatPresentations(second, 4);
+            awaitCombatPresentations(third, 4);
+            assertEquals(7, combatHealth(second, secondTarget));
+            assertEquals(7, combatHealth(third, secondTarget));
+            assertEquals(7, combatHealth(fixture.host, secondTarget));
+
+            second.submitCombatAction(3L, CombatAction.ENVIRONMENTAL_HAZARD, secondTarget);
+            awaitCombatHealth(third, secondTarget, 5);
+            awaitCombatCadence(fixture.host, CombatAction.ENVIRONMENTAL_HAZARD);
+            second.submitCombatAction(3L, CombatAction.ENVIRONMENTAL_HAZARD, secondTarget);
+            second.submitCombatAction(4L, CombatAction.ENVIRONMENTAL_HAZARD, secondTarget);
+            awaitCombatHealth(third, secondTarget, 3);
+            awaitCombatCadence(fixture.host, CombatAction.ENVIRONMENTAL_HAZARD);
+            second.submitCombatAction(5L, CombatAction.ENVIRONMENTAL_HAZARD, secondTarget);
+            awaitCombatHealth(third, secondTarget, 1);
+            awaitCombatCadence(fixture.host, CombatAction.ENVIRONMENTAL_HAZARD);
+            second.submitCombatAction(6L, CombatAction.ENVIRONMENTAL_HAZARD, secondTarget);
+            awaitCombatHealth(second, secondTarget, 0);
+            awaitCombatHealth(third, secondTarget, 0);
+            awaitCombatHealth(fixture.host, secondTarget, 0);
+            awaitPartyHealth(second, 2, 0);
+            awaitPartyHealth(third, 2, 0);
+            awaitPartyHealth(fixture.host, 2, 0);
+
+            third.submitCombatAction(3L, CombatAction.BENEFICIAL_SPELL, secondTarget);
+            submitDirectedAtMonster(third, 4L, CombatAction.MELEE);
+            awaitCombatPresentations(second, 9);
+            awaitCombatPresentations(third, 9);
+            assertEquals(0, combatHealth(second, secondTarget));
+            assertEquals(0, combatHealth(third, secondTarget));
+            assertEquals(0, combatHealth(fixture.host, secondTarget));
+        }
+        finally {
+            third.close();
+            second.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void directedClientAttackIsTracedAndReplicatedByHost() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("directed-combat-floor");
+        HostFixture fixture = host(compatibility, 2, "directed-combat");
+        DirectConnectClient client = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        try {
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitCombatSnapshot(client);
+            awaitMovementSnapshots(client, 1);
+
+            List<MovementSnapshot> movementSnapshots = client.getMovementSnapshots();
+            MovementEntityState source = movementSnapshots.get(movementSnapshots.size() - 1)
+                    .getEntity(client.getLocalMovementEntityId());
+            CombatSnapshot before = client.getCombatSnapshot();
+            float aimX = before.getMonsterX() - source.getX();
+            float aimY = before.getMonsterY() - source.getY();
+            float aimZ = before.getMonsterZ() - (source.getZ() + 0.35f);
+            float aimLength = (float)Math.sqrt(aimX * aimX + aimY * aimY + aimZ * aimZ);
+
+            client.submitCombatAction(1L, CombatAction.SPELL,
+                    aimX / aimLength, aimY / aimLength, aimZ / aimLength);
+
+            awaitCombatPresentations(client, 1);
+            CombatPresentationEvent presentation =
+                    client.getCombatPresentationEvents().get(0);
+            assertEquals(CombatAction.SPELL, presentation.getAction());
+            assertEquals("origin=" + presentation.getOriginX() + ","
+                            + presentation.getOriginY() + "," + presentation.getOriginZ()
+                            + " impact=" + presentation.getImpactX() + ","
+                            + presentation.getImpactY() + "," + presentation.getImpactZ(),
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
+                    presentation.getTargetId());
+            assertTrue(presentation.isStateChanged());
+            awaitCombatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 19);
+            assertEquals(19, combatHealth(fixture.host,
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
         }
         finally {
             client.close();
@@ -363,6 +553,12 @@ public class DirectConnectIntegrationTest {
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPhase(third, DirectConnectPhase.READY);
             NetworkEntityId preservedEntity = second.getLocalMovementEntityId();
+            String secondTarget = AuthoritativeCombatEncounter.participantTargetId(
+                    new ParticipantId("campaign-slot-2"));
+            awaitCombatSnapshot(third);
+            submitDirectedAtMonster(second, 1L, CombatAction.MELEE);
+            awaitCombatHealth(third, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 20);
+            awaitMonsterTarget(fixture.host, secondTarget);
 
             second.close();
             PartyMemberStatus frozen = awaitPartyState(third, 2,
@@ -370,6 +566,7 @@ public class DirectConnectIntegrationTest {
             assertEquals(preservedEntity, frozen.getEntityId());
             assertTrue(fixture.host.getReconnectGrace(2).isFrozen());
             assertTrue(fixture.host.getReconnectGrace(2).isInvulnerable());
+            awaitMonsterTargetOtherThan(fixture.host, secondTarget);
 
             returning = client(fixture.host.getBoundPort(), '2', "Different Display",
                     AvatarCatalog.HUMANOID_4, 0, tokens, compatibility);
@@ -380,10 +577,64 @@ public class DirectConnectIntegrationTest {
             assertEquals(PartyMemberState.CONNECTED,
                     awaitPartyState(third, 2, PartyMemberState.CONNECTED).getState());
             assertEquals("Two", fixture.roster.getSlot(2).getPresentation().getNickname());
+            awaitCombatCadence(fixture.host, CombatAction.PROJECTILE);
+            assertEquals(2L, returning.getNextCombatRequestId());
+            submitDirectedAtMonster(returning, returning.getNextCombatRequestId(),
+                    CombatAction.PROJECTILE);
+            awaitCombatHealth(third, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 17);
         }
         finally {
             second.close();
             if(third != null) third.close();
+            if(returning != null) returning.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void reconnectReadyIncludesCurrentCombatStateAfterEncounterBecomesIdle()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("idle-reconnect-floor");
+        HostFixture fixture = host(compatibility, 2, "idle-reconnect");
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+        DirectConnectClient returning = null;
+        String clientTarget = AuthoritativeCombatEncounter.participantTargetId(
+                new ParticipantId("campaign-slot-2"));
+        try {
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitCombatSnapshot(client);
+
+            client.submitCombatAction(1L, CombatAction.SELF_DAMAGE, clientTarget);
+            awaitCombatHealth(client, clientTarget, 6);
+            for(long requestId = 1L; requestId <= 5L; requestId++) {
+                submitDirectedAtMonster(fixture.host, requestId, CombatAction.SPELL);
+                awaitCombatHealth(fixture.host,
+                        AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
+                        Math.max(0, 24 - (int)requestId * CombatAction.SPELL.getAmount()));
+                if(requestId < 5L) {
+                    awaitCombatCadence(fixture.host, CombatAction.SPELL);
+                }
+            }
+
+            client.close();
+            returning = client(fixture.host.getBoundPort(), '2', "Friend",
+                    AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+            awaitPhase(returning, DirectConnectPhase.READY);
+
+            assertEquals(2L, returning.getNextCombatRequestId());
+            assertNotNull(returning.getCombatSnapshot());
+            assertEquals(0, combatHealth(returning,
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
+            assertEquals(6, combatHealth(returning, clientTarget));
+        }
+        finally {
+            client.close();
             if(returning != null) returning.close();
             fixture.close();
         }
@@ -738,6 +989,108 @@ public class DirectConnectIntegrationTest {
         fail("Timed out waiting for " + count + " authoritative movement snapshots.");
     }
 
+    private void awaitCombatSnapshot(DirectConnectPeer peer) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(peer.getCombatSnapshot() != null) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for authoritative combat state.");
+    }
+
+    private void submitDirectedAtMonster(DirectConnectPeer peer, long requestId,
+            CombatAction action) throws InterruptedException {
+        awaitMovementSnapshots(peer, 1);
+        awaitCombatSnapshot(peer);
+        List<MovementSnapshot> movementSnapshots = peer.getMovementSnapshots();
+        MovementEntityState source = movementSnapshots.get(movementSnapshots.size() - 1)
+                .getEntity(peer.getLocalMovementEntityId());
+        CombatSnapshot combat = peer.getCombatSnapshot();
+        float aimX = combat.getMonsterX() - source.getX();
+        float aimY = combat.getMonsterY() - source.getY();
+        float aimLength = (float)Math.sqrt(aimX * aimX + aimY * aimY);
+        assertTrue(aimLength > 0.0001f);
+        peer.submitCombatAction(requestId, action,
+                aimX / aimLength, aimY / aimLength, 0f);
+    }
+
+    private void submitDirectedAtParticipant(DirectConnectPeer peer, long requestId,
+            CombatAction action, int campaignSlot) throws InterruptedException {
+        awaitMovementSnapshots(peer, 1);
+        List<MovementSnapshot> movementSnapshots = peer.getMovementSnapshots();
+        MovementSnapshot movement = movementSnapshots.get(movementSnapshots.size() - 1);
+        MovementEntityState source = movement.getEntity(peer.getLocalMovementEntityId());
+        MovementEntityState target = movement.getEntity(new NetworkEntityId(campaignSlot));
+        assertNotNull(source);
+        assertNotNull(target);
+        float aimX = target.getX() - source.getX();
+        float aimY = target.getY() - source.getY();
+        float aimLength = (float)Math.sqrt(aimX * aimX + aimY * aimY);
+        assertTrue(aimLength > 0.0001f);
+        peer.submitCombatAction(requestId, action,
+                aimX / aimLength, aimY / aimLength, 0f);
+    }
+
+    private void awaitCombatHealth(DirectConnectPeer peer, String targetId, int health)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(combatHealth(peer, targetId) == health) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for authoritative combat health=" + health + ".");
+    }
+
+    private void awaitCombatCadence(DirectConnectHost host, CombatAction action)
+            throws InterruptedException {
+        long readyTick = host.getCombatSnapshot().getHostTick()
+                + action.getMinimumIntervalTicks();
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(host.getCombatSnapshot().getHostTick() >= readyTick) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for combat cadence " + action + ".");
+    }
+
+    private void awaitCombatPresentations(DirectConnectPeer peer, int count)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            if(peer.getCombatPresentationEvents().size() >= count) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for " + count + " combat presentations.");
+    }
+
+    private void awaitMonsterTarget(DirectConnectPeer peer, String targetId)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            CombatSnapshot snapshot = peer.getCombatSnapshot();
+            if(snapshot != null && targetId.equals(snapshot.getMonsterTargetId())) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for monster target " + targetId + ".");
+    }
+
+    private void awaitMonsterTargetOtherThan(DirectConnectPeer peer, String targetId)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            CombatSnapshot snapshot = peer.getCombatSnapshot();
+            if(snapshot != null && !targetId.equals(snapshot.getMonsterTargetId())) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for monster to release target " + targetId + ".");
+    }
+
+    private int combatHealth(DirectConnectPeer peer, String targetId) {
+        CombatSnapshot snapshot = peer.getCombatSnapshot();
+        return snapshot == null || snapshot.getCombatant(targetId) == null
+                ? -1 : snapshot.getCombatant(targetId).getHealth();
+    }
+
     private PartyMemberStatus awaitPartyState(DirectConnectPeer peer, int campaignSlot,
             PartyMemberState expected) throws InterruptedException {
         long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
@@ -751,6 +1104,19 @@ public class DirectConnectIntegrationTest {
         fail("Timed out waiting for Campaign Slot " + campaignSlot
                 + " Party state " + expected + ".");
         return null;
+    }
+
+    private void awaitPartyHealth(DirectConnectPeer peer, int campaignSlot, int health)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            PartyStatusSnapshot snapshot = peer.getPartyStatus();
+            PartyMemberStatus member = snapshot == null ? null : snapshot.getMember(campaignSlot);
+            if(member != null && member.getHealth() == health) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for Campaign Slot " + campaignSlot
+                + " Party health=" + health + ".");
     }
 
     private void awaitChatCount(DirectConnectPeer peer, int count) throws InterruptedException {

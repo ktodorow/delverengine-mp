@@ -5,9 +5,21 @@ import com.interrupt.dungeoneer.multiplayer.host.AuthoritativeHostSession;
 import com.interrupt.dungeoneer.multiplayer.host.HostDisconnectOutcome;
 import com.interrupt.dungeoneer.multiplayer.host.HostPersistedState;
 import com.interrupt.dungeoneer.multiplayer.host.HostSessionEvent;
+import com.interrupt.dungeoneer.multiplayer.host.HostSessionOutput;
 import com.interrupt.dungeoneer.multiplayer.host.HostSessionStorage;
 import com.interrupt.dungeoneer.multiplayer.host.HostSessionTransport;
 import com.interrupt.dungeoneer.multiplayer.host.HostTransitionOutcome;
+import com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeCombatEncounter;
+import com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeEncounterSimulation;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatantSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationPhase;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationJournal;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatRequest;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatStateEvent;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeCombatAuthority;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster.ClaimOutcome;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster.ClaimStatus;
@@ -17,6 +29,9 @@ import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.SlotClaimRequest;
 import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CampaignChallenge;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatActionRequestMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatPresentationMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatStateMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientDisconnect;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientHello;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.DiscoveryAnnouncement;
@@ -50,6 +65,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementReplicationState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSpawn;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.movement.RectangularMovementCollisionWorld;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
@@ -91,7 +107,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Participant Host authority for explicit lobby approval and persistent Campaign Slots. */
-public final class DirectConnectHost implements DirectConnectPeer {
+public final class DirectConnectHost implements DirectConnectPeer, NativeCombatAuthority {
     private static final int SNAPSHOT_INTERVAL_TICKS =
             AuthoritativeHostSession.TICKS_PER_SECOND / 20;
     public static final long RECONNECT_GRACE_TICKS =
@@ -108,6 +124,23 @@ public final class DirectConnectHost implements DirectConnectPeer {
     private final SecureRandom random = new SecureRandom();
     private final long reconnectGraceTicks;
     private final AtomicBoolean closing = new AtomicBoolean(false);
+    private final CombatPresentationJournal combatPresentations =
+            new CombatPresentationJournal(DirectConnectProtocol.MAX_COMBAT_PRESENTATION_EVENTS);
+    private final HostSessionOutput nativeCombatOutput = new HostSessionOutput() {
+        @Override
+        public void event(HostSessionEvent event) {
+            publishCombatEvent(event);
+        }
+
+        @Override
+        public void disconnect(HostDisconnectOutcome outcome) { }
+
+        @Override
+        public void transition(HostTransitionOutcome outcome) { }
+
+        @Override
+        public void persist(HostPersistedState state) { }
+    };
     private final String sessionId;
     private final Map<Channel, RemoteConnection> connections =
             new LinkedHashMap<Channel, RemoteConnection>();
@@ -121,6 +154,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
     private volatile boolean sessionStarted;
     private volatile NetworkEntityId localMovementEntityId;
     private volatile AuthoritativeMovementSimulation movementSimulation;
+    private volatile AuthoritativeCombatEncounter combatEncounter;
     private volatile AuthoritativeHostSession movementSession;
     private volatile ScheduledFuture<?> movementTask;
     private volatile PartyStatusSnapshot partyStatus;
@@ -430,7 +464,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
         status = status(sessionStarted ? DirectConnectPhase.READY : DirectConnectPhase.LISTENING,
                 "Host kicked a Participant; persistent Campaign Slot was preserved.",
                 connection.launcherIdentity.getFingerprint(),
-                sessionStarted ? GameApplication.OPEN_SOURCE_TEST_LEVEL : null);
+                sessionStarted ? sharedFloorId() : null);
         return true;
     }
 
@@ -480,7 +514,19 @@ public final class DirectConnectHost implements DirectConnectPeer {
         }
         List<MovementEntityDescriptor> descriptors = createMovementDescriptors();
         movementSimulation = new AuthoritativeMovementSimulation(movementWorld, descriptors);
-        movementSession = new AuthoritativeHostSession(movementSimulation,
+        combatEncounter = new AuthoritativeCombatEncounter(descriptors, movementWorld);
+        for(MovementEntityDescriptor descriptor : descriptors) {
+            MovementEntityState state = movementSimulation.getState(descriptor.getParticipantId());
+            if(state != null) {
+                combatEncounter.updateParticipantPosition(descriptor.getParticipantId(),
+                        state.getX(), state.getY());
+            }
+        }
+        MovementSpawn encounterSpawn = findEncounterSpawn();
+        combatEncounter.setMonsterPosition(encounterSpawn.getX(), encounterSpawn.getY(),
+                encounterSpawn.getZ());
+        movementSession = new AuthoritativeHostSession(new AuthoritativeEncounterSimulation(
+                movementSimulation, combatEncounter, descriptors),
                 new MovementTransport(), new HostSessionStorage() {
                     @Override
                     public void persist(long hostTick, HostPersistedState state) { }
@@ -504,14 +550,45 @@ public final class DirectConnectHost implements DirectConnectPeer {
                     }
                 }
                 connection.channel.write(new PartyStatusMessage(sessionId, partyStatus));
+                connection.channel.write(new CombatStateMessage(sessionId,
+                        combatEncounter.getSnapshot(0L)));
                 connection.channel.writeAndFlush(new SessionReady(sessionId, participantCount,
-                        GameApplication.OPEN_SOURCE_TEST_LEVEL));
+                        combatEncounter.getNextRequestId(
+                                connection.movementDescriptor.getParticipantId()),
+                        sharedFloorId()));
             }
         }
         startMovementTicks();
         status = status(DirectConnectPhase.READY,
-                "Host started shared open-source test floor with " + participantCount
-                        + " Participants.", null, GameApplication.OPEN_SOURCE_TEST_LEVEL);
+                "Host started " + sharedFloorName() + " with " + participantCount
+                        + " Participants.", null, sharedFloorId());
+    }
+
+    private MovementSpawn findEncounterSpawn() {
+        MovementSpawn playerSpawn = movementWorld.getSpawn(1);
+        float rotation = playerSpawn.getRotation();
+        float forwardX = (float)Math.sin(rotation);
+        float forwardY = (float)Math.cos(rotation);
+        float rightX = (float)Math.cos(rotation);
+        float rightY = (float)-Math.sin(rotation);
+        float[][] directions = {
+                { forwardX, forwardY },
+                { rightX, rightY },
+                { -rightX, -rightY },
+                { -forwardX, -forwardY }
+        };
+        float[] distances = { 0.9f, 1f, 1.1f, 1.25f, 1.5f, 2f, 2.5f, 3f };
+        for(float distance : distances) {
+            for(float[] direction : directions) {
+                float x = playerSpawn.getX() + direction[0] * distance;
+                float y = playerSpawn.getY() + direction[1] * distance;
+                float z = movementWorld.getFloorZ(x, y, playerSpawn.getZ());
+                if(movementWorld.canOccupy(x, y, z)) {
+                    return new MovementSpawn(x, y, z, rotation);
+                }
+            }
+        }
+        throw new IllegalStateException("Shared floor has no valid encounter spawn.");
     }
 
     private List<MovementEntityDescriptor> createMovementDescriptors() {
@@ -575,7 +652,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
                 catch(RuntimeException failure) {
                     status = status(DirectConnectPhase.FAILED,
                             "Authoritative movement tick failed: " + safeMessage(failure),
-                            null, GameApplication.OPEN_SOURCE_TEST_LEVEL);
+                            null, sharedFloorId());
                     throw failure;
                 }
             }
@@ -596,6 +673,23 @@ public final class DirectConnectHost implements DirectConnectPeer {
                 "Pause request");
         if(connection == null) return;
         publishPauseRequest(connection.movementDescriptor);
+    }
+
+    private synchronized void combatAction(ChannelHandlerContext context,
+            CombatActionRequestMessage request) {
+        RemoteConnection connection = activeConnection(context, request.sessionId, "Combat action");
+        if(connection == null || isSessionPaused()) return;
+        AuthoritativeHostSession session = movementSession;
+        if(session != null) {
+            CombatRequest command = request.directed
+                    ? new CombatRequest(connection.movementDescriptor.getParticipantId(),
+                            request.requestId, request.action,
+                            request.aimX, request.aimY, request.aimZ,
+                            request.attackPower)
+                    : new CombatRequest(connection.movementDescriptor.getParticipantId(),
+                            request.requestId, request.action, request.targetId);
+            session.submit(command);
+        }
     }
 
     private RemoteConnection activeConnection(ChannelHandlerContext context, String messageSessionId,
@@ -630,6 +724,58 @@ public final class DirectConnectHost implements DirectConnectPeer {
         for(RemoteConnection connection : connections.values()) {
             if(connection.channel.isActive() && connection.movementDescriptor != null) {
                 connection.channel.writeAndFlush(message);
+            }
+        }
+    }
+
+    private void broadcastCombatState(CombatSnapshot snapshot) {
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.channel.isActive() && connection.movementDescriptor != null
+                    && connection.reconnectGrace == null) {
+                connection.channel.writeAndFlush(new CombatStateMessage(sessionId, snapshot));
+            }
+        }
+    }
+
+    private void synchronizePartyHealth(CombatSnapshot combat) {
+        PartyStatusSnapshot current = partyStatus;
+        if(current == null || combat == null) return;
+        List<PartyMemberStatus> updated =
+                new ArrayList<PartyMemberStatus>(current.getMembers());
+        boolean changed = false;
+        for(int index = 0; index < updated.size(); index++) {
+            PartyMemberStatus member = updated.get(index);
+            CombatantSnapshot authoritative = combat.getCombatant(
+                    AuthoritativeCombatEncounter.participantTargetId(
+                            new ParticipantId("campaign-slot-"
+                                    + member.getCampaignSlot())));
+            if(authoritative == null || (member.getHealth() == authoritative.getHealth()
+                    && member.getMaximumHealth() == authoritative.getMaximumHealth())) continue;
+            updated.set(index, member.withHealth(authoritative.getHealth(),
+                    authoritative.getMaximumHealth()));
+            changed = true;
+        }
+        if(!changed) return;
+        partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, updated);
+        broadcastPartyStatus();
+    }
+
+    private void broadcastPartyStatus() {
+        PartyStatusMessage message = new PartyStatusMessage(sessionId, partyStatus);
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.channel.isActive() && connection.movementDescriptor != null
+                    && connection.reconnectGrace == null) {
+                connection.channel.writeAndFlush(message);
+            }
+        }
+    }
+
+    private void broadcastCombatPresentation(CombatPresentationEvent event) {
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.channel.isActive() && connection.movementDescriptor != null
+                    && connection.reconnectGrace == null) {
+                connection.channel.writeAndFlush(
+                        new CombatPresentationMessage(sessionId, event));
             }
         }
     }
@@ -744,7 +890,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
                         : DirectConnectPhase.DISCONNECTED,
                 "Participant disconnected cleanly: " + boundedReason(reason),
                 connection.launcherIdentity.getFingerprint(),
-                sessionStarted ? GameApplication.OPEN_SOURCE_TEST_LEVEL : null);
+                sessionStarted ? sharedFloorId() : null);
         context.close();
     }
 
@@ -800,13 +946,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
             }
         }
         partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, updated);
-        PartyStatusMessage message = new PartyStatusMessage(sessionId, partyStatus);
-        for(RemoteConnection remaining : connections.values()) {
-            if(remaining.channel.isActive() && remaining.movementDescriptor != null
-                    && remaining.reconnectGrace == null) {
-                remaining.channel.writeAndFlush(message);
-            }
-        }
+        broadcastPartyStatus();
     }
 
     private void beginReconnectGrace(RemoteConnection connection) {
@@ -819,11 +959,15 @@ public final class DirectConnectHost implements DirectConnectPeer {
                 new GraceParticipant(connection.slot, descriptor, grace));
         AuthoritativeMovementSimulation simulation = movementSimulation;
         if(simulation != null) simulation.freezeParticipant(descriptor.getParticipantId());
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.setParticipantCombatEligible(descriptor.getParticipantId(), false);
+        }
         markPartyMemberReconnecting(descriptor);
         status = status(DirectConnectPhase.READY,
                 descriptor.getNickname() + " disconnected; frozen and invulnerable for "
                         + reconnectGraceTicks + " unpaused Host ticks.",
-                descriptor.getParticipantId().getValue(), GameApplication.OPEN_SOURCE_TEST_LEVEL);
+                descriptor.getParticipantId().getValue(), sharedFloorId());
     }
 
     private synchronized void completeReconnect(RemoteConnection connection) {
@@ -834,19 +978,30 @@ public final class DirectConnectHost implements DirectConnectPeer {
         }
         AuthoritativeMovementSimulation simulation = movementSimulation;
         if(simulation != null) simulation.resumeParticipant(grace.descriptor.getParticipantId());
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.setParticipantCombatEligible(grace.descriptor.getParticipantId(), true);
+        }
         markPartyMemberConnected(grace.descriptor);
         connection.reconnectGrace = null;
         for(MovementEntityDescriptor descriptor : movementReplication.getEntities()) {
             connection.channel.write(new EntitySpawn(sessionId, descriptor));
         }
         connection.channel.write(new PartyStatusMessage(sessionId, partyStatus));
+        if(encounter != null) {
+            AuthoritativeHostSession session = movementSession;
+            connection.channel.write(new CombatStateMessage(sessionId,
+                    encounter.getSnapshot(session == null ? 0L : session.getHostTick())));
+        }
         connection.channel.writeAndFlush(new SessionReady(sessionId,
-                getConnectedParticipantCount(), GameApplication.OPEN_SOURCE_TEST_LEVEL));
+                getConnectedParticipantCount(), encounter == null ? 1L
+                        : encounter.getNextRequestId(grace.descriptor.getParticipantId()),
+                sharedFloorId()));
         status = status(DirectConnectPhase.READY,
                 grace.descriptor.getNickname() + " reclaimed Campaign Slot "
                         + grace.slot.getNumber() + " during reconnect grace.",
                 grace.descriptor.getParticipantId().getValue(),
-                GameApplication.OPEN_SOURCE_TEST_LEVEL);
+                sharedFloorId());
     }
 
     private synchronized void expireReconnectGrace(long hostTick) {
@@ -883,6 +1038,10 @@ public final class DirectConnectHost implements DirectConnectPeer {
             String message) {
         AuthoritativeMovementSimulation simulation = movementSimulation;
         if(simulation != null) simulation.removeParticipant(descriptor.getParticipantId());
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.setParticipantCombatEligible(descriptor.getParticipantId(), false);
+        }
         long lifecycleSequence = ++nextLifecycleSequence;
         movementReplication.applyDespawn(lifecycleSequence, descriptor.getEntityId());
         EntityDespawn despawn = new EntityDespawn(sessionId, lifecycleSequence,
@@ -894,7 +1053,7 @@ public final class DirectConnectHost implements DirectConnectPeer {
         }
         markPartyMemberDisconnected(descriptor.getCampaignSlot());
         status = status(DirectConnectPhase.READY, message,
-                descriptor.getParticipantId().getValue(), GameApplication.OPEN_SOURCE_TEST_LEVEL);
+                descriptor.getParticipantId().getValue(), sharedFloorId());
     }
 
     private void rejectClaim(Channel channel, ClaimOutcome outcome) {
@@ -1068,6 +1227,190 @@ public final class DirectConnectHost implements DirectConnectPeer {
     }
 
     @Override
+    public void submitCombatAction(long requestId, CombatAction action, String targetId) {
+        MovementEntityDescriptor descriptor = hostMovementDescriptor();
+        AuthoritativeHostSession session = movementSession;
+        if(descriptor == null || session == null || !sessionStarted || closing.get()
+                || isSessionPaused()) return;
+        session.submit(new CombatRequest(descriptor.getParticipantId(), requestId, action, targetId));
+    }
+
+    @Override
+    public void submitCombatAction(long requestId, CombatAction action,
+            float aimX, float aimY, float aimZ) {
+        submitCombatAction(requestId, action, aimX, aimY, aimZ, 1f);
+    }
+
+    @Override
+    public void submitCombatAction(long requestId, CombatAction action,
+            float aimX, float aimY, float aimZ, float attackPower) {
+        MovementEntityDescriptor descriptor = hostMovementDescriptor();
+        AuthoritativeHostSession session = movementSession;
+        if(descriptor == null || session == null || !sessionStarted || closing.get()
+                || isSessionPaused()) return;
+        session.submit(new CombatRequest(descriptor.getParticipantId(), requestId,
+                action, aimX, aimY, aimZ, attackPower));
+    }
+
+    @Override
+    public CombatSnapshot getCombatSnapshot() {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        AuthoritativeHostSession session = movementSession;
+        return encounter == null ? null : encounter.getSnapshot(session == null ? 0L : session.getHostTick());
+    }
+
+    @Override
+    public List<CombatPresentationEvent> getCombatPresentationEvents() {
+        return combatPresentations.getEvents();
+    }
+
+    @Override
+    public long getNextCombatRequestId() {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        MovementEntityDescriptor descriptor = hostMovementDescriptor();
+        return encounter == null || descriptor == null ? 1L
+                : encounter.getNextRequestId(descriptor.getParticipantId());
+    }
+
+    @Override
+    public void bindNativeMonster(int health, int maximumHealth,
+            float x, float y, float z) {
+        bindNativeMonster(AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
+                health, maximumHealth, x, y, z);
+    }
+
+    @Override
+    public void bindNativeMonster(String monsterId, int health, int maximumHealth,
+            float x, float y, float z) {
+        bindNativeMonster(monsterId, health, maximumHealth, x, y, z, false);
+    }
+
+    @Override
+    public void bindNativeMonster(String monsterId, int health, int maximumHealth,
+            float x, float y, float z, boolean gibbed) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.bindNativeMonster(currentHostTick(), monsterId, health, maximumHealth,
+                    x, y, z, gibbed, nativeCombatOutput);
+        }
+    }
+
+    @Override
+    public void synchronizeNativeMonster(int health, int maximumHealth,
+            float x, float y, float z) {
+        synchronizeNativeMonster(AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
+                health, maximumHealth, x, y, z);
+    }
+
+    @Override
+    public void synchronizeNativeMonster(String monsterId, int health, int maximumHealth,
+            float x, float y, float z) {
+        synchronizeNativeMonster(monsterId, health, maximumHealth, x, y, z, false);
+    }
+
+    @Override
+    public void synchronizeNativeMonster(String monsterId, int health, int maximumHealth,
+            float x, float y, float z, boolean gibbed) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.synchronizeNativeMonster(currentHostTick(), monsterId, health,
+                    maximumHealth, x, y, z, gibbed, nativeCombatOutput);
+        }
+    }
+
+    @Override
+    public List<CombatRequest> drainNativeCombatRequests() {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        return encounter == null ? Collections.<CombatRequest>emptyList()
+                : encounter.drainNativeCombatRequests();
+    }
+
+    @Override
+    public void applyNativeMonsterDamage(ParticipantId targetId, int damage,
+            CombatAction action, float originX, float originY, float originZ,
+            float impactX, float impactY, float impactZ) {
+        applyNativeMonsterDamage(AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
+                targetId, damage, action, originX, originY, originZ,
+                impactX, impactY, impactZ);
+    }
+
+    @Override
+    public void applyNativeMonsterDamage(String monsterId, ParticipantId targetId, int damage,
+            CombatAction action, float originX, float originY, float originZ,
+            float impactX, float impactY, float impactZ) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.applyNativeMonsterDamage(currentHostTick(), monsterId, targetId,
+                    damage, action, originX, originY, originZ,
+                    impactX, impactY, impactZ, nativeCombatOutput);
+        }
+    }
+
+    @Override
+    public void recordNativeMonsterAttacker(String monsterId, ParticipantId attackerId) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.recordNativeMonsterAttacker(currentHostTick(), monsterId, attackerId);
+        }
+    }
+
+    @Override
+    public void applyNativeEnvironmentalDamage(String sourceId, ParticipantId targetId,
+            int damage, float originX, float originY, float originZ,
+            float impactX, float impactY, float impactZ) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.applyNativeEnvironmentalDamage(currentHostTick(), sourceId,
+                    targetId, damage, originX, originY, originZ,
+                    impactX, impactY, impactZ, nativeCombatOutput);
+        }
+    }
+
+    @Override
+    public void publishNativePresentation(String sourceId, String targetId,
+            CombatAction action, float originX, float originY, float originZ,
+            float impactX, float impactY, float impactZ, boolean stateChanged) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.publishNativePresentation(currentHostTick(), sourceId, targetId,
+                    action, originX, originY, originZ, impactX, impactY, impactZ,
+                    stateChanged, nativeCombatOutput);
+        }
+    }
+
+    @Override
+    public void publishNativePresentation(String sourceId, String targetId,
+            CombatAction action, CombatPresentationPhase phase,
+            float originX, float originY, float originZ,
+            float impactX, float impactY, float impactZ, boolean stateChanged) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) {
+            encounter.publishNativePresentation(currentHostTick(), sourceId, targetId,
+                    action, phase, originX, originY, originZ,
+                    impactX, impactY, impactZ, stateChanged, nativeCombatOutput);
+        }
+    }
+
+    private long currentHostTick() {
+        AuthoritativeHostSession session = movementSession;
+        return session == null ? 0L : session.getHostTick();
+    }
+
+    private synchronized void publishCombatEvent(HostSessionEvent event) {
+        if(event instanceof CombatStateEvent) {
+            CombatSnapshot snapshot = ((CombatStateEvent)event).getSnapshot();
+            synchronizePartyHealth(snapshot);
+            broadcastCombatState(snapshot);
+        }
+        else if(event instanceof CombatPresentationEvent) {
+            CombatPresentationEvent presentation = (CombatPresentationEvent)event;
+            if(combatPresentations.add(presentation)) {
+                broadcastCombatPresentation(presentation);
+            }
+        }
+    }
+
+    @Override
     public DirectConnectStatus getStatus() {
         return status;
     }
@@ -1137,6 +1480,18 @@ public final class DirectConnectHost implements DirectConnectPeer {
     private DirectConnectStatus status(DirectConnectPhase phase, String message,
             String participantId, String floorId) {
         return new DirectConnectStatus(phase, message, sessionId, participantId, floorId);
+    }
+
+    private String sharedFloorId() {
+        return compatibility.usesOpenSourceTestContent()
+                ? GameApplication.OPEN_SOURCE_TEST_LEVEL
+                : GameApplication.OWNED_TUTORIAL_FLOOR;
+    }
+
+    private String sharedFloorName() {
+        return compatibility.usesOpenSourceTestContent()
+                ? "shared open-source test floor"
+                : "shared Owned Game Copy tutorial";
     }
 
     private static boolean sameAddress(InetSocketAddress tcpAddress,
@@ -1216,7 +1571,9 @@ public final class DirectConnectHost implements DirectConnectPeer {
         }
 
         @Override
-        public void publishEvent(long hostTick, HostSessionEvent event) { }
+        public void publishEvent(long hostTick, HostSessionEvent event) {
+            publishCombatEvent(event);
+        }
 
         @Override
         public void publishDisconnect(long hostTick, HostDisconnectOutcome outcome) { }
@@ -1301,6 +1658,9 @@ public final class DirectConnectHost implements DirectConnectPeer {
             }
             else if(message instanceof PauseRequestMessage && helloAccepted && sessionStarted) {
                 pauseRequested(context, (PauseRequestMessage)message);
+            }
+            else if(message instanceof CombatActionRequestMessage && helloAccepted && sessionStarted) {
+                combatAction(context, (CombatActionRequestMessage)message);
             }
             else if(message instanceof ClientDisconnect && helloAccepted) {
                 clientDisconnected(context, ((ClientDisconnect)message).reason);

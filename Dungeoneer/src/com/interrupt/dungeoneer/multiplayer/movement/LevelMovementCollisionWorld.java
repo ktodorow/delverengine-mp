@@ -60,7 +60,7 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
             z = getFloorZ(x, y, 0f);
         }
         if(!canOccupy(x, y, z)) {
-            throw new IllegalArgumentException("Open-source test floor has no valid Player spawn.");
+            throw new IllegalArgumentException("Active Floor has no valid Player spawn.");
         }
         return new MovementSpawn(x, y, z, baseRotation);
     }
@@ -81,6 +81,12 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
         Tile tile = level.getTile((int)Math.floor(x), (int)Math.floor(y));
         if(tile == null) return currentZ;
         return level.maxFloorHeight(x, y, currentZ, RADIUS) + 0.5f;
+    }
+
+    @Override
+    public boolean hasLineOfSight(float fromX, float fromY, float toX, float toY) {
+        return finite(fromX) && finite(fromY) && finite(toX) && finite(toY)
+                && level.canSee(fromX, fromY, toX, toY);
     }
 
     private static boolean finite(float value) {

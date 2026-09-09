@@ -1,5 +1,12 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeCombatEncounter;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatantKind;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatantSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.MonsterSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
@@ -93,6 +100,12 @@ public class DirectConnectWireTest {
         assertEquals("campaign", accepted.campaignId);
         assertEquals(3, accepted.slotNumber);
         assertEquals(repeat('b'), accepted.reconnectToken);
+
+        DirectConnectWire.SessionReady ready = (DirectConnectWire.SessionReady)roundTrip(
+                new DirectConnectWire.SessionReady("session", 3, 42L, "floor"));
+        assertEquals(3, ready.participantCount);
+        assertEquals(42L, ready.nextCombatRequestId);
+        assertEquals("floor", ready.floorId);
     }
 
     @Test
@@ -217,6 +230,94 @@ public class DirectConnectWireTest {
                         new DirectConnectWire.PauseSessionStateMessage("session",
                                 new PauseSessionState(4L, true)));
         assertTrue(paused.state.isPaused());
+    }
+
+    @Test
+    public void boundedCombatIntentAndAuthoritativeStateRoundTripWithoutEngineObjects()
+            throws Exception {
+        DirectConnectWire.CombatActionRequestMessage request =
+                (DirectConnectWire.CombatActionRequestMessage)roundTrip(
+                        new DirectConnectWire.CombatActionRequestMessage("session", 4L,
+                                CombatAction.BENEFICIAL_SPELL,
+                                "participant:campaign-slot-1"));
+        assertEquals(4L, request.requestId);
+        assertEquals(CombatAction.BENEFICIAL_SPELL, request.action);
+
+        DirectConnectWire.CombatActionRequestMessage directed =
+                (DirectConnectWire.CombatActionRequestMessage)roundTrip(
+                        new DirectConnectWire.CombatActionRequestMessage("session", 5L,
+                                CombatAction.PROJECTILE, 0.25f, -0.5f, 0.75f));
+        assertTrue(directed.directed);
+        assertEquals(0.25f, directed.aimX, 0f);
+        assertEquals(-0.5f, directed.aimY, 0f);
+        assertEquals(0.75f, directed.aimZ, 0f);
+
+        CombatSnapshot snapshot = new CombatSnapshot(3L, 60L, "participant:campaign-slot-2",
+                4.5f, 6.5f, 0.5f,
+                Arrays.asList(
+                        new CombatantSnapshot("participant:campaign-slot-1",
+                                CombatantKind.PARTICIPANT, 6, 8),
+                        new CombatantSnapshot(AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
+                                CombatantKind.MONSTER, 12, 24)));
+        DirectConnectWire.CombatStateMessage state =
+                (DirectConnectWire.CombatStateMessage)roundTrip(
+                        new DirectConnectWire.CombatStateMessage("session", snapshot));
+        assertEquals(60L, state.snapshot.getHostTick());
+        assertEquals(4.5f, state.snapshot.getMonsterX(), 0f);
+        assertEquals(6.5f, state.snapshot.getMonsterY(), 0f);
+        assertEquals(0.5f, state.snapshot.getMonsterZ(), 0f);
+        assertEquals(12, state.snapshot.getCombatant(
+                AuthoritativeCombatEncounter.SHARED_MONSTER_ID).getHealth());
+    }
+
+    @Test
+    public void monsterCorpseStateSurvivesAuthoritativeSnapshotRoundTrip()
+            throws Exception {
+        MonsterSnapshot monster = new MonsterSnapshot(
+                AuthoritativeCombatEncounter.SHARED_MONSTER_ID, "", 4.5f, 6.5f,
+                0.5f, true);
+        CombatSnapshot snapshot = new CombatSnapshot(4L, 61L,
+                Arrays.asList(monster), Arrays.asList(
+                        new CombatantSnapshot("participant:campaign-slot-1",
+                                CombatantKind.PARTICIPANT, 8, 8),
+                        new CombatantSnapshot(AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
+                                CombatantKind.MONSTER, 0, 24)));
+
+        DirectConnectWire.CombatStateMessage state =
+                (DirectConnectWire.CombatStateMessage)roundTrip(
+                        new DirectConnectWire.CombatStateMessage("session", snapshot));
+
+        assertTrue(state.snapshot.getMonster(
+                AuthoritativeCombatEncounter.SHARED_MONSTER_ID).isGibbed());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void targetedHarmfulWeaponIntentIsRejectedBeforeEncoding() {
+        new DirectConnectWire.CombatActionRequestMessage("session", 4L,
+                CombatAction.SPELL, AuthoritativeCombatEncounter.SHARED_MONSTER_ID);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void directedNonDirectedIntentIsRejectedBeforeEncoding() {
+        new DirectConnectWire.CombatActionRequestMessage("session", 4L,
+                CombatAction.ENVIRONMENTAL_HAZARD, 1f, 0f, 0f);
+    }
+
+    @Test
+    public void boundedCombatPresentationRoundTripsWithoutEngineObjects() throws Exception {
+        CombatPresentationEvent event = new CombatPresentationEvent(7L, 120L,
+                "participant:campaign-slot-2",
+                AuthoritativeCombatEncounter.SHARED_MONSTER_ID, CombatAction.SPELL,
+                1f, 2f, 0.5f, 4f, 5f, 0.6f, true);
+
+        DirectConnectWire.CombatPresentationMessage message =
+                (DirectConnectWire.CombatPresentationMessage)roundTrip(
+                        new DirectConnectWire.CombatPresentationMessage("session", event));
+
+        assertEquals(7L, message.event.getSequence());
+        assertEquals(CombatAction.SPELL, message.event.getAction());
+        assertEquals(4f, message.event.getImpactX(), 0f);
+        assertTrue(message.event.isStateChanged());
     }
 
     @Test

@@ -45,25 +45,27 @@ Run the focused authoritative-session scenarios on Windows:
 
 The harness loads only repository-owned test-floor metadata, advances a controlled 60 Hz Host clock, sends synthetic commands through `HostSessionCommandGateway`, and captures snapshots, events, disconnects, transitions, and persisted state through in-memory adapters. Commands carry a stable `ParticipantId`; authoritative remote character state remains separate from original global `Player`, while local first-person play uses `LocalPlayerCompatibilityAdapter`. Participant-scoped teleports and shared Party progression are covered without graphics, audio, or an Owned Game Copy.
 
-### Direct Connect test floor
+### Direct Connect shared floor
 
-Open two terminals on Windows. Separate profile roots simulate two installations on one development VM. Start Host with Campaign Capacity, Campaign identity, Nickname, and one of four owned humanoid Avatar identities:
+Open two terminals on Windows. Separate profile roots simulate two installations on one development VM. Start Host with Campaign Capacity, Campaign identity, Nickname, Avatar identity, and same certified Owned Game Copy that each participant owns:
 
 ```powershell
-.\gradlew.bat DungeoneerDesktop:runDirectHost --% -PsessionPort=37777 -PcampaignCapacity=2 -PcampaignId=friends-test -Pnickname=Host -Pavatar=humanoid-1 -PprofileRoot=C:\DelverMpProfiles\Host --no-daemon
+.\gradlew.bat DungeoneerDesktop:runDirectHost --% -PsessionPort=37777 -PcampaignCapacity=2 -PcampaignId=friends-test -Pnickname=Host -Pavatar=humanoid-1 -PprofileRoot=C:\DelverMpProfiles\Host -PownedCopy=C:\Games\Delver\delver.jar --no-daemon
 ```
 
 Start client with Host address, same port, a different profile root, Party-unique Nickname, and available Avatar:
 
 ```powershell
-.\gradlew.bat DungeoneerDesktop:runDirectClient --% -PsessionAddress=127.0.0.1 -PsessionPort=37777 -Pnickname=Friend -Pavatar=humanoid-2 -PprofileRoot=C:\DelverMpProfiles\Friend --no-daemon
+.\gradlew.bat DungeoneerDesktop:runDirectClient --% -PsessionAddress=127.0.0.1 -PsessionPort=37777 -Pnickname=Friend -Pavatar=humanoid-2 -PprofileRoot=C:\DelverMpProfiles\Friend -PownedCopy=C:\Games\Delver\delver.jar --no-daemon
 ```
 
 `--%` keeps Windows PowerShell from splitting a dotted address while handing arguments to `gradlew.bat`. For a client in the same Windows VM, `-PsessionAddress=127.0.0.1` can instead be omitted because loopback is the default.
 
-Client waits for explicit Host approval. In Host window, press `A` to approve displayed pending claim or `R` to reject it. After approved clients finish TCP and token-bound UDP setup, press `Enter` to start repository-owned test floor. Capacity three or four accepts more clients before `Enter`; give each separate profile root, Nickname, and unused `humanoid-1` through `humanoid-4` choice.
+Client waits for explicit Host approval. In Host window, press `A` to approve displayed pending claim or `R` to reject it. After approved clients finish TCP and token-bound UDP setup, press `Enter` to start shared Owned Game Copy tutorial. Capacity three or four accepts more clients before `Enter`; give each separate profile root, Nickname, and unused `humanoid-1` through `humanoid-4` choice. Omitting `-PownedCopy` on both commands deliberately selects repository-owned open-source test floor.
 
 Each profile creates one private random Launcher Identity. Host persists approved Campaign Slot ownership under isolated multiplayer profile and client stores per-campaign reconnect credential there; returning identity reclaims same slot automatically even if Nickname or Avatar changes. IP address, Nickname, and Steam identity never own slot. Build mismatch, content mismatch, full roster, occupied slot, malformed handshake, and disconnect reason remain explicit. No engine entity, save graph, commercial asset, archive path, or asset byte is serialized or transmitted.
+
+On shared floor, fight native tutorial enemies and use native traps normally. Host runs original enemy and trap logic, validates participant attacks, and publishes authoritative transforms, health, attacks, impacts, and deaths; every peer must show same encounter state. Number keys only select hotbar items. `P` still requests or controls Pause Session.
 
 Run bounded-codec and live loopback coverage without graphics:
 

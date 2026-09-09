@@ -244,6 +244,16 @@ public class Weapon extends Item {
 	// override this
 	public void doAttack(Player p, Level lvl, float attackPower) { }
 
+	protected void notifyWeaponAttack(Player player, Vector3 direction) {
+		notifyWeaponAttack(player, direction, 1f);
+	}
+
+	protected void notifyWeaponAttack(Player player, Vector3 direction, float attackPower) {
+		if(player != null && direction != null) {
+			player.notifyWeaponAttack(this, direction, attackPower);
+		}
+	}
+
 	// and this
 	public void tickAttack(Player p, Level lvl, float time) { }
 

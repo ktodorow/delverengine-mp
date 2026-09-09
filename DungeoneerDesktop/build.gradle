@@ -31,7 +31,7 @@ task runTestLevel(dependsOn: classes, type: JavaExec) {
 
 task runDirectHost(dependsOn: classes, type: JavaExec) {
     group = "application"
-    description = "Hosts a two-to-four-slot approved Direct Connect lobby on the open-source test floor."
+    description = "Hosts a Direct Connect shared floor; -PownedCopy selects owned tutorial content."
     main = project.mainClassName
     classpath = sourceSets.main.runtimeClasspath
     standardInput = System.in
@@ -43,11 +43,12 @@ task runDirectHost(dependsOn: classes, type: JavaExec) {
     if(project.hasProperty("nickname")) args "--nickname=" + project.property("nickname")
     if(project.hasProperty("avatar")) args "--avatar=" + project.property("avatar")
     if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
+    if(project.hasProperty("ownedCopy")) args "--owned-copy=" + project.property("ownedCopy")
 }
 
 task runDirectClient(dependsOn: classes, type: JavaExec) {
     group = "application"
-    description = "Connects to a Direct Connect Host on the open-source test floor."
+    description = "Connects to a Direct Connect shared floor; -PownedCopy selects owned tutorial content."
     main = project.mainClassName
     classpath = sourceSets.main.runtimeClasspath
     standardInput = System.in
@@ -59,6 +60,7 @@ task runDirectClient(dependsOn: classes, type: JavaExec) {
     if(project.hasProperty("avatar")) args "--avatar=" + project.property("avatar")
     if(project.hasProperty("campaignSlot")) args "--campaign-slot=" + project.property("campaignSlot")
     if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
+    if(project.hasProperty("ownedCopy")) args "--owned-copy=" + project.property("ownedCopy")
 }
 
 task discoverPrivateSessions(dependsOn: classes, type: JavaExec) {

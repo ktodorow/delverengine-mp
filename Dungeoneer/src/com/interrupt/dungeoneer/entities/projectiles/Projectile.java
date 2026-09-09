@@ -41,6 +41,8 @@ public class Projectile extends Entity {
 	public boolean destroyOnEntityHit = true;
 	
 	private transient boolean didCollide = false;
+	private transient ProjectileImpactListener multiplayerImpactListener;
+	private transient boolean multiplayerImpactReported = false;
 
 	/** Hit decal. */
 	public ProjectedDecal hitDecal = new ProjectedDecal(ArtType.sprite, 19, 0.6f);
@@ -187,6 +189,7 @@ public class Projectile extends Entity {
 	public void encroached(Player player)
 	{
 		if(isActive && player != owner) {
+			notifyMultiplayerImpact(player, x, y, z + yOffset);
 			hitEffect();
 			player.hit(xa, ya, damage, knockback, damageType, owner);
 			
@@ -201,6 +204,7 @@ public class Projectile extends Entity {
 	{
 		if(isActive && hit != owner)
 		{	
+			notifyMultiplayerImpact(hit, x, y, z + yOffset);
 			hitEffect();
 			hit.hit(xa, ya, damage, knockback, damageType, owner);
 			
@@ -221,8 +225,27 @@ public class Projectile extends Entity {
 	
 	public void encroached(float hitx, float hity)
 	{
+		notifyMultiplayerImpact(null, hitx, hity, z + yOffset);
 		hitEffect();
 		destroy();
+	}
+
+	public void setMultiplayerImpactListener(ProjectileImpactListener listener) {
+		if(multiplayerImpactListener == listener) return;
+		multiplayerImpactListener = listener;
+		multiplayerImpactReported = false;
+	}
+
+	public void clearMultiplayerImpactListener(ProjectileImpactListener listener) {
+		if(multiplayerImpactListener == listener) multiplayerImpactListener = null;
+	}
+
+	private void notifyMultiplayerImpact(Entity hit, float impactX,
+			float impactY, float impactZ) {
+		if(multiplayerImpactReported || multiplayerImpactListener == null) return;
+		multiplayerImpactReported = true;
+		multiplayerImpactListener.onProjectileImpact(
+				this, hit, impactX, impactY, impactZ);
 	}
 	
 	// Override this for stuff like dynamic lighting

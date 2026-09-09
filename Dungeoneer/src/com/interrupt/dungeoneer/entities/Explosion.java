@@ -131,6 +131,11 @@ public class Explosion extends Entity {
         fullbrite = true;
 	}
 
+	public void setOwner(Entity owner) {
+		this.owner = owner;
+		super.owner = owner;
+	}
+
     public void initExplosion(float x, float y, float z, float impulse, float radius) {
         this.x = x;
         this.y = y;

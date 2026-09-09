@@ -44,6 +44,11 @@ public final class RectangularMovementCollisionWorld implements MovementCollisio
         return floorZ;
     }
 
+    @Override
+    public boolean hasLineOfSight(float fromX, float fromY, float toX, float toY) {
+        return finite(fromX) && finite(fromY) && finite(toX) && finite(toY);
+    }
+
     private static void requireSlot(int campaignSlot) {
         if(campaignSlot < 1 || campaignSlot > 4) {
             throw new IllegalArgumentException("Campaign Slot must be 1-4.");

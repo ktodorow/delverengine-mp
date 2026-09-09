@@ -63,6 +63,7 @@ public class Sword extends Weapon {
 			Entity near = null;
 			
 			Vector3 attackDir = new Vector3(Game.camera.direction);
+			notifyWeaponAttack(p, attackDir, attackPower);
 			
 			float hitX = 0f;
 			float hitY = 0f;

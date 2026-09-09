@@ -9,6 +9,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.LocalMovementReconciler.Rec
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshotInterpolator.InterpolatedMovementState;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -91,6 +92,14 @@ public final class DirectConnectMovementController {
 
     public int getRemoteAvatarCount() {
         return remoteAvatars.size();
+    }
+
+    public RemoteAvatar getRemoteAvatar(ParticipantId participantId) {
+        if(participantId == null) return null;
+        for(RemoteAvatar avatar : remoteAvatars.values()) {
+            if(participantId.equals(avatar.getDescriptor().getParticipantId())) return avatar;
+        }
+        return null;
     }
 
     private void captureLocalPrediction(Player player) {

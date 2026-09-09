@@ -19,7 +19,7 @@ import com.interrupt.dungeoneer.multiplayer.network.PendingSlotClaim;
 
 import java.util.List;
 
-/** Minimal shared session screen used before both Participants enter the test floor. */
+/** Minimal shared session screen used before Participants enter the shared floor. */
 public final class DirectConnectSessionScreen implements Screen {
     private final GameApplication application;
     private final DirectConnectPeer peer;
@@ -49,7 +49,7 @@ public final class DirectConnectSessionScreen implements Screen {
             Gdx.app.postRunnable(new Runnable() {
                 @Override
                 public void run() {
-                    application.enterDirectConnectTestFloor();
+                    application.enterDirectConnectFloor();
                 }
             });
         }

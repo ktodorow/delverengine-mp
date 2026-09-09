@@ -10,6 +10,7 @@ import com.interrupt.dungeoneer.entities.triggers.TriggeredWarp;
 import com.interrupt.dungeoneer.game.GameData;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.owned.OwnedGameCopyMount;
+import com.interrupt.dungeoneer.owned.OwnedGameCopyCompatibility;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
@@ -21,6 +22,7 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
 import com.interrupt.dungeoneer.multiplayer.network.OpenSourceTestCompatibility;
+import com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController;
 import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
 import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
@@ -32,6 +34,7 @@ import java.io.IOException;
 public class GameApplication extends Game {
 
     public static final String OPEN_SOURCE_TEST_LEVEL = "levels/test-level.bin";
+    public static final String OWNED_TUTORIAL_FLOOR = "owned-game-copy-tutorial";
 
     private enum StartupMode {
         NORMAL,
@@ -55,6 +58,7 @@ public class GameApplication extends Game {
     private DirectConnectPeer directConnectPeer;
     private DirectConnectSessionScreen directConnectScreen;
     private DirectConnectMovementController directConnectMovementController;
+    private DirectConnectCombatController directConnectCombatController;
     private boolean enteredDirectConnectFloor = false;
 
     public GameScreen mainScreen;
@@ -156,14 +160,9 @@ public class GameApplication extends Game {
     private void createDirectConnect() {
         instance = this;
         Gdx.app.setLogLevel(Application.LOG_INFO);
-        DirectConnectCompatibility compatibility = createOpenSourceCompatibility();
+        DirectConnectCompatibility compatibility = createDirectConnectCompatibility();
         if(startupMode == StartupMode.DIRECT_CONNECT_HOST) {
-            Level authoritativeLevel = KryoSerializer.loadLevel(
-                    Gdx.files.internal(OPEN_SOURCE_TEST_LEVEL));
-            if(authoritativeLevel == null) {
-                throw new IllegalStateException("Could not load authoritative movement Level: "
-                        + OPEN_SOURCE_TEST_LEVEL);
-            }
+            Level authoritativeLevel = loadDirectConnectLevel();
             directConnectPeer = DirectConnectHost.start(directConnectPort, compatibility,
                     directConnectRoster, directConnectRosterStore,
                     new LevelMovementCollisionWorld(authoritativeLevel));
@@ -176,6 +175,40 @@ public class GameApplication extends Game {
         }
         directConnectScreen = new DirectConnectSessionScreen(this, directConnectPeer);
         setScreen(directConnectScreen);
+    }
+
+    private DirectConnectCompatibility createDirectConnectCompatibility() {
+        OwnedGameCopyCompatibility ownedCopy = OwnedGameCopyMount.getCompatibility();
+        return ownedCopy == null ? createOpenSourceCompatibility()
+                : DirectConnectCompatibility.forOwnedGameCopy(ownedCopy);
+    }
+
+    private Level loadDirectConnectLevel() {
+        if(!OwnedGameCopyMount.isMounted()) {
+            Level level = KryoSerializer.loadLevel(Gdx.files.internal(OPEN_SOURCE_TEST_LEVEL));
+            if(level == null) {
+                throw new IllegalStateException("Could not load Direct Connect Level: "
+                        + OPEN_SOURCE_TEST_LEVEL);
+            }
+            if(level.theme == null) level.theme = "TEST";
+            return level;
+        }
+
+        com.interrupt.dungeoneer.game.Game.gameData =
+                com.interrupt.dungeoneer.game.Game.getModManager().loadGameData();
+        Level tutorial = com.interrupt.dungeoneer.game.Game.gameData == null
+                ? null : com.interrupt.dungeoneer.game.Game.gameData.tutorialLevel;
+        if(tutorial == null || tutorial.levelFileName == null) {
+            throw new IllegalStateException(
+                    "Validated Owned Game Copy does not define tutorial content.");
+        }
+        Level level = KryoSerializer.loadLevel(
+                com.interrupt.dungeoneer.game.Game.getInternal(tutorial.levelFileName));
+        if(level == null) {
+            throw new IllegalStateException("Could not load owned Direct Connect Level: "
+                    + tutorial.levelFileName);
+        }
+        return level;
     }
 
     private DirectConnectCompatibility createOpenSourceCompatibility() {
@@ -199,16 +232,12 @@ public class GameApplication extends Game {
         }
     }
 
-    public void enterDirectConnectTestFloor() {
+    public void enterDirectConnectFloor() {
         if(enteredDirectConnectFloor || directConnectPeer == null
                 || directConnectPeer.getStatus().getPhase() != DirectConnectPhase.READY) return;
         enteredDirectConnectFloor = true;
 
-        Level startupLevel = KryoSerializer.loadLevel(Gdx.files.internal(OPEN_SOURCE_TEST_LEVEL));
-        if(startupLevel == null) {
-            throw new IllegalStateException("Could not load startup level: " + OPEN_SOURCE_TEST_LEVEL);
-        }
-        if(startupLevel.theme == null) startupLevel.theme = "TEST";
+        Level startupLevel = loadDirectConnectLevel();
 
         DirectConnectSessionScreen completedScreen = directConnectScreen;
         directConnectScreen = null;
@@ -221,6 +250,10 @@ public class GameApplication extends Game {
                     "Direct Connect floor entered without an authoritative local spawn.");
         }
         mainScreen.setNetworkMovementController(directConnectMovementController);
+        directConnectCombatController = new DirectConnectCombatController(
+                directConnectPeer, directConnectMovementController,
+                OwnedGameCopyMount.isMounted());
+        mainScreen.setNetworkCombatController(directConnectCombatController);
         completedScreen.dispose();
     }
 

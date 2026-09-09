@@ -36,6 +36,8 @@ public class Missile extends Item implements Directional {
     public float knockback = 0;
 
     private boolean showHitEffect = false;
+    private transient ProjectileImpactListener multiplayerImpactListener;
+    private transient boolean multiplayerImpactReported = false;
 
     public float trailTimer = 0;
 
@@ -264,6 +266,9 @@ public class Missile extends Item implements Directional {
     // Don't collide with static meshes, already checking against triangles there
     public boolean canHit(Entity checking, Entity e) {
         if (e == owner || checking == e) return false;
+        else if (checking != null && checking.ignorePlayerCollision
+                && e.ignorePlayerCollision && e instanceof Actor)
+            return false;
         else if (checking instanceof Model && checking.isStatic)
             return false; // don't let missiles collide with static meshes
         else if (checking != null && checking.ignorePlayerCollision && Game.instance.player != null && e == Game.instance.player)
@@ -581,6 +586,8 @@ public class Missile extends Item implements Directional {
             return;
         }
 
+        notifyMultiplayerImpact(hit, x, y, z + yOffset);
+
         if (hit.isStatic || hit instanceof Trigger) {
             bounceOffOf(hit);
             maybeBreak();
@@ -681,6 +688,8 @@ public class Missile extends Item implements Directional {
         y = levelIntersection.z;
         z = levelIntersection.y - yOffset;
 
+        notifyMultiplayerImpact(null, x, y, z + yOffset);
+
         Vector3 newPosition = new Vector3(forward).scl(-0.125f);
         this.x += newPosition.x;
         this.y += newPosition.y;
@@ -718,6 +727,24 @@ public class Missile extends Item implements Directional {
         if (xa != 0 || ya != 0) {
             ignorePlayerCollision = false;
         }
+    }
+
+    public void setMultiplayerImpactListener(ProjectileImpactListener listener) {
+        if(multiplayerImpactListener == listener) return;
+        multiplayerImpactListener = listener;
+        multiplayerImpactReported = false;
+    }
+
+    public void clearMultiplayerImpactListener(ProjectileImpactListener listener) {
+        if(multiplayerImpactListener == listener) multiplayerImpactListener = null;
+    }
+
+    private void notifyMultiplayerImpact(Entity hit, float impactX,
+            float impactY, float impactZ) {
+        if(multiplayerImpactReported || multiplayerImpactListener == null) return;
+        multiplayerImpactReported = true;
+        multiplayerImpactListener.onProjectileImpact(
+                this, hit, impactX, impactY, impactZ);
     }
 
     public void doHitEffect(float xLoc, float yLoc, float zLoc, Level lvl) {

@@ -58,7 +58,8 @@ public class Bow extends Weapon {
 		missile.leaveTrail = false;
 		missile.knockback = (this.knockback + p.getKnockbackStatBoost()) * attackPower;
 		missile.ignorePlayerCollision = true;
-        setMissileDirectionAndPosition(missile, power, p);
+        Vector3 direction = setMissileDirectionAndPosition(missile, power, p);
+		notifyWeaponAttack(p, direction, attackPower);
 
 		Color hitColor = getEnchantmentColor();
 		boolean fullBright = getDamageType() != DamageType.PHYSICAL;
@@ -80,14 +81,16 @@ public class Bow extends Weapon {
 		Audio.playSound(fireSound, 0.25f);
 	}
 
-	public void setMissileDirectionAndPosition(Missile missile, float power, Player p) {
+	public Vector3 setMissileDirectionAndPosition(Missile missile, float power, Player p) {
         Vector3 dir = getCrosshairDirection(-0.35f);
         if(dir != null) {
             missile.SetPositionAndVelocity(new Vector3(x, y, z + 0.1f - 0.55f), new Vector3(dir.x * power, dir.z * power, dir.y * power));
         }
         else {
-            missile.SetPositionAndVelocity(new Vector3(p.x, p.y, p.z), new Vector3(Game.camera.direction.x * power,Game.camera.direction.z * power,Game.camera.direction.y * power));
+			dir = new Vector3(Game.camera.direction);
+            missile.SetPositionAndVelocity(new Vector3(p.x, p.y, p.z), new Vector3(dir.x * power, dir.z * power, dir.y * power));
         }
+		return dir;
     }
 
 	public Item findAmmo() {

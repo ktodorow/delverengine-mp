@@ -3,6 +3,7 @@ package com.interrupt.dungeoneer.gfx.animation;
 import com.badlogic.gdx.math.Vector2;
 import com.badlogic.gdx.math.Vector3;
 import com.interrupt.dungeoneer.entities.Entity;
+import com.interrupt.dungeoneer.entities.Monster;
 import com.interrupt.dungeoneer.game.Game;
 
 public class SpawnAnimationAction extends AnimationAction {
@@ -22,7 +23,11 @@ public class SpawnAnimationAction extends AnimationAction {
 	public void doAction(Entity instigator) {
 		Entity spawns = Game.instance.entityManager.getEntity(spawnCategory, spawnName);
 		if(spawns != null) {
-			Vector2 dir = new Vector2(Game.instance.player.x, Game.instance.player.y).sub(new Vector2(instigator.x - 0.5f, instigator.y - 0.5f));
+			Entity target = instigator instanceof Monster
+					? ((Monster)instigator).getAttackTarget() : Game.instance.player;
+			if(target == null || !target.isActive) return;
+			Vector2 dir = new Vector2(target.x, target.y)
+					.sub(new Vector2(instigator.x - 0.5f, instigator.y - 0.5f));
 			dir = dir.nor();
 			
 			Vector2 rotDir = new Vector2(spawnOffset.x, spawnOffset.y);

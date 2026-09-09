@@ -231,9 +231,12 @@ final class DesktopLaunchOptions {
             throw new IllegalArgumentException(
                     "Choose either --direct-host or --direct-connect, not both.");
         }
-        if((options.directHost || options.directConnectAddress != null)
-                && (options.openSourceTestLevel || options.ownedTutorial
-                        || options.inspectOwnedCopy)) {
+        boolean directConnect = options.directHost || options.directConnectAddress != null;
+        boolean directOwnedCopy = directConnect && options.ownedCopy != null
+                && !options.browseOwnedCopy && !options.inspectOwnedCopy;
+        if(directConnect
+                && (options.openSourceTestLevel || options.inspectOwnedCopy
+                        || (options.ownedTutorial && !directOwnedCopy))) {
             throw new IllegalArgumentException(
                     "Direct Connect cannot be combined with another launch mode.");
         }

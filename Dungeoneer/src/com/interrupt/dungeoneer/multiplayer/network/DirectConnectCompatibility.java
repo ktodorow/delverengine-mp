@@ -9,6 +9,8 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.TreeMap;
 
+import com.interrupt.dungeoneer.owned.OwnedGameCopyCompatibility;
+
 /** Exact engine build plus normalized local content identity exchanged during handshake. */
 public final class DirectConnectCompatibility {
     private final String buildId;
@@ -36,6 +38,15 @@ public final class DirectConnectCompatibility {
 
         return forNormalizedOpenSourceAssets(Collections.singletonMap(
                 "levels/test-level.bin", floorBytes));
+    }
+
+    public static DirectConnectCompatibility forOwnedGameCopy(
+            OwnedGameCopyCompatibility ownedCopy) {
+        if(ownedCopy == null) {
+            throw new IllegalArgumentException("Owned Game Copy compatibility cannot be null.");
+        }
+        return new DirectConnectCompatibility(DirectConnectProtocol.BUILD_ID,
+                ownedCopy.getManifestFormat(), ownedCopy.getNormalizedManifestSha256());
     }
 
     public static DirectConnectCompatibility forNormalizedOpenSourceAssets(
@@ -100,6 +111,10 @@ public final class DirectConnectCompatibility {
 
     public String getContentIdentity() {
         return contentFormat + ":" + contentSha256;
+    }
+
+    public boolean usesOpenSourceTestContent() {
+        return DirectConnectProtocol.OPEN_SOURCE_TEST_CONTENT_FORMAT.equals(contentFormat);
     }
 
     private static String requireIdentifier(String value, int maximumBytes, String label) {

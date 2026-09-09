@@ -13,6 +13,7 @@ import com.interrupt.dungeoneer.game.Options;
 import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.gfx.Tesselator;
 import com.interrupt.dungeoneer.metrics.MetricsCore;
+import com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController;
 import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
@@ -47,6 +48,7 @@ public class GameScreen implements Screen {
 	private Level editorLevel = null;
     private Game.StartMode startMode = Game.StartMode.NORMAL;
     private DirectConnectMovementController networkMovementController;
+    private DirectConnectCombatController networkCombatController;
     
     public GameScreen(Level level, GameManager gameManager, GameInput input) {
     	this.gameManager = gameManager;
@@ -84,6 +86,9 @@ public class GameScreen implements Screen {
 			if((!overlayManager.shouldPauseGame() || directConnect != null)
 					&& (directConnect == null || !directConnect.isSessionPaused()))
 			{
+				if(networkCombatController != null && game != null) {
+					networkCombatController.prepare(game);
+				}
 				gameManager.tick(delta * 60f);
 
 				if(game != null) {
@@ -102,6 +107,9 @@ public class GameScreen implements Screen {
 					&& (directConnect == null || !directConnect.isSessionPaused())) {
                 networkMovementController.update(game, input, delta);
             }
+			if(networkCombatController != null && game != null) {
+				networkCombatController.update(game);
+			}
 
 			// draw the game
 			gameManager.render();
@@ -237,8 +245,9 @@ public class GameScreen implements Screen {
 	}
 
 	@Override
-	public void dispose() {
+    public void dispose() {
         if(networkMovementController != null) networkMovementController.dispose();
+        if(networkCombatController != null) networkCombatController.dispose();
 		Audio.disposeAudio(null);
 		if(editorLevel != null) GameApplication.editorRunning = false;
 	}
@@ -248,15 +257,19 @@ public class GameScreen implements Screen {
         this.networkMovementController = networkMovementController;
     }
 
+    public void setNetworkCombatController(
+            DirectConnectCombatController networkCombatController) {
+        this.networkCombatController = networkCombatController;
+    }
+
     private DirectConnectPeer directConnectPeer() {
         return GameApplication.instance == null ? null
                 : GameApplication.instance.getDirectConnectPeer();
     }
 
     private void handlePartyControls(DirectConnectPeer peer) {
-        if(peer == null || peer.getStatus().getPhase()
-                != com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY
-                || Gdx.input.getInputProcessor() != input) return;
+        if(peer == null || !canHandlePartyControls(peer.getStatus().getPhase(),
+                OverlayManager.instance.current() != null)) return;
         if(Gdx.input.isKeyJustPressed(Input.Keys.T)) {
             OverlayManager.instance.push(new PartyChatOverlay(peer));
         }
@@ -264,5 +277,12 @@ public class GameScreen implements Screen {
             if(peer.canControlSessionPause()) peer.setSessionPaused(!peer.isSessionPaused());
             else peer.requestPauseSession();
         }
+    }
+
+    static boolean canHandlePartyControls(
+            com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase phase,
+            boolean overlayIsOpen) {
+        return phase == com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY
+                && !overlayIsOpen;
     }
 }

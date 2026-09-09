@@ -1,5 +1,13 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
+import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationPhase;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatRequest;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatantKind;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatantSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.MonsterSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
@@ -57,6 +65,9 @@ final class DirectConnectWire {
     private static final int PAUSE_REQUEST = 23;
     private static final int PAUSE_REQUESTED = 24;
     private static final int PAUSE_SESSION_STATE = 25;
+    private static final int COMBAT_ACTION_REQUEST = 26;
+    private static final int COMBAT_STATE = 27;
+    private static final int COMBAT_PRESENTATION = 28;
 
     private DirectConnectWire() { }
 
@@ -232,6 +243,10 @@ final class DirectConnectWire {
                 throw new ProtocolException("Participant count is outside protocol bounds.");
             }
             output.writeByte(ready.participantCount);
+            if(ready.nextCombatRequestId < 1L) {
+                throw new ProtocolException("Combat request ID floor is outside protocol bounds.");
+            }
+            output.writeLong(ready.nextCombatRequestId);
             writeString(output, ready.floorId, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
                     "floor identity");
         }
@@ -307,6 +322,85 @@ final class DirectConnectWire {
                 output.writeFloat(entity.getRotation());
                 output.writeByte(entity.getMovementState().getWireId());
             }
+        }
+        else if(message instanceof CombatActionRequestMessage) {
+            CombatActionRequestMessage request = (CombatActionRequestMessage)message;
+            output.writeByte(COMBAT_ACTION_REQUEST);
+            writeString(output, request.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(request.requestId);
+            output.writeByte(request.action.getWireId());
+            output.writeBoolean(request.directed);
+            if(request.directed) {
+                output.writeFloat(request.aimX);
+                output.writeFloat(request.aimY);
+                output.writeFloat(request.aimZ);
+                output.writeFloat(request.attackPower);
+            }
+            else {
+                writeString(output, request.targetId,
+                        DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
+                        "combat target identity");
+            }
+        }
+        else if(message instanceof CombatStateMessage) {
+            CombatStateMessage state = (CombatStateMessage)message;
+            List<MonsterSnapshot> monsters = state.snapshot.getMonsters();
+            List<CombatantSnapshot> combatants = state.snapshot.getCombatants();
+            if(monsters.size() > DirectConnectProtocol.MAX_MONSTERS) {
+                throw new ProtocolException("Combat state monster count is outside protocol bounds.");
+            }
+            if(combatants.size() > DirectConnectProtocol.MAX_COMBATANTS) {
+                throw new ProtocolException("Combat state combatant count is outside protocol bounds.");
+            }
+            output.writeByte(COMBAT_STATE);
+            writeString(output, state.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(state.snapshot.getSequence());
+            output.writeLong(state.snapshot.getHostTick());
+            output.writeByte(monsters.size());
+            for(MonsterSnapshot monster : monsters) {
+                writeString(output, monster.getId(),
+                        DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
+                        "combat monster identity");
+                writeString(output, monster.getTargetId(),
+                        DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
+                        "combat monster target");
+                output.writeFloat(monster.getX());
+                output.writeFloat(monster.getY());
+                output.writeFloat(monster.getZ());
+                output.writeBoolean(monster.isGibbed());
+            }
+            output.writeByte(combatants.size());
+            for(CombatantSnapshot combatant : combatants) {
+                writeString(output, combatant.getId(),
+                        DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES, "combatant identity");
+                output.writeByte(combatant.getKind().getWireId());
+                output.writeInt(combatant.getHealth());
+                output.writeInt(combatant.getMaximumHealth());
+            }
+        }
+        else if(message instanceof CombatPresentationMessage) {
+            CombatPresentationMessage presentation = (CombatPresentationMessage)message;
+            CombatPresentationEvent event = presentation.event;
+            output.writeByte(COMBAT_PRESENTATION);
+            writeString(output, presentation.sessionId,
+                    DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(event.getSequence());
+            output.writeLong(event.getHostTick());
+            writeString(output, event.getSourceId(),
+                    DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES, "combat source identity");
+            writeString(output, event.getTargetId(),
+                    DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES, "combat target identity");
+            output.writeByte(event.getPhase().getWireId());
+            output.writeByte(event.getAction().getWireId());
+            output.writeFloat(event.getOriginX());
+            output.writeFloat(event.getOriginY());
+            output.writeFloat(event.getOriginZ());
+            output.writeFloat(event.getImpactX());
+            output.writeFloat(event.getImpactY());
+            output.writeFloat(event.getImpactZ());
+            output.writeBoolean(event.isStateChanged());
         }
         else if(message instanceof PartyStatusMessage) {
             PartyStatusMessage partyMessage = (PartyStatusMessage)message;
@@ -547,7 +641,14 @@ final class DirectConnectWire {
                 if(participantCount < 1 || participantCount > 4) {
                     throw new ProtocolException("Participant count is outside protocol bounds.");
                 }
+                requireReadable(input, 8, "Combat request ID floor");
+                long nextCombatRequestId = input.readLong();
+                if(nextCombatRequestId < 1L) {
+                    throw new ProtocolException(
+                            "Combat request ID floor is outside protocol bounds.");
+                }
                 message = new SessionReady(readySession, participantCount,
+                        nextCombatRequestId,
                         readString(input, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
                                 "floor identity"));
                 break;
@@ -660,6 +761,140 @@ final class DirectConnectWire {
                 }
                 catch(IllegalArgumentException ex) {
                     throw new ProtocolException("Malformed movement snapshot: "
+                            + ex.getMessage(), ex);
+                }
+                break;
+            case COMBAT_ACTION_REQUEST:
+                String combatRequestSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 10, "combat action request");
+                long combatRequestId = input.readLong();
+                int combatAction = input.readUnsignedByte();
+                boolean directedCombat = input.readBoolean();
+                try {
+                    if(directedCombat) {
+                        requireReadable(input, 16, "directed combat aim and attack power");
+                        message = new CombatActionRequestMessage(combatRequestSession,
+                                combatRequestId, CombatAction.fromWireId(combatAction),
+                                input.readFloat(), input.readFloat(), input.readFloat(),
+                                input.readFloat());
+                    }
+                    else {
+                        String combatTarget = readString(input,
+                                DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
+                                "combat target identity");
+                        message = new CombatActionRequestMessage(combatRequestSession,
+                                combatRequestId, CombatAction.fromWireId(combatAction),
+                                combatTarget);
+                    }
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed combat action request: "
+                            + ex.getMessage(), ex);
+                }
+                break;
+            case COMBAT_STATE:
+                String combatStateSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 17, "combat state header");
+                long combatStateSequence = input.readLong();
+                long combatStateTick = input.readLong();
+                int monsterCount = input.readUnsignedByte();
+                if(monsterCount > DirectConnectProtocol.MAX_MONSTERS) {
+                    throw new ProtocolException("Combat state monster count is outside protocol bounds.");
+                }
+                List<MonsterSnapshot> monsters = new ArrayList<MonsterSnapshot>();
+                for(int i = 0; i < monsterCount; i++) {
+                    String monsterId = readString(input,
+                            DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
+                            "combat monster identity");
+                    String combatTargetId = readString(input,
+                            DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
+                            "combat monster target");
+                    requireReadable(input, 13, "combat monster transform and corpse state");
+                    float combatMonsterX = input.readFloat();
+                    float combatMonsterY = input.readFloat();
+                    float combatMonsterZ = input.readFloat();
+                    boolean combatMonsterGibbed = input.readBoolean();
+                    try {
+                        monsters.add(new MonsterSnapshot(monsterId, combatTargetId,
+                                combatMonsterX, combatMonsterY, combatMonsterZ,
+                                combatMonsterGibbed));
+                    }
+                    catch(IllegalArgumentException ex) {
+                        throw new ProtocolException("Malformed combat monster state: "
+                                + ex.getMessage(), ex);
+                    }
+                }
+                requireReadable(input, 1, "combatant count");
+                int combatantCount = input.readUnsignedByte();
+                if(combatantCount < 1 || combatantCount > DirectConnectProtocol.MAX_COMBATANTS) {
+                    throw new ProtocolException("Combat state combatant count is outside protocol bounds.");
+                }
+                List<CombatantSnapshot> combatants = new ArrayList<CombatantSnapshot>();
+                for(int i = 0; i < combatantCount; i++) {
+                    String combatantId = readString(input,
+                            DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES, "combatant identity");
+                    requireReadable(input, 9, "combatant state");
+                    int combatantKind = input.readUnsignedByte();
+                    int combatantHealth = input.readInt();
+                    int combatantMaximumHealth = input.readInt();
+                    try {
+                        combatants.add(new CombatantSnapshot(combatantId,
+                                CombatantKind.fromWireId(combatantKind), combatantHealth,
+                                combatantMaximumHealth));
+                    }
+                    catch(IllegalArgumentException ex) {
+                        throw new ProtocolException("Malformed combatant state: "
+                                + ex.getMessage(), ex);
+                    }
+                }
+                try {
+                    message = new CombatStateMessage(combatStateSession,
+                            new CombatSnapshot(combatStateSequence, combatStateTick,
+                                    monsters, combatants));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed combat state: "
+                            + ex.getMessage(), ex);
+                }
+                break;
+            case COMBAT_PRESENTATION:
+                String presentationSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 16, "combat presentation identity");
+                long presentationSequence = input.readLong();
+                long presentationTick = input.readLong();
+                String presentationSource = readString(input,
+                        DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
+                        "combat source identity");
+                String presentationTarget = readString(input,
+                        DirectConnectProtocol.MAX_COMBAT_TARGET_ID_BYTES,
+                        "combat target identity");
+                requireReadable(input, 27, "combat presentation phase, action and transform");
+                int presentationPhase = input.readUnsignedByte();
+                int presentationAction = input.readUnsignedByte();
+                float presentationOriginX = input.readFloat();
+                float presentationOriginY = input.readFloat();
+                float presentationOriginZ = input.readFloat();
+                float presentationImpactX = input.readFloat();
+                float presentationImpactY = input.readFloat();
+                float presentationImpactZ = input.readFloat();
+                boolean presentationChanged = input.readBoolean();
+                try {
+                    message = new CombatPresentationMessage(presentationSession,
+                            new CombatPresentationEvent(presentationSequence,
+                                    presentationTick, presentationSource,
+                                    presentationTarget,
+                                    CombatAction.fromWireId(presentationAction),
+                                    CombatPresentationPhase.fromWireId(presentationPhase),
+                                    presentationOriginX, presentationOriginY,
+                                    presentationOriginZ, presentationImpactX,
+                                    presentationImpactY, presentationImpactZ,
+                                    presentationChanged));
+                }
+                catch(IllegalArgumentException ex) {
+                    throw new ProtocolException("Malformed combat presentation: "
                             + ex.getMessage(), ex);
                 }
                 break;
@@ -1025,11 +1260,17 @@ final class DirectConnectWire {
     static final class SessionReady implements Message {
         final String sessionId;
         final int participantCount;
+        final long nextCombatRequestId;
         final String floorId;
 
-        SessionReady(String sessionId, int participantCount, String floorId) {
+        SessionReady(String sessionId, int participantCount, long nextCombatRequestId,
+                String floorId) {
+            if(nextCombatRequestId < 1L) {
+                throw new IllegalArgumentException("Combat request ID floor must be positive.");
+            }
             this.sessionId = sessionId;
             this.participantCount = participantCount;
+            this.nextCombatRequestId = nextCombatRequestId;
             this.floorId = floorId;
         }
     }
@@ -1082,6 +1323,92 @@ final class DirectConnectWire {
             if(snapshot == null) throw new IllegalArgumentException("Movement snapshot cannot be null.");
             this.sessionId = sessionId;
             this.snapshot = snapshot;
+        }
+    }
+
+    static final class CombatActionRequestMessage implements Message {
+        final String sessionId;
+        final long requestId;
+        final CombatAction action;
+        final String targetId;
+        final boolean directed;
+        final float aimX;
+        final float aimY;
+        final float aimZ;
+        final float attackPower;
+
+        CombatActionRequestMessage(String sessionId, long requestId,
+                CombatAction action, String targetId) {
+            if(!CombatRequest.isValidRequestId(requestId) || action == null
+                    || !action.allowsTargetedRequest()
+                    || targetId == null || targetId.trim().isEmpty()) {
+                throw new IllegalArgumentException("Combat action request is invalid.");
+            }
+            this.sessionId = sessionId;
+            this.requestId = requestId;
+            this.action = action;
+            this.targetId = targetId;
+            directed = false;
+            aimX = 0f;
+            aimY = 0f;
+            aimZ = 0f;
+            attackPower = 1f;
+        }
+
+        CombatActionRequestMessage(String sessionId, long requestId,
+                CombatAction action, float aimX, float aimY, float aimZ) {
+            this(sessionId, requestId, action, aimX, aimY, aimZ, 1f);
+        }
+
+        CombatActionRequestMessage(String sessionId, long requestId,
+                CombatAction action, float aimX, float aimY, float aimZ,
+                float attackPower) {
+            float aimLengthSquared = aimX * aimX + aimY * aimY + aimZ * aimZ;
+            if(!CombatRequest.isValidRequestId(requestId) || action == null
+                    || !action.isDirected() || !isFinite(aimX) || !isFinite(aimY)
+                    || !isFinite(aimZ) || !isFinite(aimLengthSquared)
+                    || aimLengthSquared < 0.000001f || aimLengthSquared > 3.01f
+                    || !isFinite(attackPower) || attackPower < 0f
+                    || attackPower > CombatRequest.MAX_ATTACK_POWER) {
+                throw new IllegalArgumentException("Directed combat action request is invalid.");
+            }
+            this.sessionId = sessionId;
+            this.requestId = requestId;
+            this.action = action;
+            targetId = "";
+            directed = true;
+            this.aimX = aimX;
+            this.aimY = aimY;
+            this.aimZ = aimZ;
+            this.attackPower = attackPower;
+        }
+
+        private static boolean isFinite(float value) {
+            return !Float.isNaN(value) && !Float.isInfinite(value);
+        }
+    }
+
+    static final class CombatStateMessage implements Message {
+        final String sessionId;
+        final CombatSnapshot snapshot;
+
+        CombatStateMessage(String sessionId, CombatSnapshot snapshot) {
+            if(snapshot == null) throw new IllegalArgumentException("Combat snapshot cannot be null.");
+            this.sessionId = sessionId;
+            this.snapshot = snapshot;
+        }
+    }
+
+    static final class CombatPresentationMessage implements Message {
+        final String sessionId;
+        final CombatPresentationEvent event;
+
+        CombatPresentationMessage(String sessionId, CombatPresentationEvent event) {
+            if(event == null) {
+                throw new IllegalArgumentException("Combat presentation cannot be null.");
+            }
+            this.sessionId = sessionId;
+            this.event = event;
         }
     }
 

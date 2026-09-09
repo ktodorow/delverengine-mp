@@ -89,6 +89,16 @@ public class DesktopStarter {
         else if(directConnect) {
             if(launchOptions.profileRoot == null) MultiplayerProfile.initializeDefault();
             else MultiplayerProfile.initialize(launchOptions.profileRoot);
+            if(launchOptions.ownedCopy != null) {
+                try {
+                    OwnedGameCopyLauncher.validateAndMount(launchOptions);
+                }
+                catch(OwnedGameCopyValidationException ex) {
+                    reportOwnedCopyError(ex.getMessage());
+                    throw new IllegalStateException("Owned Game Copy launch blocked: "
+                            + ex.getMessage(), ex);
+                }
+            }
             launcherIdentity = LauncherIdentityStore.loadOrCreate();
             slotPresentation = new SlotPresentation(
                     launchOptions.nickname, launchOptions.avatarId);

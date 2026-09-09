@@ -4,7 +4,7 @@ import com.badlogic.gdx.math.Vector2;
 import com.badlogic.gdx.math.Vector3;
 import com.interrupt.dungeoneer.entities.Entity;
 import com.interrupt.dungeoneer.entities.Item;
-import com.interrupt.dungeoneer.entities.Player;
+import com.interrupt.dungeoneer.entities.Monster;
 import com.interrupt.dungeoneer.entities.Prefab;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
@@ -45,6 +45,9 @@ public class ProjectileAttackAction extends AnimationAction {
 	public void doAction(Entity instigator) {
 		if(projectile == null)
 			return;
+		Entity target = instigator instanceof Monster
+				? ((Monster)instigator).getAttackTarget() : Game.instance.player;
+		if(target == null || !target.isActive) return;
 
 		for(int i = 0; i < projectileNum; i++) {
 			Entity pCopy = null;
@@ -56,7 +59,6 @@ public class ProjectileAttackAction extends AnimationAction {
 			}
 
 			if (pCopy != null) {
-				Player player = Game.instance.player;
 				pCopy.owner = instigator;
 				pCopy.ignorePlayerCollision = false;
 
@@ -66,9 +68,9 @@ public class ProjectileAttackAction extends AnimationAction {
 				pCopy.z = instigator.z + (instigator.collision.z * 0.6f);
 
 				// initial instigator to player direction, for the projectile offset
-				Vector3 dirToPlayer = workVector3d_1.set(player.x, player.y, 0);
+				Vector3 dirToPlayer = workVector3d_1.set(target.x, target.y, 0);
 				dirToPlayer.sub(pCopy.x, pCopy.y, 0);
-				float playerdist = dirToPlayer.len();
+				float targetDistance = dirToPlayer.len();
 
 				// have the distance, can normalize now
 				dirToPlayer.nor();
@@ -83,7 +85,7 @@ public class ProjectileAttackAction extends AnimationAction {
 				pCopy.z += projectileOffset.z;
 
 				// get direction from the projectile to the player. aim for center mass!
-				dirToPlayer.set(player.x, player.y, player.z + player.collision.z * 0.5f);
+				dirToPlayer.set(target.x, target.y, target.z + target.collision.z * 0.5f);
 				dirToPlayer.sub(pCopy.x, pCopy.y, pCopy.z);
 				dirToPlayer.nor();
 
@@ -102,7 +104,8 @@ public class ProjectileAttackAction extends AnimationAction {
 				// offset direction for ballistics if needed
 				if (!pCopy.floating) {
 					// Go ballistics
-					dirToPlayer.rotate(rightHandDirection, (playerdist * playerdist) * -projectileBallisticsMod);
+					dirToPlayer.rotate(rightHandDirection,
+							(targetDistance * targetDistance) * -projectileBallisticsMod);
 				}
 
 				// initial speed

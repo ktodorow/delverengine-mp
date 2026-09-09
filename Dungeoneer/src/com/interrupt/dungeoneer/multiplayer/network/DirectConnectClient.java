@@ -4,7 +4,14 @@ import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationJournal;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CampaignChallenge;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatActionRequestMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatPresentationMessage;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatStateMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientDisconnect;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ClientHello;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.EntityDespawn;
@@ -95,6 +102,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
             new MovementReplicationState();
     private final List<MovementInputFrame> pendingMovementInputs =
             new ArrayList<MovementInputFrame>();
+    private final CombatPresentationJournal combatPresentations =
+            new CombatPresentationJournal(DirectConnectProtocol.MAX_COMBAT_PRESENTATION_EVENTS);
 
     private volatile DirectConnectStatus status;
     private volatile Channel tcpChannel;
@@ -109,6 +118,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile int udpRegistrationAttempts;
     private volatile NetworkEntityId localMovementEntityId;
     private volatile PartyStatusSnapshot partyStatus;
+    private volatile CombatSnapshot combatSnapshot;
     private volatile PartyCommunicationState partyCommunication =
             PartyCommunicationState.initial();
     private long lastSubmittedMovementTick;
@@ -401,7 +411,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
 
     private synchronized void sessionReady(SessionReady ready) {
         if(sessionId == null || !sessionId.equals(ready.sessionId)
-                || ready.participantCount < 2 || ready.participantCount > campaignCapacity) {
+                || ready.participantCount < 2 || ready.participantCount > campaignCapacity
+                || ready.nextCombatRequestId < 1L) {
             fail("Host returned malformed session-ready state.");
             return;
         }
@@ -435,6 +446,25 @@ public final class DirectConnectClient implements DirectConnectPeer {
             partyStatus = message.snapshot;
         }
         becomeReadyIfComplete();
+    }
+
+    private synchronized void combatState(CombatStateMessage message) {
+        if(sessionId == null || !sessionId.equals(message.sessionId) || message.snapshot == null) {
+            fail("Host returned malformed combat state.");
+            return;
+        }
+        if(combatSnapshot == null || message.snapshot.getSequence() > combatSnapshot.getSequence()) {
+            combatSnapshot = message.snapshot;
+        }
+        becomeReadyIfComplete();
+    }
+
+    private synchronized void combatPresentation(CombatPresentationMessage message) {
+        if(sessionId == null || !sessionId.equals(message.sessionId) || message.event == null) {
+            fail("Host returned malformed combat presentation.");
+            return;
+        }
+        combatPresentations.add(message.event);
     }
 
     private synchronized void partyChat(PartyChatDelivery delivery) {
@@ -487,7 +517,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     private void becomeReadyIfComplete() {
-        if(!udpRegistered || readyMessage == null || partyStatus == null) return;
+        if(!udpRegistered || readyMessage == null || partyStatus == null
+                || combatSnapshot == null) return;
         status = new DirectConnectStatus(DirectConnectPhase.READY,
                 "Host started play with " + readyMessage.participantCount
                         + " Participants. Entering shared open-source test floor.",
@@ -581,6 +612,22 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     @Override
+    public CombatSnapshot getCombatSnapshot() {
+        return combatSnapshot;
+    }
+
+    @Override
+    public List<CombatPresentationEvent> getCombatPresentationEvents() {
+        return combatPresentations.getEvents();
+    }
+
+    @Override
+    public long getNextCombatRequestId() {
+        SessionReady ready = readyMessage;
+        return ready == null ? 1L : ready.nextCombatRequestId;
+    }
+
+    @Override
     public PartyStatusSnapshot getPartyStatus() {
         return partyStatus;
     }
@@ -616,6 +663,29 @@ public final class DirectConnectClient implements DirectConnectPeer {
     @Override
     public void setSessionPaused(boolean paused) {
         throw new UnsupportedOperationException("Only Host can control Pause Session.");
+    }
+
+    @Override
+    public synchronized void submitCombatAction(long requestId, CombatAction action, String targetId) {
+        CombatActionRequestMessage request = new CombatActionRequestMessage(sessionId, requestId,
+                action, targetId);
+        if(!canSendReliableSessionEvent()) return;
+        tcpChannel.writeAndFlush(request);
+    }
+
+    @Override
+    public synchronized void submitCombatAction(long requestId, CombatAction action,
+            float aimX, float aimY, float aimZ) {
+        submitCombatAction(requestId, action, aimX, aimY, aimZ, 1f);
+    }
+
+    @Override
+    public synchronized void submitCombatAction(long requestId, CombatAction action,
+            float aimX, float aimY, float aimZ, float attackPower) {
+        CombatActionRequestMessage request = new CombatActionRequestMessage(sessionId, requestId,
+                action, aimX, aimY, aimZ, attackPower);
+        if(!canSendReliableSessionEvent()) return;
+        tcpChannel.writeAndFlush(request);
     }
 
     private boolean canSendReliableSessionEvent() {
@@ -738,6 +808,14 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof PartyStatusMessage && sessionId != null
                     && campaignSlot != 0) {
                 partyStatus((PartyStatusMessage)message);
+            }
+            else if(message instanceof CombatStateMessage && sessionId != null
+                    && campaignSlot != 0) {
+                combatState((CombatStateMessage)message);
+            }
+            else if(message instanceof CombatPresentationMessage && sessionId != null
+                    && campaignSlot != 0) {
+                combatPresentation((CombatPresentationMessage)message);
             }
             else if(message instanceof PartyChatDelivery && sessionId != null
                     && campaignSlot != 0) {

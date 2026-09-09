@@ -17,6 +17,7 @@ import com.interrupt.dungeoneer.game.Colors;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.Level.Source;
+import com.interrupt.dungeoneer.game.Pathfinding;
 import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.gfx.animation.AnimationAction;
 import com.interrupt.dungeoneer.gfx.animation.LightAnimationAction;
@@ -29,9 +30,25 @@ import com.interrupt.dungeoneer.statuseffects.StatusEffect;
 import com.interrupt.dungeoneer.tiles.Tile;
 import com.interrupt.managers.EntityManager;
 
+import java.util.HashMap;
 import java.util.Random;
 
 public class Monster extends Actor implements Directional {
+
+	public enum MultiplayerAttackKind {
+		MELEE,
+		PROJECTILE,
+		SPELL
+	}
+
+	public interface MultiplayerAttackListener {
+		void onAttackStarted(Monster monster, Entity target, MultiplayerAttackKind kind);
+	}
+
+	public interface MultiplayerDamageListener {
+		void onDamageApplied(Monster monster, Entity instigator, int damage,
+				DamageType damageType);
+	}
 
 	public enum AmbushMode {
 		None,
@@ -293,6 +310,22 @@ public class Monster extends Actor implements Directional {
 	public float spawnMomentumTransfer = 1.0f;
 
 	private transient Entity attackTarget = null;
+	private transient Entity multiplayerTarget = null;
+	private transient boolean multiplayerTargetAuthority = false;
+	private transient boolean networkReplica = false;
+	private transient boolean networkOriginalSolid = true;
+	private transient boolean networkStateInitialized = false;
+	private transient boolean networkDead = false;
+	private transient boolean networkDeathPresented = false;
+	private transient boolean networkGibbed = false;
+	private transient boolean multiplayerDeathProcessed = false;
+	private transient boolean multiplayerDeathGibbed = false;
+	private transient Corpse multiplayerCorpse = null;
+	private transient float networkX;
+	private transient float networkY;
+	private transient float networkZ;
+	private transient MultiplayerAttackListener multiplayerAttackListener;
+	private transient MultiplayerDamageListener multiplayerDamageListener;
 
 	public Monster() {
 		// for ranged monsters
@@ -400,7 +433,11 @@ public class Monster extends Actor implements Directional {
 
 	@Override
 	public int takeDamage(int damage, DamageType damageType, Entity instigator) {
+		if(networkReplica) return 0;
 		int tookDamage = super.takeDamage(damage, damageType, instigator);
+		if(tookDamage > 0 && multiplayerDamageListener != null) {
+			multiplayerDamageListener.onDamageApplied(this, instigator, tookDamage, damageType);
+		}
 		if(doPainRoll(tookDamage)) {
 			if (attackAnimation != null) attackAnimation.playing = false;
 			if (rangedAttackAnimation != null) rangedAttackAnimation.playing = false;
@@ -426,6 +463,10 @@ public class Monster extends Actor implements Directional {
 	{
 		if(!isActive)
 			return;
+		if(networkReplica) {
+			tickNetworkReplica(level, delta);
+			return;
+		}
 
 		// Time speed could be different for just us
 		delta *= actorTimeScale;
@@ -433,12 +474,6 @@ public class Monster extends Actor implements Directional {
 		if(origtex == null) origtex = tex;
 		tickStatusEffects(delta);
 		stepUpTick(delta);
-
-		Player player = GameManager.getGame().player;
-		if(Math.abs(player.x - x) > 17 || Math.abs(player.y - y) > 17) {
-			if(walkAmbientSound != null) walkAmbientSound.pause();
-			return;
-		}
 
 		// sorry mob, you be dead
 		if(!isAlive())
@@ -453,6 +488,13 @@ public class Monster extends Actor implements Directional {
 			}
 
 			super.tick(level, delta);
+			return;
+		}
+
+		Entity player = getRuntimeTarget();
+		if(player == null || !player.isActive) return;
+		if(Math.abs(player.x - x) > 17 || Math.abs(player.y - y) > 17) {
+			if(walkAmbientSound != null) walkAmbientSound.pause();
 			return;
 		}
 
@@ -514,7 +556,7 @@ public class Monster extends Actor implements Directional {
 			pydir = player.y - y;
 			playerdist = GlRenderer.FastSqrt(pxdir * pxdir + pydir * pydir);
 
-			if(canSeePlayer && player.invisible) {
+			if(canSeePlayer && targetIsInvisible(player)) {
 				if(alerted && playerdist > 1.5f) {
 					canSeePlayer = false;
 				}
@@ -534,7 +576,7 @@ public class Monster extends Actor implements Directional {
 		// Turn alerted if the player is visible
 		if(hostile && (!alerted && canSeePlayer) && !fleeing)
 		{
-			if(playerdist < (player.visiblityMod * 15) + 3  || alertValue >= 1f) {
+			if(playerdist < (targetVisibilityMod(player) * 15) + 3  || alertValue >= 1f) {
 				alerted = true;
 
 				// bark!
@@ -803,6 +845,8 @@ public class Monster extends Actor implements Directional {
 			if(mp >= picked.mpCost && playerdist < picked.maxDistanceToTarget && playerdist > picked.minDistanceToTarget) {
 				stuntime = 30;
 				attacktimer = projectileAttackTime + Game.rand.nextInt(30);
+				attackTarget = player;
+				notifyMultiplayerAttack(player, MultiplayerAttackKind.SPELL);
 
 				if(castAnimation != null && castAnimation.actions != null) {
 					// TODO: has to be a better way to do this
@@ -902,6 +946,28 @@ public class Monster extends Actor implements Directional {
 
 	private boolean findPathToPlayer(Level level)
 	{
+		Entity target = getRuntimeTarget();
+		Game game = GameManager.getGame();
+		if(multiplayerTargetAuthority && target != null
+				&& (game == null || target != game.player)) {
+			if(!fleeing && level.canSafelySee(x, y, target.x, target.y)) {
+				targetx = target.x;
+				targety = target.y;
+				return true;
+			}
+
+			PathNode start = Game.pathfinding.GetNodeAt(x + xa, y + ya, z + za);
+			PathNode destination = Game.pathfinding.GetNodeAt(
+					target.x, target.y, target.z);
+			PathNode picked = fleeing
+					? pickFleeingPathNode(start, target)
+					: findNextPathNode(start, destination);
+			if(picked == null) return false;
+			targetx = picked.loc.x;
+			targety = picked.loc.y;
+			return true;
+		}
+
 		PathNode node = Game.pathfinding.GetNodeAt(x + xa, y + ya, z + za);
 
 		if(node != null && node.playerSmell != Short.MAX_VALUE) {
@@ -945,9 +1011,81 @@ public class Monster extends Actor implements Directional {
 		return false;
 	}
 
+	private PathNode findNextPathNode(PathNode start, PathNode destination) {
+		if(start == null || destination == null) return null;
+		if(start == destination) return destination;
+
+		Array<PathNode> pending = new Array<PathNode>();
+		HashMap<PathNode, PathNode> firstSteps = new HashMap<PathNode, PathNode>();
+		HashMap<PathNode, Integer> depths = new HashMap<PathNode, Integer>();
+		pending.add(start);
+		firstSteps.put(start, start);
+		depths.put(start, 0);
+
+		for(int index = 0; index < pending.size; index++) {
+			PathNode current = pending.get(index);
+			int depth = depths.get(current);
+			if(depth >= Pathfinding.MaxTraversal) continue;
+			PathNode found = enqueuePathNodes(start, destination, current,
+					current.getConnections(), depth, pending, firstSteps, depths);
+			if(found != null) return found;
+			found = enqueuePathNodes(start, destination, current,
+					current.getJumps(), depth, pending, firstSteps, depths);
+			if(found != null) return found;
+		}
+		return null;
+	}
+
+	private PathNode enqueuePathNodes(PathNode start, PathNode destination,
+			PathNode current, Array<PathNode> adjacent, int depth,
+			Array<PathNode> pending, HashMap<PathNode, PathNode> firstSteps,
+			HashMap<PathNode, Integer> depths) {
+		for(PathNode next : adjacent) {
+			if(next == null || !next.nodeEnabled || depths.containsKey(next)) continue;
+			PathNode firstStep = current == start ? next : firstSteps.get(current);
+			firstSteps.put(next, firstStep);
+			depths.put(next, depth + 1);
+			if(next == destination) return firstStep;
+			pending.add(next);
+		}
+		return null;
+	}
+
+	private PathNode pickFleeingPathNode(PathNode start, Entity target) {
+		if(start == null || target == null) return null;
+		PathNode picked = start;
+		float pickedDistance = pathDistanceSquared(start, target);
+		for(PathNode adjacent : start.getConnections()) {
+			if(adjacent != null && adjacent.nodeEnabled) {
+				float distance = pathDistanceSquared(adjacent, target);
+				if(distance > pickedDistance) {
+					picked = adjacent;
+					pickedDistance = distance;
+				}
+			}
+		}
+		for(PathNode adjacent : start.getJumps()) {
+			if(adjacent != null && adjacent.nodeEnabled) {
+				float distance = pathDistanceSquared(adjacent, target);
+				if(distance > pickedDistance) {
+					picked = adjacent;
+					pickedDistance = distance;
+				}
+			}
+		}
+		return picked;
+	}
+
+	private float pathDistanceSquared(PathNode node, Entity target) {
+		float distanceX = node.loc.x - target.x;
+		float distanceY = node.loc.y - target.y;
+		return distanceX * distanceX + distanceY * distanceY;
+	}
+
 	@Override
 	public void hit(float projx, float projy, int damage, float knockback, DamageType damageType, Entity instigator)
 	{
+		if(networkReplica) return;
 		if(!hostile) {
 			hostile = true;	// u mad?
 			attacktimer = 30;
@@ -1083,6 +1221,9 @@ public class Monster extends Actor implements Directional {
 	public void die(Level level)
 	{
 		boolean splattered = hp < -500f;
+		multiplayerDeathProcessed = true;
+		multiplayerDeathGibbed = splattered || dieAnimation == null;
+		multiplayerCorpse = null;
 		isActive = false;
 		this.clearStatusEffects();
 
@@ -1122,6 +1263,7 @@ public class Monster extends Actor implements Directional {
 		// spawn a corpse if there is an animation for it
 		if(dieAnimation != null && !splattered) {
 			Corpse corpse = new Corpse(this);
+			multiplayerCorpse = corpse;
 			level.entities.add(corpse);
 		}
 
@@ -1169,6 +1311,7 @@ public class Monster extends Actor implements Directional {
 
 		attackTarget = target;
 		attacktimer = attackTime + Game.rand.nextInt(10);
+		notifyMultiplayerAttack(target, MultiplayerAttackKind.MELEE);
 		Audio.playPositionedSound(attackSwingSound, new Vector3(x, y, z), 0.75f, 1f, 12f);
 
 		setDirectionTowards(attackTarget);
@@ -1203,6 +1346,7 @@ public class Monster extends Actor implements Directional {
 
 		attackTarget = target;
 		rangedAttackTimer = projectileAttackTime + Game.rand.nextInt(15);
+		notifyMultiplayerAttack(target, MultiplayerAttackKind.PROJECTILE);
 		setDirectionTowards(attackTarget);
 
 		if(rangedAttackAnimation != null) {
@@ -1462,10 +1606,211 @@ public class Monster extends Actor implements Directional {
 	}
 
 	public Entity getAttackTarget() {
-		if(attackTarget == null || !attackTarget.isActive) {
-			return Game.instance.player;
+		if(attackTarget != null && attackTarget.isActive) return attackTarget;
+		return getRuntimeTarget();
+	}
+
+	public void setMultiplayerTarget(Entity target) {
+		multiplayerTargetAuthority = true;
+		multiplayerTarget = target;
+	}
+
+	public void clearMultiplayerTarget() {
+		multiplayerTargetAuthority = false;
+		multiplayerTarget = null;
+		attackTarget = null;
+	}
+
+	public void setMultiplayerAttackListener(MultiplayerAttackListener listener) {
+		multiplayerAttackListener = listener;
+	}
+
+	public void clearMultiplayerAttackListener(MultiplayerAttackListener listener) {
+		if(multiplayerAttackListener == listener) multiplayerAttackListener = null;
+	}
+
+	public void setMultiplayerDamageListener(MultiplayerDamageListener listener) {
+		multiplayerDamageListener = listener;
+	}
+
+	public void clearMultiplayerDamageListener(MultiplayerDamageListener listener) {
+		if(multiplayerDamageListener == listener) multiplayerDamageListener = null;
+	}
+
+	public void setNetworkReplica(boolean replica) {
+		if(networkReplica == replica) return;
+		networkReplica = replica;
+		if(replica) {
+			networkOriginalSolid = isSolid;
+			networkDead = false;
+			networkDeathPresented = false;
+			networkGibbed = false;
+			multiplayerDeathProcessed = false;
+			multiplayerDeathGibbed = false;
+			multiplayerCorpse = null;
+			isSolid = false;
+			persists = false;
+			xa = 0f;
+			ya = 0f;
+			za = 0f;
 		}
-		return attackTarget;
+		else {
+			if(multiplayerCorpse != null) multiplayerCorpse.setNetworkReplica(false);
+			isSolid = networkOriginalSolid;
+			networkStateInitialized = false;
+			networkDead = false;
+			networkDeathPresented = false;
+			networkGibbed = false;
+		}
+	}
+
+	public boolean isNetworkReplica() {
+		return networkReplica;
+	}
+
+	public void applyNetworkState(int health, int maximumHealth,
+			float targetX, float targetY, float targetZ) {
+		applyNetworkState(health, maximumHealth, targetX, targetY, targetZ, false);
+	}
+
+	public void applyNetworkState(int health, int maximumHealth,
+			float targetX, float targetY, float targetZ, boolean gibbed) {
+		if(!networkReplica) return;
+		networkGibbed = gibbed;
+		maxHp = Math.max(1, maximumHealth);
+		if(!networkDead) {
+			hp = Math.max(0, Math.min(health, maxHp));
+			if(hp <= 0) networkDead = true;
+		}
+		else hp = 0;
+		networkX = targetX;
+		networkY = targetY;
+		networkZ = targetZ;
+		if(!networkStateInitialized) {
+			networkStateInitialized = true;
+			setPosition(targetX, targetY, targetZ);
+		}
+		if(multiplayerCorpse != null) {
+			multiplayerCorpse.applyNetworkState(targetX, targetY, targetZ);
+		}
+		if(networkGibbed && multiplayerCorpse != null) {
+			multiplayerDeathGibbed = true;
+			multiplayerCorpse.applyNetworkGib();
+		}
+	}
+
+	public Corpse getMultiplayerCorpse() {
+		return multiplayerCorpse;
+	}
+
+	public boolean isMultiplayerDeathProcessed() {
+		return multiplayerDeathProcessed;
+	}
+
+	public boolean isMultiplayerDeathGibbed() {
+		return multiplayerDeathProcessed && (multiplayerDeathGibbed
+				|| multiplayerCorpse == null || multiplayerCorpse.isGibbed());
+	}
+
+	public void playNetworkAttackPresentation(MultiplayerAttackKind kind) {
+		if(!networkReplica) return;
+		if(kind == MultiplayerAttackKind.SPELL && castAnimation != null) {
+			castAnimation.play();
+		}
+		else if(kind == MultiplayerAttackKind.PROJECTILE && rangedAttackAnimation != null) {
+			rangedAttackAnimation.play();
+		}
+		else if(attackAnimation != null) {
+			attackAnimation.play();
+		}
+	}
+
+	public void playNetworkDamagePresentation() {
+		if(networkReplica && hurtAnimation != null) hurtAnimation.play();
+	}
+
+	private Entity getRuntimeTarget() {
+		if(multiplayerTargetAuthority) {
+			return multiplayerTarget != null && multiplayerTarget.isActive
+					? multiplayerTarget : null;
+		}
+		Game game = GameManager.getGame();
+		return game == null ? null : game.player;
+	}
+
+	private boolean targetIsInvisible(Entity target) {
+		return target instanceof Actor && ((Actor)target).invisible;
+	}
+
+	private float targetVisibilityMod(Entity target) {
+		return target instanceof Player ? ((Player)target).visiblityMod : 1f;
+	}
+
+	private void notifyMultiplayerAttack(Entity target, MultiplayerAttackKind kind) {
+		if(multiplayerAttackListener != null) {
+			multiplayerAttackListener.onAttackStarted(this, target, kind);
+		}
+	}
+
+	private void tickNetworkReplica(Level level, float delta) {
+		if(!networkStateInitialized) return;
+		if(networkDead || hp <= 0) {
+			networkDead = true;
+			if(!networkDeathPresented) {
+				networkDeathPresented = true;
+				multiplayerDeathProcessed = true;
+				multiplayerDeathGibbed = networkGibbed || dieAnimation == null;
+				dieEffect(level);
+				if(dieAnimation != null) {
+					Corpse corpse = new Corpse(this);
+					corpse.persists = false;
+					corpse.setNetworkReplica(true);
+					corpse.applyNetworkState(networkX, networkY, networkZ);
+					multiplayerCorpse = corpse;
+					level.entities.add(corpse);
+				}
+				Audio.playPositionedSound(
+						"sfx_death_enemy_01.mp3,sfx_death_enemy_02.mp3,sfx_death_enemy_03.mp3,sfx_death_enemy_04.mp3",
+						new Vector3(x, y, z), soundVolume, 1f, 12f);
+			}
+			if(networkGibbed && multiplayerCorpse != null) {
+				multiplayerDeathGibbed = true;
+				multiplayerCorpse.applyNetworkGib();
+			}
+			isActive = false;
+			return;
+		}
+
+		float oldX = x;
+		float oldY = y;
+		float distanceSquared = (networkX - x) * (networkX - x)
+				+ (networkY - y) * (networkY - y);
+		float interpolation = distanceSquared > 9f ? 1f : Math.min(1f, delta * 0.35f);
+		x += (networkX - x) * interpolation;
+		y += (networkY - y) * interpolation;
+		z += (networkZ - z) * interpolation;
+		boolean moving = Math.abs(x - oldX) + Math.abs(y - oldY) > 0.0001f;
+
+		if(moving && walkAnimation != null && !walkAnimation.playing) walkAnimation.loop();
+		if(hurtAnimation != null && hurtAnimation.playing) animateNetwork(hurtAnimation, delta);
+		else if(castAnimation != null && castAnimation.playing) animateNetwork(castAnimation, delta);
+		else if(attackAnimation != null && attackAnimation.playing) animateNetwork(attackAnimation, delta);
+		else if(rangedAttackAnimation != null && rangedAttackAnimation.playing) {
+			animateNetwork(rangedAttackAnimation, delta);
+		}
+		else if(moving && walkAnimation != null) animateNetwork(walkAnimation, delta);
+		tickAttached(level, delta);
+	}
+
+	private void animateNetwork(SpriteAnimation animation, float delta) {
+		HashMap<String, Array<AnimationAction>> actions = animation.actions;
+		try {
+			animation.actions = null;
+			animation.animate(delta, this);
+		}
+		finally {
+			animation.actions = actions;
+		}
 	}
 
 	@Override

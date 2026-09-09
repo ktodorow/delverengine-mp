@@ -48,6 +48,54 @@ import java.util.HashMap;
 import java.util.Random;
 
 public class Player extends Actor {
+	public interface WeaponAttackListener {
+		void onWeaponAttack(Weapon weapon, Vector3 direction);
+
+		default void onWeaponAttack(Weapon weapon, Vector3 direction, float attackPower) {
+			onWeaponAttack(weapon, direction);
+		}
+	}
+
+	public interface HealthAuthorityListener {
+		boolean onHealthIntent(Player player, int amount, DamageType damageType,
+				Entity instigator);
+	}
+
+	private transient WeaponAttackListener weaponAttackListener;
+	private transient HealthAuthorityListener healthAuthorityListener;
+
+	public void setWeaponAttackListener(WeaponAttackListener listener) {
+		weaponAttackListener = listener;
+	}
+
+	public void clearWeaponAttackListener(WeaponAttackListener listener) {
+		if(weaponAttackListener == listener) weaponAttackListener = null;
+	}
+
+	public void notifyWeaponAttack(Weapon weapon, Vector3 direction) {
+		notifyWeaponAttack(weapon, direction, 1f);
+	}
+
+	public void notifyWeaponAttack(Weapon weapon, Vector3 direction, float attackPower) {
+		if(weaponAttackListener != null && weapon != null && direction != null) {
+			weaponAttackListener.onWeaponAttack(weapon, direction.cpy(), attackPower);
+		}
+	}
+
+	public void setHealthAuthorityListener(HealthAuthorityListener listener) {
+		healthAuthorityListener = listener;
+	}
+
+	public void clearHealthAuthorityListener(HealthAuthorityListener listener) {
+		if(healthAuthorityListener == listener) healthAuthorityListener = null;
+	}
+
+	public boolean deferHealthChangeToAuthority(int amount, DamageType damageType,
+			Entity instigator) {
+		return healthAuthorityListener != null
+				&& healthAuthorityListener.onHealthIntent(this, amount, damageType, instigator);
+	}
+
 	/** Player gold amount. */
 	public int gold = 0;
 
@@ -2235,6 +2283,7 @@ public class Player extends Actor {
 	@Override
 	public int takeDamage(int damage, DamageType damageType, Entity instigator) {
         if(!isDead && !godMode) {
+			if(deferHealthChangeToAuthority(damage, damageType, instigator)) return 0;
 			int tookDamage = super.takeDamage(damage, damageType, instigator);
 
 			if(tookDamage < 0)

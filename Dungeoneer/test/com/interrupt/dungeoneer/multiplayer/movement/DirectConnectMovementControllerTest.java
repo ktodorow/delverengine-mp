@@ -1,6 +1,9 @@
 package com.interrupt.dungeoneer.multiplayer.movement;
 
 import com.interrupt.dungeoneer.entities.Player;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
 import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectStatus;
@@ -53,6 +56,11 @@ public class DirectConnectMovementControllerTest {
             return Collections.emptyList();
         }
         @Override public List<MovementSnapshot> getMovementSnapshots() { return snapshots; }
+        @Override public CombatSnapshot getCombatSnapshot() { return null; }
+        @Override public List<CombatPresentationEvent> getCombatPresentationEvents() {
+            return Collections.emptyList();
+        }
+        @Override public long getNextCombatRequestId() { return 1L; }
         @Override public PartyStatusSnapshot getPartyStatus() { return null; }
         @Override public PartyCommunicationState getPartyCommunicationState() {
             return PartyCommunicationState.initial();
@@ -62,6 +70,9 @@ public class DirectConnectMovementControllerTest {
         @Override public boolean isSessionPaused() { return false; }
         @Override public boolean canControlSessionPause() { return false; }
         @Override public void setSessionPaused(boolean paused) { }
+        @Override public void submitCombatAction(long requestId, CombatAction action, String targetId) { }
+        @Override public void submitCombatAction(long requestId, CombatAction action,
+                float aimX, float aimY, float aimZ) { }
         @Override public void submitMovementInput(MovementInputFrame input) { }
         @Override public void close() { }
     }

@@ -4,6 +4,7 @@ import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.math.Vector3;
 import com.interrupt.dungeoneer.Audio;
 import com.interrupt.dungeoneer.entities.*;
+import com.interrupt.dungeoneer.entities.items.Weapon.DamageType;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.Options;
@@ -20,6 +21,8 @@ public class Heal extends Spell {
 	public void doCast(Entity owner, Vector3 direction, Vector3 position) {
 		if(owner instanceof Actor) {
 			Actor caster = (Actor)owner;
+			if(caster instanceof Player && ((Player)caster).deferHealthChangeToAuthority(
+					heal, DamageType.HEALING, owner)) return;
 			caster.hp += heal;
 			if(caster.hp > caster.getMaxHp()) caster.hp = caster.getMaxHp();
 		}

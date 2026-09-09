@@ -65,6 +65,22 @@ public class DesktopLaunchOptionsTest {
     }
 
     @Test
+    public void directConnectAcceptsExplicitOwnedCopyForSharedTutorial() {
+        File archive = new File("C:\\Games\\Delver\\delver.jar");
+        DesktopLaunchOptions host = DesktopLaunchOptions.parse(new String[] {
+                "--direct-host", "--owned-copy=" + archive
+        });
+        DesktopLaunchOptions client = DesktopLaunchOptions.parse(new String[] {
+                "--direct-connect=127.0.0.1", "--owned-copy=" + archive
+        });
+
+        assertTrue(host.directHost);
+        assertEquals(archive, host.ownedCopy);
+        assertEquals("127.0.0.1", client.directConnectAddress);
+        assertEquals(archive, client.ownedCopy);
+    }
+
+    @Test
     public void rejectsConflictingDirectConnectModeAndInvalidPort() {
         assertParseFailure(new String[] { "--direct-host", "--direct-connect=127.0.0.1" },
                 "either --direct-host or --direct-connect");

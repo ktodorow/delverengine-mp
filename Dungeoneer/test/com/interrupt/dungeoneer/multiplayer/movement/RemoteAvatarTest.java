@@ -1,6 +1,7 @@
 package com.interrupt.dungeoneer.multiplayer.movement;
 
 import com.interrupt.dungeoneer.entities.Player;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import org.junit.Test;
 
@@ -44,5 +45,24 @@ public class RemoteAvatarTest {
                 MovementState.IDLE);
         avatar.tick(null, 1f);
         assertEquals(0f, avatar.yOffset, 0f);
+    }
+
+    @Test
+    public void combatPresentationAddsAttackAndDamageReactionsWithoutMovingAvatar() {
+        RemoteAvatar avatar = new RemoteAvatar(new MovementEntityDescriptor(
+                1L, new NetworkEntityId(2L), new ParticipantId("campaign-slot-2"),
+                2, "Friend", "humanoid-2"));
+        avatar.applyNetworkState(1f, 2f, 0.5f, 0f, 0f, 0f, MovementState.IDLE);
+
+        avatar.playCombatAction(CombatAction.MELEE);
+        avatar.playDamageReaction();
+        avatar.tick(null, 1f);
+
+        assertEquals(1f, avatar.x, 0f);
+        assertEquals(2f, avatar.y, 0f);
+        assertEquals(0.5f, avatar.z, 0f);
+        assertTrue(avatar.scale > 1.3f);
+        assertEquals(1f, avatar.color.r, 0f);
+        assertEquals(0.25f, avatar.color.g, 0f);
     }
 }
