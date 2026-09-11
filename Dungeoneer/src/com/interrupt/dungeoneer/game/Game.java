@@ -133,6 +133,8 @@ public class Game {
     protected int saveLoc = 0;
 
     protected float gameTimeScale = 1.0f;
+    private transient float tickWorldTimeScale;
+    public float getTickWorldTimeScale() { return tickWorldTimeScale > 0 ? tickWorldTimeScale : gameTimeScale; }
 
     public Progression progression = null;
 
@@ -552,7 +554,8 @@ public class Game {
 
 	public void tick(float delta) {
 	    // The speed of time can be changed, but we still want to know the original delta
-	    float timeModifiedDelta = delta * gameTimeScale;
+	    tickWorldTimeScale = gameTimeScale;
+        float timeModifiedDelta = delta * tickWorldTimeScale;
 		time += timeModifiedDelta;
 
 		if(messageTimer > 0) messageTimer -= delta;

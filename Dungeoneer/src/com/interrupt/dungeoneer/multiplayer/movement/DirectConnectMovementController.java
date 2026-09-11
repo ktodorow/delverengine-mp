@@ -147,7 +147,7 @@ public final class DirectConnectMovementController {
             long tick = nextInputTick++;
             reconciler.addPrediction(tick, predictionX, predictionY, predictionZ);
             peer.submitMovementInput(new MovementInputFrame(tick, forward, strafe,
-                    player.rot, jump));
+                    player.rot, jump, com.interrupt.dungeoneer.GameManager.renderer.camera.direction.y));
         }
     }
 

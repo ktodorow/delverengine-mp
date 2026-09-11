@@ -1,4 +1,16 @@
 package com.interrupt.dungeoneer.multiplayer.network;
+import com.interrupt.dungeoneer.multiplayer.items.ItemActionResult;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionPresentation;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation;
+
+import com.interrupt.dungeoneer.multiplayer.items.DoorFeedback;
+
+import com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeStatusEffectState;
 
 import com.interrupt.dungeoneer.multiplayer.combat.ProjectileVisual;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementObstacle;
@@ -6,6 +18,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld
 import com.interrupt.dungeoneer.multiplayer.items.AuthoritativeItemWorld;
 import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
 import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
+import com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot;
 import com.interrupt.dungeoneer.multiplayer.items.ItemRequest;
 import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
 import com.interrupt.dungeoneer.GameApplication;
@@ -171,7 +184,18 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private final AuthoritativeItemWorld itemWorld = new AuthoritativeItemWorld();
     private final List<ItemRequest> pendingItemRequests = new ArrayList<ItemRequest>();
     private final Map<Long, Long> publishedItemRevisions = new LinkedHashMap<Long, Long>();
+    private final Map<String, ActorEffectsSnapshot> monsterEffects = new LinkedHashMap<String, ActorEffectsSnapshot>();
+    private final Map<String, Long> effectPublishTicks = new LinkedHashMap<String, Long>();
+    private final Map<String, ActorEffectsSnapshot> publishedMonsterEffects = new LinkedHashMap<String, ActorEffectsSnapshot>();
+    private long effectSequence;
+    private final Map<Long, NativeDynamicState> nativeDynamicStates = new LinkedHashMap<Long, NativeDynamicState>();
+    private final Map<Long, NativeDynamicState> publishedNativeDynamicStates = new LinkedHashMap<Long, NativeDynamicState>();
+    private final Map<Long, Long> nativeDynamicPublishTicks = new LinkedHashMap<Long, Long>();
+    private long nativeDynamicSequence;
+
     private final Map<Long, DoorSnapshot> doorSnapshots = new LinkedHashMap<Long, DoorSnapshot>();
+    private final Map<Long, BreakableSnapshot> breakableSnapshots =
+            new LinkedHashMap<Long, BreakableSnapshot>();
     private long nextLifecycleSequence;
     private long nextPartyStatusSequence;
     private long nextPartyChatSequence;
@@ -266,14 +290,29 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 });
 
         if(requestedPort == 0) {
-            ChannelFuture udpBind = udp.bind(new InetSocketAddress(0)).syncUninterruptibly();
-            requireSuccess(udpBind, "Could not bind Direct Connect UDP listener");
-            udpListener = udpBind.channel();
-            boundPort = ((InetSocketAddress)udpListener.localAddress()).getPort();
-
-            ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(boundPort)).syncUninterruptibly();
-            requireSuccess(tcpBind, "Could not bind Direct Connect TCP listener");
-            tcpListener = tcpBind.channel();
+            Throwable lastFailure = null;
+            for(int attempt = 0; attempt < 16; attempt++) {
+                ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(0)).syncUninterruptibly();
+                requireSuccess(tcpBind, "Could not bind Direct Connect TCP listener");
+                Channel candidateTcp = tcpBind.channel();
+                int candidatePort = ((InetSocketAddress)candidateTcp.localAddress()).getPort();
+                ChannelFuture udpBind = udp.bind(new InetSocketAddress(candidatePort));
+                udpBind.awaitUninterruptibly();
+                if(udpBind.isSuccess()) {
+                    tcpListener = candidateTcp;
+                    udpListener = udpBind.channel();
+                    boundPort = candidatePort;
+                    break;
+                }
+                lastFailure = udpBind.cause();
+                closeChannel(udpBind.channel());
+                closeChannel(candidateTcp);
+            }
+            if(tcpListener == null || udpListener == null) {
+                throw new IllegalStateException(
+                        "Could not reserve one Direct Connect TCP and UDP port after 16 attempts.",
+                        lastFailure);
+            }
         }
         else {
             ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(requestedPort)).syncUninterruptibly();
@@ -690,13 +729,20 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private synchronized void itemAction(ChannelHandlerContext context,
             DirectConnectWire.ItemRequestMessage message) {
         RemoteConnection connection = activeConnection(context, message.sessionId, "Item action");
-        if(connection == null || connection.reconnectGrace != null || isSessionPaused()) return;
+        if(connection == null || connection.reconnectGrace != null) return;
+        if(isSessionPaused()) {
+            publishItemActionResult(connection.movementDescriptor.getParticipantId(),
+                    new ItemActionResult(message.requestId, message.entityId, false)); return;
+        }
         enqueueItemRequest(new ItemRequest(connection.movementDescriptor.getParticipantId(),
-                message.requestId, message.action, message.entityId, message.condition, message.quantity));
+                message.requestId, message.action, message.entityId, message.condition, message.quantity,
+                message.hasAim, message.aimX, message.aimY, message.aimZ));
     }
 
     private void enqueueItemRequest(ItemRequest request) {
         if(pendingItemRequests.size() < 256) pendingItemRequests.add(request);
+        else publishItemActionResult(request.getParticipantId(), new ItemActionResult(
+                request.requestId, request.entityId, false));
     }
 
     /** Render-thread bridge drains bounded intents; it alone touches native floor objects. */
@@ -725,10 +771,20 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     @Override
     public synchronized void submitItemAction(long requestId, ItemAction action, long entityId,
             int condition, int quantity) {
+        submitItemAction(requestId, action, entityId, condition, quantity,
+                false, 0f, 0f, 0f);
+    }
+
+    @Override
+    public synchronized void submitItemAction(long requestId, ItemAction action, long entityId,
+            int condition, int quantity, boolean hasAim, float aimX, float aimY, float aimZ) {
         MovementEntityDescriptor descriptor = hostMovementDescriptor();
-        if(descriptor == null || !sessionStarted || isSessionPaused()) return;
+        if(descriptor == null || !sessionStarted) return;
+        if(isSessionPaused()) {
+            publishItemActionResult(descriptor.getParticipantId(), new ItemActionResult(requestId, entityId, false)); return;
+        }
         enqueueItemRequest(new ItemRequest(descriptor.getParticipantId(), requestId, action,
-                entityId, condition, quantity));
+                entityId, condition, quantity, hasAim, aimX, aimY, aimZ));
     }
 
     @Override
@@ -736,10 +792,153 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         return new ArrayList<DoorSnapshot>(doorSnapshots.values());
     }
 
-    public void setDoorObstacles(java.util.List<MovementObstacle> obstacles) {
+    @Override
+    public synchronized List<BreakableSnapshot> getBreakableSnapshots() {
+        return new ArrayList<BreakableSnapshot>(breakableSnapshots.values());
+    }
+
+    public void setWorldObstacles(java.util.List<MovementObstacle> obstacles) {
         if(movementWorld instanceof LevelMovementCollisionWorld) {
             ((LevelMovementCollisionWorld)movementWorld)
-                    .setDoorObstacles(obstacles);
+                    .setWorldObstacles(obstacles);
+        }
+    }
+
+    @Override public synchronized void failNativePresentation(String reason) {
+        String diagnostic = boundedReason("Native presentation compatibility failure: " + reason);
+        setSessionPaused(true);
+        broadcast(new ServerDisconnect(diagnostic));
+        status = status(DirectConnectPhase.FAILED, diagnostic, null, null);
+    }
+
+    private long nativeWorldGeneration = 1;
+    @Override public synchronized long getNativeWorldGeneration() { return nativeWorldGeneration; }
+    @Override public synchronized void beginNativeWorld() {
+        nativeWorldGeneration++;
+        monsterEffects.clear(); publishedMonsterEffects.clear(); effectPublishTicks.clear();
+        nativeDynamicStates.clear(); publishedNativeDynamicStates.clear(); nativeDynamicPublishTicks.clear();
+        doorSnapshots.clear();
+        breakableSnapshots.clear();
+        broadcast(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
+    }
+
+    private long nativeAnimationCueSequence;
+    @Override public synchronized void publishNativeAnimationCue(com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationCue cue) {
+        broadcast(new DirectConnectWire.NativeAnimationCueMessage(sessionId, ++nativeAnimationCueSequence, cue, nativeWorldGeneration));
+    }
+
+    private long nativeExplosionSequence;
+    @Override public synchronized void publishNativeExplosion(NativeExplosionPresentation presentation) {
+        broadcast(new DirectConnectWire.NativeExplosionMessage(sessionId, ++nativeExplosionSequence, presentation, nativeWorldGeneration));
+    }
+
+    private long nativeDynamicCueSequence;
+    @Override public synchronized void publishNativeDynamicCue(NativeDynamicCue cue) {
+        if(cue == null) throw new IllegalArgumentException("Native dynamic cue is required.");
+        broadcast(new DirectConnectWire.NativeDynamicCueMessage(sessionId,
+                ++nativeDynamicCueSequence, cue, nativeWorldGeneration));
+    }
+
+    private long nativeSpellPresentationSequence;
+    @Override public synchronized void publishNativeSpellPresentation(
+            NativeSpellPresentation presentation) {
+        if(presentation == null) {
+            throw new IllegalArgumentException("Native spell presentation is required.");
+        }
+        broadcast(new DirectConnectWire.NativeSpellPresentationMessage(sessionId,
+                ++nativeSpellPresentationSequence, presentation, nativeWorldGeneration));
+    }
+
+    private long nativeMeleePresentationSequence;
+    @Override public synchronized void publishNativeMeleePresentation(
+            NativeMeleePresentation presentation) {
+        if(presentation == null) {
+            throw new IllegalArgumentException("Native melee presentation is required.");
+        }
+        broadcast(new DirectConnectWire.NativeMeleePresentationMessage(sessionId,
+                ++nativeMeleePresentationSequence, presentation, nativeWorldGeneration));
+    }
+
+    private long nativeRangedPresentationSequence;
+    @Override public synchronized void publishNativeRangedPresentation(
+            NativeRangedPresentation presentation) {
+        if(presentation == null) {
+            throw new IllegalArgumentException("Native ranged presentation is required.");
+        }
+        broadcast(new DirectConnectWire.NativeRangedPresentationMessage(sessionId,
+                ++nativeRangedPresentationSequence, presentation, nativeWorldGeneration));
+    }
+
+    @Override public synchronized List<NativeDynamicState> getNativeDynamicStates() {
+        return new ArrayList<NativeDynamicState>(nativeDynamicStates.values());
+    }
+
+    @Override public synchronized void synchronizeNativeDynamicState(NativeDynamicState state) {
+        if(state == null) throw new IllegalArgumentException("Native dynamic state is required.");
+        if(state.active) {
+            if(!nativeDynamicStates.containsKey(state.id)
+                    && nativeDynamicStates.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES)
+                throw new IllegalArgumentException("Native dynamic entity count exceeded.");
+            nativeDynamicStates.put(state.id, state);
+        }
+        else nativeDynamicStates.remove(state.id);
+        NativeDynamicState published = publishedNativeDynamicStates.get(state.id);
+        if(state.sameState(published)) return;
+        long tick = currentHostTick();
+        Long last = nativeDynamicPublishTicks.get(state.id);
+        if(state.active && published != null && last != null && tick <= last) return;
+        publishNativeDynamicState(state, tick);
+    }
+
+    @Override public synchronized void applyNativeParticipantImpulse(ParticipantId participant,
+            float x, float y, float z) {
+        if(movementSimulation != null) movementSimulation.applyNativeImpulse(participant, x, y, z);
+    }
+
+    @Override public synchronized void setNativeParticipantPosition(ParticipantId participant,
+            float x, float y, float z) {
+        if(movementSimulation != null) movementSimulation.setNativePosition(participant, x, y, z);
+    }
+
+    private void publishNativeDynamicState(NativeDynamicState state, long tick) {
+        nativeDynamicPublishTicks.put(state.id, tick);
+        if(state.active) publishedNativeDynamicStates.put(state.id, state);
+        else {
+            publishedNativeDynamicStates.remove(state.id);
+            nativeDynamicPublishTicks.remove(state.id);
+        }
+        broadcast(new DirectConnectWire.NativeDynamicStateMessage(sessionId,
+                ++nativeDynamicSequence, state, nativeWorldGeneration));
+    }
+
+    public synchronized void publishItemActionResult(ParticipantId participant, ItemActionResult result) {
+        MovementEntityDescriptor local = hostMovementDescriptor();
+        if(local != null && local.getParticipantId().equals(participant)) {
+            if(itemActionResults.size() >= 128) { failNativePresentation("Item action response queue exceeded."); return; }
+            itemActionResults.addLast(result); return;
+        }
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.movementDescriptor != null && connection.reconnectGrace == null
+                    && connection.channel.isActive()
+                    && connection.movementDescriptor.getParticipantId().equals(participant)) {
+                connection.channel.writeAndFlush(new DirectConnectWire.ItemActionResultMessage(sessionId, result)); return;
+            }
+        }
+    }
+
+    public synchronized void publishDoorFeedback(ParticipantId participant, DoorFeedback feedback) {
+        MovementEntityDescriptor local = hostMovementDescriptor();
+        if(local != null && local.getParticipantId().equals(participant)) {
+            queueDoorFeedback(feedback);
+            return;
+        }
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.movementDescriptor != null && connection.reconnectGrace == null
+                    && connection.channel.isActive()
+                    && connection.movementDescriptor.getParticipantId().equals(participant)) {
+                connection.channel.writeAndFlush(new DirectConnectWire.DoorFeedbackMessage(sessionId, feedback));
+                return;
+            }
         }
     }
 
@@ -748,7 +947,84 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         broadcast(new DirectConnectWire.DoorStateMessage(sessionId, state));
     }
 
+    public synchronized void publishBreakable(BreakableSnapshot state) {
+        breakableSnapshots.put(state.entityId, state);
+        broadcast(new DirectConnectWire.BreakableStateMessage(sessionId, state));
+    }
+
     private long publishedKeyRevision = -1L;
+
+    private final java.util.ArrayDeque<DoorFeedback> doorFeedback = new java.util.ArrayDeque<DoorFeedback>();
+    @Override public synchronized List<DoorFeedback> drainDoorFeedback() {
+        List<DoorFeedback> result = new ArrayList<DoorFeedback>(doorFeedback);
+        doorFeedback.clear();
+        return result;
+    }
+    private void queueDoorFeedback(DoorFeedback feedback) {
+        if(doorFeedback.size() == 64) doorFeedback.removeFirst();
+        doorFeedback.addLast(feedback);
+    }
+
+    private final java.util.ArrayDeque<ItemActionResult> itemActionResults = new java.util.ArrayDeque<ItemActionResult>();
+    @Override public synchronized List<ItemActionResult> drainItemActionResults() {
+        List<ItemActionResult> results = new ArrayList<ItemActionResult>(itemActionResults);
+        itemActionResults.clear(); return results;
+    }
+
+    @Override public synchronized List<ActorEffectsSnapshot> getActorEffects() {
+        return new ArrayList<ActorEffectsSnapshot>(monsterEffects.values());
+    }
+
+    @Override public synchronized void synchronizeNativeActorEffects(ActorEffectsSnapshot state) {
+        if(state.monsterId.startsWith("participant:") && movementSimulation != null) {
+            float speed = 1f;
+            for(NativeStatusEffectState effect : state.effects) speed *= effect.speed;
+            movementSimulation.setNativeSpeedModifier(new ParticipantId(
+                    state.monsterId.substring("participant:".length())), speed);
+            movementSimulation.setNativeTimeScale(new ParticipantId(
+                    state.monsterId.substring("participant:".length())), state.actorTimeScale);
+            movementSimulation.setNativeFlight(new ParticipantId(
+                    state.monsterId.substring("participant:".length())), state.floating, state.flightSpeed);
+        }
+        ActorEffectsSnapshot previous = monsterEffects.get(state.monsterId);
+        if(previous == null && monsterEffects.size() >= DirectConnectProtocol.MAX_MONSTERS + 4) {
+            throw new IllegalArgumentException("Native monster effects exceed encounter bound.");
+        }
+        ActorEffectsSnapshot accepted = state.sameState(previous) ? previous
+                : state.withSequence(++effectSequence);
+        monsterEffects.put(state.monsterId, accepted);
+        ActorEffectsSnapshot published = publishedMonsterEffects.get(state.monsterId);
+        if(accepted.sameState(published)) return;
+        long tick = currentHostTick();
+        Long last = effectPublishTicks.get(state.monsterId);
+        // Coalesce only decreasing timers. Refresh/configuration changes are immediately visible.
+        boolean countdownOnly = published != null && published.invisible == accepted.invisible
+                && published.floating == accepted.floating && published.flightSpeed == accepted.flightSpeed
+                && published.actorTimeScale == accepted.actorTimeScale
+                && published.worldTimeScale == accepted.worldTimeScale
+                && published.effects.size() == accepted.effects.size()
+                && (published.animation == null ? accepted.animation == null
+                        : accepted.animation != null && published.animation.kind == accepted.animation.kind
+                        && published.animation.instanceId == accepted.animation.instanceId
+                        && published.animation.playing == accepted.animation.playing);
+        if(countdownOnly) {
+            for(int i = 0; i < accepted.effects.size(); i++) {
+                NativeStatusEffectState a = accepted.effects.get(i), b = published.effects.get(i);
+                if(a.instanceId != b.instanceId || a.kind != b.kind || a.remaining > b.remaining
+                        || a.pulses != b.pulses || a.speed != b.speed
+                        || a.particles != b.particles || !a.shader.equals(b.shader)) {
+                    countdownOnly = false; break;
+                }
+            }
+        }
+        if(!countdownOnly || last == null || tick - last >= 3) publishMonsterEffects(accepted, tick);
+    }
+
+    private void publishMonsterEffects(ActorEffectsSnapshot state, long tick) {
+        effectPublishTicks.put(state.monsterId, tick);
+        publishedMonsterEffects.put(state.monsterId, state);
+        broadcast(new DirectConnectWire.MonsterEffectsMessage(sessionId, state, true, nativeWorldGeneration));
+    }
 
     @Override public int getPartyKeys() { return itemWorld.getPartyKeys(); }
 
@@ -1084,10 +1360,22 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             connection.channel.write(new CombatStateMessage(sessionId,
                     encounter.getSnapshot(session == null ? 0L : session.getHostTick())));
         }
+        connection.channel.write(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
+        for(ActorEffectsSnapshot effects : getActorEffects()) {
+            connection.channel.write(new DirectConnectWire.MonsterEffectsMessage(sessionId, effects, false, nativeWorldGeneration));
+        }
+        for(NativeDynamicState state : getNativeDynamicStates()) {
+            connection.channel.write(new DirectConnectWire.NativeDynamicStateMessage(sessionId,
+                    ++nativeDynamicSequence, state, nativeWorldGeneration));
+        }
         connection.channel.write(new DirectConnectWire.PartyKeysMessage(sessionId,
                 itemWorld.getKeyRevision(), itemWorld.getPartyKeys()));
         for(DoorSnapshot door : doorSnapshots.values()) {
             connection.channel.write(new DirectConnectWire.DoorStateMessage(sessionId, door));
+        }
+        for(BreakableSnapshot breakable : breakableSnapshots.values()) {
+            connection.channel.write(
+                    new DirectConnectWire.BreakableStateMessage(sessionId, breakable));
         }
         for(PhysicalItemState item : itemWorld.snapshot()) {
             connection.channel.write(new DirectConnectWire.ItemStateMessage(sessionId, item));
@@ -1304,6 +1592,17 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         if(!sessionStarted || closing.get() || isSessionPaused() == paused) return;
         PauseSessionState state = new PauseSessionState(++nextPauseSessionSequence, paused);
         partyCommunication = partyCommunication.withPauseSession(state);
+        if(paused) {
+            for(ActorEffectsSnapshot effects : monsterEffects.values()) {
+                if(!effects.sameState(publishedMonsterEffects.get(effects.monsterId))) {
+                    publishMonsterEffects(effects, currentHostTick());
+                }
+            }
+            for(NativeDynamicState dynamicState : nativeDynamicStates.values()) {
+                if(!dynamicState.sameState(publishedNativeDynamicStates.get(dynamicState.id)))
+                    publishNativeDynamicState(dynamicState, currentHostTick());
+            }
+        }
         broadcast(new PauseSessionStateMessage(sessionId, state));
     }
 
@@ -1457,6 +1756,19 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         if(encounter != null) {
             encounter.recordNativeMonsterAttacker(currentHostTick(), monsterId, attackerId);
         }
+    }
+
+    @Override public boolean canApplyNativeParticipantEffect(ParticipantId participant) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        return !isSessionPaused() && encounter != null
+                && encounter.canApplyNativeParticipantEffect(participant);
+    }
+
+    @Override public void applyNativeParticipantDamage(String sourceId, ParticipantId participant,
+            int amount, float x, float y, float z) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null && !isSessionPaused()) encounter.applyNativeParticipantDamage(
+                currentHostTick(), sourceId, participant, amount, x, y, z, nativeCombatOutput);
     }
 
     @Override

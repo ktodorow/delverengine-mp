@@ -92,7 +92,7 @@ public class Audio {
 			if(loaded != null) loadedSounds.put(filename, loaded);
 			return loaded;
 		} catch (Exception e) {
-			Gdx.app.log("DelverAudio", "Error loading " + filename);
+			if(Gdx.app != null) Gdx.app.log("DelverAudio", "Error loading " + filename);
 			return null;
 		}
 	}
@@ -447,7 +447,7 @@ public class Audio {
 				Game.instance.level.non_collidable_entities.add(p);
 			}
 		} catch (Exception ex) {
-			Gdx.app.log("DelverAudio", "Couldn't play positioned sound: " + filename);
+			if(Gdx.app != null) Gdx.app.log("DelverAudio", "Couldn't play positioned sound: " + filename);
 		}
 	}
 	
@@ -470,7 +470,7 @@ public class Audio {
 				Game.instance.level.non_collidable_entities.add(p);
 			}
 		} catch (Exception ex) {
-			Gdx.app.log("DelverAudio", "Couldn't play positioned sound: " + filename);
+			if(Gdx.app != null) Gdx.app.log("DelverAudio", "Couldn't play positioned sound: " + filename);
 		}
 	}
 	

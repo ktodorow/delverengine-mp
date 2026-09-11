@@ -2,10 +2,14 @@ package com.interrupt.dungeoneer.multiplayer.items;
 
 import com.interrupt.dungeoneer.entities.items.Key;
 import com.interrupt.dungeoneer.entities.items.Potion;
+import com.interrupt.dungeoneer.entities.items.Food;
+import com.interrupt.dungeoneer.entities.items.Scroll;
 import com.interrupt.dungeoneer.entities.items.Gold;
 import com.interrupt.dungeoneer.entities.projectiles.Missile;
+import com.badlogic.gdx.math.Vector3;
 import com.badlogic.gdx.utils.Array;
 import com.interrupt.dungeoneer.entities.Entity;
+import com.interrupt.dungeoneer.entities.Breakable;
 import com.interrupt.dungeoneer.entities.Door;
 import com.interrupt.dungeoneer.entities.triggers.Trigger;
 import com.interrupt.dungeoneer.entities.triggers.BasicTrigger;
@@ -39,6 +43,7 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.WeakHashMap;
 
 /** Native inventory/world bridge. Only this render-thread boundary mutates engine Items. */
 public final class DirectConnectItemController implements Player.ItemAuthorityListener, CombatWeaponResolver {
@@ -48,11 +53,17 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     private final Map<String, ItemModification> modifications = new LinkedHashMap<String, ItemModification>();
     private final Map<Long, Item> nativeItems = new LinkedHashMap<Long, Item>();
     private final Map<Item, Long> itemIds = new IdentityHashMap<Item, Long>();
+    private final Map<Entity, Long> transientItemIds = new WeakHashMap<Entity, Long>();
     private final Map<Long, Long> applied = new LinkedHashMap<Long, Long>();
     private final Map<Long, Long> lastPickupAttempts = new LinkedHashMap<Long, Long>();
     private final Map<Long, Entity> objects = new LinkedHashMap<Long, Entity>();
     private final Map<Entity, Long> objectIds = new IdentityHashMap<Entity, Long>();
     private final Map<Long, DoorSnapshot> publishedDoors = new LinkedHashMap<Long, DoorSnapshot>();
+    private final Map<Long, DoorSnapshot> appliedDoors = new LinkedHashMap<Long, DoorSnapshot>();
+    private final Map<Long, BreakableSnapshot> publishedBreakables =
+            new LinkedHashMap<Long, BreakableSnapshot>();
+    private final Map<Long, BreakableSnapshot> appliedBreakables =
+            new LinkedHashMap<Long, BreakableSnapshot>();
     private final Map<Long, String> reportedSpending = new LinkedHashMap<Long, String>();
     private final Map<Long, String> reportedEquipment = new LinkedHashMap<Long, String>();
     private final Map<Long, Placement> pendingPlacements = new LinkedHashMap<Long, Placement>();
@@ -63,8 +74,51 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             this.inventorySlot = inventorySlot; this.equipmentSlot = equipmentSlot;
         }
     }
+    private final Map<Long, Long> pendingConsumption = new LinkedHashMap<Long, Long>();
+    private final Map<Long, Vector3> pendingConsumptionAim = new LinkedHashMap<Long, Vector3>();
+    public interface ConsumableConsumer {
+        boolean consume(ParticipantId participant, Item item, Vector3 direction);
+    }
+    private ConsumableConsumer consumableConsumer;
+
+    public void setConsumableConsumer(ConsumableConsumer consumer) {
+        consumableConsumer = consumer;
+    }
+
+    @Override public boolean consume(Item item) {
+        return consume(item, null);
+    }
+
+    @Override public boolean consume(Item item, Vector3 direction) {
+        if(!(item instanceof Potion) && !(item instanceof Food) && !(item instanceof Scroll)) return false;
+        if(item instanceof Scroll && direction == null) return true;
+        Long id = itemIds.get(item);
+        if(id == null || nextRequest == Long.MAX_VALUE || peer.isSessionPaused()) return true;
+        PhysicalItemState state = null;
+        for(PhysicalItemState candidate : peer.getPhysicalItems()) if(candidate.entityId == id) { state = candidate; break; }
+        if(state == null || state.consumed || !localId.equals(state.owner)) return true;
+        if(!pendingConsumption.containsKey(id)) {
+            long request = nextRequest++;
+            pendingConsumption.put(id, request);
+            if(direction != null) pendingConsumptionAim.put(id, direction.cpy());
+            peer.submitItemAction(request, ItemAction.CONSUME,
+                    id, state.properties.condition, state.properties.quantity,
+                    direction != null, direction == null ? 0f : direction.x,
+                    direction == null ? 0f : direction.y,
+                    direction == null ? 0f : direction.z);
+        }
+        return true;
+    }
+
+    @Override public boolean controlsAttackAmmo() { return true; }
+
+    @Override public Missile takeAttackAmmo() { return takeOwnedMissile(localId); }
+
     private long doorRevision;
+    private long breakableRevision;
     private Game game;
+    private Level objectLevel;
+    private long objectGeneration = -1L;
     private ParticipantId localId;
     private long nextRequest;
     private long frame;
@@ -77,14 +131,28 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     public void prepare(Game current) {
         if(current == null || current.player == null || current.level == null) return;
         if(game == null) attach(current);
+        if(objectLevel != current.level) attachWorldObjects();
+        long generation = peer.getNativeWorldGeneration();
+        if(objectGeneration != generation) {
+            objectGeneration = generation;
+            publishedDoors.clear();
+            appliedDoors.clear();
+            publishedBreakables.clear();
+            appliedBreakables.clear();
+        }
         frame++;
         if(host != null) {
             discoverWorldItems();
             for(ItemRequest request : host.drainItemRequests()) {
                 ParticipantContext participant = participant(request.getParticipantId());
-                if(participant == null) continue;
+                if(participant == null) {
+                    host.publishItemActionResult(request.getParticipantId(), new ItemActionResult(
+                            request.requestId, request.entityId, false)); continue;
+                }
                 AuthoritativeItemWorld.Outcome result = host.getItemWorld().apply(request,
                         participant, boundary);
+                host.publishItemActionResult(request.getParticipantId(), new ItemActionResult(
+                        request.requestId, request.entityId, result == AuthoritativeItemWorld.Outcome.ACCEPTED));
                 if(result == AuthoritativeItemWorld.Outcome.ACCEPTED
                         && request.action == ItemAction.PICKUP) {
                     Item item = nativeItems.get(request.entityId);
@@ -94,11 +162,38 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 }
             }
         }
+        for(ItemActionResult result : peer.drainItemActionResults()) {
+            Long pending = pendingConsumption.get(result.entityId);
+            if(!result.accepted && pending != null && pending == result.requestId) {
+                pendingConsumption.remove(result.entityId);
+                pendingConsumptionAim.remove(result.entityId);
+            }
+        }
+        for(DoorFeedback feedback : peer.drainDoorFeedback()) {
+            Game.ShowMessage(com.interrupt.managers.StringManager.get(feedback.localizationKey), 3, 1f);
+        }
         applyStates();
         game.player.keys = peer.getPartyKeys();
         if(host == null) for(DoorSnapshot door : peer.getDoorSnapshots()) {
             Entity entity = objects.get(door.entityId);
-            if(entity instanceof Door) ((Door)entity).applyNetworkSnapshot(door);
+            DoorSnapshot previous = appliedDoors.get(door.entityId);
+            if(entity instanceof Door && (previous == null || previous.revision < door.revision)) {
+                if(previous != null && previous.active && !door.active)
+                    ((Door)entity).playNetworkBreakPresentation(game.level);
+                ((Door)entity).applyNetworkSnapshot(door);
+                appliedDoors.put(door.entityId, door);
+            }
+        }
+        if(host == null) for(BreakableSnapshot state : peer.getBreakableSnapshots()) {
+            Entity entity = objects.get(state.entityId);
+            BreakableSnapshot previous = appliedBreakables.get(state.entityId);
+            if(entity instanceof Breakable
+                    && (previous == null || previous.revision < state.revision)) {
+                if(previous != null && previous.active && !state.active)
+                    ((Breakable)entity).playNetworkBreakPresentation(game.level);
+                ((Breakable)entity).applyNetworkSnapshot(state);
+                appliedBreakables.put(state.entityId, state);
+            }
         }
     }
 
@@ -110,27 +205,44 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             for(Map.Entry<Long, Item> entry : nativeItems.entrySet()) {
                 Item item = entry.getValue();
                 PhysicalItemState state = host.getItemWorld().get(entry.getKey());
-                if(state != null && !state.consumed && state.owner == null && item.isActive) {
-                    host.getItemWorld().move(state.entityId, item.x, item.y, item.z);
+                if(state != null && !state.consumed && state.owner == null) {
+                    if(item.isActive) host.getItemWorld().move(state.entityId, item.x, item.y, item.z);
+                    else host.getItemWorld().destroyWorldItem(state.entityId);
                 }
             }
             host.publishPhysicalItems();
             List<MovementObstacle> obstacles =
                     new ArrayList<MovementObstacle>();
             for(Map.Entry<Long, Entity> entry : objects.entrySet()) {
-                if(!(entry.getValue() instanceof Door)) continue;
-                Door door = (Door)entry.getValue();
-                if(door.isActive && door.isSolid) obstacles.add(
-                        new MovementObstacle(
-                                door.x, door.y, door.z, door.collision.x, door.collision.y, door.collision.z));
-                DoorSnapshot state = ((Door)entry.getValue()).snapshot(entry.getKey(), doorRevision + 1);
-                DoorSnapshot previous = publishedDoors.get(entry.getKey());
-                if(previous != null && sameDoor(previous, state)) continue;
-                doorRevision++;
-                publishedDoors.put(entry.getKey(), state);
-                host.publishDoor(state);
+                Entity entity = entry.getValue();
+                if(entity.isActive && entity.isSolid
+                        && (entity instanceof Door || entity instanceof Breakable)) {
+                    obstacles.add(new MovementObstacle(entity.x, entity.y, entity.z,
+                            entity.collision.x, entity.collision.y, entity.collision.z));
+                }
+                if(entity instanceof Door) {
+                    DoorSnapshot state = ((Door)entity).snapshot(
+                            entry.getKey(), doorRevision + 1);
+                    DoorSnapshot previous = publishedDoors.get(entry.getKey());
+                    if(previous != null && sameDoor(previous, state)) continue;
+                    doorRevision++;
+                    publishedDoors.put(entry.getKey(), state);
+                    host.publishDoor(state);
+                }
+                else if(entity instanceof Breakable) {
+                    Breakable breakable = (Breakable)entity;
+                    // Let native tick run destruction, loot, trigger, and gib once on Host.
+                    if(breakable.isActive && breakable.hp <= 0) continue;
+                    BreakableSnapshot state = breakable.snapshot(
+                            entry.getKey(), breakableRevision + 1);
+                    BreakableSnapshot previous = publishedBreakables.get(entry.getKey());
+                    if(previous != null && sameBreakable(previous, state)) continue;
+                    breakableRevision++;
+                    publishedBreakables.put(entry.getKey(), state);
+                    host.publishBreakable(state);
+                }
             }
-            host.setDoorObstacles(obstacles);
+            host.setWorldObstacles(obstacles);
         }
     }
 
@@ -149,24 +261,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         remember(new Key());
         remember(new Missile());
         catalogue(game.itemManager);
-        List<Entity> interactable = entities();
-        java.util.Collections.sort(interactable, new java.util.Comparator<Entity>() {
-            public int compare(Entity a, Entity b) {
-                int value = a.getClass().getName().compareTo(b.getClass().getName());
-                if(value == 0) value = Float.compare(a.x, b.x);
-                if(value == 0) value = Float.compare(a.y, b.y);
-                if(value == 0) value = Float.compare(a.z, b.z);
-                return value;
-            }
-        });
-        long objectId = 1000000L;
-        for(Entity entity : interactable) {
-            if(entity instanceof Door || entity instanceof Trigger
-                    || entity instanceof BasicTrigger || entity instanceof ButtonModel) {
-                objects.put(objectId, entity);
-                objectIds.put(entity, objectId++);
-            }
-        }
+        attachWorldObjects();
+        objectGeneration = peer.getNativeWorldGeneration();
         List<Item> starters = new ArrayList<Item>();
         for(Item item : game.player.inventory) if(item != null) {
             remember(item);
@@ -201,6 +297,30 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             for(Entity entity : entities()) if(entity instanceof Item) entity.isActive = false;
         }
         game.player.setItemAuthorityListener(this);
+    }
+
+    private void attachWorldObjects() {
+        objectLevel = game.level;
+        objects.clear();
+        objectIds.clear();
+        List<Entity> interactable = entities();
+        java.util.Collections.sort(interactable, new java.util.Comparator<Entity>() {
+            public int compare(Entity a, Entity b) {
+                int value = a.getClass().getName().compareTo(b.getClass().getName());
+                if(value == 0) value = Float.compare(a.x, b.x);
+                if(value == 0) value = Float.compare(a.y, b.y);
+                if(value == 0) value = Float.compare(a.z, b.z);
+                return value;
+            }
+        });
+        long objectId = 1000000L;
+        for(Entity entity : interactable) {
+            if(entity instanceof Door || entity instanceof Breakable || entity instanceof Trigger
+                    || entity instanceof BasicTrigger || entity instanceof ButtonModel) {
+                objects.put(objectId, entity);
+                objectIds.put(entity, objectId++);
+            }
+        }
     }
 
     private void discoverWorldItems() {
@@ -253,6 +373,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 nativeItems.put(state.entityId, item);
                 itemIds.put(item, state.entityId);
             }
+            if(state.owner != null) item.multiplayerDamageSource = state.owner.getValue();
             boolean ownedLocally = localId.equals(state.owner);
             boolean alreadyOwnedLocally = ownedLocally && game.player.ownsPhysicalItem(item);
             int condition = alreadyOwnedLocally ? Math.min(item.itemCondition.ordinal(),
@@ -275,7 +396,15 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 game.player.removeAuthoritativeItem(item);
             }
             if(state.consumed) {
-                item.isActive = false;
+                // A fired standalone Missile keeps its physical identity while dynamic
+                // authority owns its in-flight lifetime. Inventory tombstone still removes it.
+                if(!item.nativePresentationReplica) item.isActive = false;
+                if(pendingConsumption.remove(state.entityId) != null) {
+                    if(item instanceof Potion) ((Potion)item).presentDrink(game.player);
+                    else if(item instanceof Food) ((Food)item).presentEat(game.player);
+                    else if(item instanceof Scroll) ((Scroll)item).presentRead(game.player, host == null);
+                    pendingConsumptionAim.remove(state.entityId);
+                }
             }
             else if(state.owner == null) {
                 boolean newlyDropped = !item.isActive || !game.level.entities.contains(item, true);
@@ -464,6 +593,14 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             }
             return false;
         }
+        public boolean consumeItem(ItemRequest request, ParticipantContext participant) {
+            Item item = nativeItems.get(request.entityId);
+            boolean handled = item instanceof Potion || item instanceof Food || item instanceof Scroll;
+            Vector3 direction = request.hasAim
+                    ? new Vector3(request.aimX, request.aimY, request.aimZ) : null;
+            return !handled || consumableConsumer != null
+                    && consumableConsumer.consume(participant.getParticipantId(), item, direction);
+        }
         public boolean canReach(ParticipantContext participant, float x, float y, float z) {
             return reachable(participant, x, y, null);
         }
@@ -475,7 +612,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             if(dx * dx + dy * dy > 1.21f
                     || Math.abs(participant.getCharacter().getZ() - entity.z) > 1f
                     || !reachable(participant, entity.x, entity.y, entity)) return false;
-            if(entity instanceof Door) ((Door)entity).use(participant, () -> host.getItemWorld().spendPartyKey());
+            if(entity instanceof Door) ((Door)entity).use(participant, () -> host.getItemWorld().spendPartyKey(),
+                    feedback -> host.publishDoorFeedback(participant.getParticipantId(), feedback));
             else if(entity instanceof Trigger) {
                 Trigger trigger = (Trigger)entity;
                 if(trigger.triggerType != Trigger.TriggerType.USE) return false;
@@ -553,10 +691,75 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 && a.rotation == b.rotation && a.animation == b.animation;
     }
 
+    private static boolean sameBreakable(BreakableSnapshot a, BreakableSnapshot b) {
+        return a.hp == b.hp && a.active == b.active && a.solid == b.solid
+                && a.x == b.x && a.y == b.y && a.z == b.z
+                && a.velocityX == b.velocityX && a.velocityY == b.velocityY
+                && a.velocityZ == b.velocityZ && a.rotationX == b.rotationX
+                && a.rotationY == b.rotationY && a.rotationZ == b.rotationZ;
+    }
+
+    @Override public void synchronizeEquipment(ParticipantId participant, Player player) {
+        player.equippedItems.clear();
+        for(PhysicalItemState state : peer.getPhysicalItems()) {
+            if(state.consumed || !participant.equals(state.owner) || state.equipmentSlot.isEmpty()) continue;
+            Item item = nativeItems.get(state.entityId);
+            if(item != null) player.equippedItems.put(state.equipmentSlot, item);
+        }
+    }
+
     @Override
     public long identity(Weapon weapon) {
         Long id = itemIds.get(weapon);
         return id == null ? 0L : id;
+    }
+
+    @Override
+    public long physicalIdentity(Entity entity) {
+        if(!(entity instanceof Item)) return 0L;
+        Long id = itemIds.get((Item)entity);
+        if(id == null) id = transientItemIds.get(entity);
+        return id == null ? 0L : id;
+    }
+
+    @Override
+    public Entity physicalEntity(long entityId) {
+        return nativeItems.get(entityId);
+    }
+
+    @Override
+    public long worldObjectIdentity(Entity entity) {
+        Long id = objectIds.get(entity);
+        return id == null ? 0L : id;
+    }
+
+    @Override
+    public Entity worldObject(long entityId) {
+        return objects.get(entityId);
+    }
+
+    @Override
+    public Missile takeOwnedMissile(ParticipantId participant) {
+        if(participant == null) return null;
+        for(PhysicalItemState state : peer.getPhysicalItems()) {
+            if(state.consumed || !participant.equals(state.owner)
+                    || !state.equipmentSlot.isEmpty() || state.properties.quantity < 1) continue;
+            Item item = nativeItems.get(state.entityId);
+            Missile missile = null;
+            boolean standalone = item instanceof Missile;
+            if(standalone) missile = (Missile)ItemManager.Copy(Missile.class, (Missile)item);
+            else if(item instanceof ItemStack && ((ItemStack)item).item instanceof Missile) {
+                missile = (Missile)ItemManager.Copy(Missile.class, ((ItemStack)item).item);
+            }
+            if(missile == null) continue;
+            if(host != null && !host.getItemWorld().spendNativeUnit(participant, state.entityId)) {
+                continue;
+            }
+            missile.multiplayerDamageSource = participant.getValue();
+            if(host != null && standalone) transientItemIds.put(missile, state.entityId);
+            return missile;
+        }
+        return null;
     }
 
     @Override

@@ -111,14 +111,16 @@ public class Gun extends Weapon {
         if(attackDirection == null) attackDirection = Game.camera.direction;
         notifyWeaponAttack(p, attackDirection, attackPower);
 
-        if(projectile != null) {
-            doProjectileFire(p, lvl);
-        }
-        else if (spell != null) {
-            doSpellFire(p, lvl);
-        }
-        else {
-            doHitScanFire(p, lvl);
+		if(!p.deferWeaponWorldAttack()) {
+			if(projectile != null) {
+				doProjectileFire(p, lvl);
+			}
+			else if (spell != null) {
+				doSpellFire(p, lvl);
+			}
+			else {
+				doHitScanFire(p, lvl);
+			}
         }
 
         // gunfire effect!

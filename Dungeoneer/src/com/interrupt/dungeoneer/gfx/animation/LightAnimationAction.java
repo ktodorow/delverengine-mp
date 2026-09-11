@@ -15,6 +15,13 @@ public class LightAnimationAction extends AnimationAction {
 	
 	public LightAnimationAction() { }
 
+    public Color getStartColor() { return new Color(startColor); }
+    public Color getEndColor() { return new Color(endColor); }
+    public float getLightTime() { return lightTime; }
+    public void setLightTime(float value) { lightTime = value; }
+
+    @Override public boolean isPresentationOnly() { return true; }
+
 	@Override
 	public void doAction(Entity instigator) {
 		DynamicLight l = new DynamicLight(instigator.x, instigator.y, instigator.z, new Vector3(startColor.r, startColor.g, startColor.b).scl(1.5f));

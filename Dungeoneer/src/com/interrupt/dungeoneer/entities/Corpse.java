@@ -188,7 +188,10 @@ public class Corpse extends Entity {
 				y += (networkY - y) * interpolation;
 				z += (networkZ - z) * interpolation;
 			}
-			if(animation != null && animation.playing) animateNetwork(animation, delta);
+            if(networkAnimation != null && animation != null)
+                animation.applyPresentationCursor(networkAnimation.time, networkAnimation.playing,
+                        networkAnimation.looping, this, false);
+            else if(animation != null && animation.playing) animateNetwork(animation, delta);
 			return;
 		}
 		super.tick(level, delta);
@@ -198,20 +201,26 @@ public class Corpse extends Entity {
 		}
 	}
 
+    private transient com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState networkAnimation;
+
+    public com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState captureNativeAnimation() {
+        return com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.capture(
+                com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind.DEATH, animation, tex);
+    }
+
+    public void applyNetworkAnimation(com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState state) {
+        if(state == null || animation == null) return;
+        animation.applyPresentationCursor(state.time, state.playing, state.looping, this, false);
+        networkAnimation = state;
+    }
+
 	public void playAnimation(SpriteAnimation animation) {
 		this.animation = animation;
 		this.animation.play();
 	}
 
 	private void animateNetwork(SpriteAnimation animation, float delta) {
-		HashMap<String, Array<AnimationAction>> actions = animation.actions;
-		try {
-			animation.actions = null;
-			animation.animate(delta, this);
-		}
-		finally {
-			animation.actions = actions;
-		}
+        animation.animatePresentation(delta, this);
 	}
 
 	public void setNetworkReplica(boolean networkReplica) {
@@ -252,9 +261,13 @@ public class Corpse extends Entity {
 		}
 	}
 
-	public void applyNetworkGib() {
-		if(networkReplica) gib();
-	}
+	public void applyNetworkGib() { applyNetworkGib(false); }
+
+    public void applyNetworkGib(boolean recovery) {
+        if(!networkReplica) return;
+        if(recovery) { hidden = true; isDynamic = false; isSolid = false; }
+        else gib();
+    }
 
 	public void gib() {
 		if(hidden) return;

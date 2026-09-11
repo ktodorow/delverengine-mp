@@ -5,8 +5,8 @@ import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
 /** Stable, explicitly bounded protocol constants for Direct Connect session traffic. */
 public final class DirectConnectProtocol {
     public static final int MAGIC = 0x444D5031; // DMP1
-    public static final int VERSION = 23;
-    public static final String BUILD_ID = "mp-v108-prototype-physical-items-ownership-23";
+    public static final int VERSION = 36;
+    public static final String BUILD_ID = "mp-v108-prototype-native-world-hits-37";
     public static final int DEFAULT_PORT = 37777;
 
     public static final int MAX_TCP_FRAME_BYTES = 1024;
@@ -31,6 +31,7 @@ public final class DirectConnectProtocol {
     public static final int MAX_COMBATANTS = CombatSnapshot.MAX_COMBATANTS;
     public static final int MAX_COMBAT_TARGET_ID_BYTES = 64;
     public static final int MAX_COMBAT_PRESENTATION_EVENTS = 64;
+    public static final int MAX_NATIVE_DYNAMIC_ENTITIES = 128;
 
     public static final String OPEN_SOURCE_TEST_CONTENT_FORMAT =
             "delver-open-source-test-assets-v1";

@@ -93,6 +93,12 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
                 participant.savedInputSteps--;
                 processedInput = true;
             }
+            // Native explosions and other Host-owned forces must take effect even
+            // when this tick's client input was lost or deliberately withheld.
+            if(!processedInput && participant.hasNativeImpulse()) {
+                step(participant, fixedDeltaSeconds);
+                processedInput = true;
+            }
             if(processedInput && participant.pendingInputs.isEmpty()) {
                 participant.savedInputSteps = Math.min(MAX_RETAINED_INPUT_STEPS,
                         participant.savedInputSteps);
@@ -130,6 +136,64 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         return participant == null ? null : participant.snapshot();
     }
 
+    /** Native status product, captured on Host render thread; never supplied by client input. */
+    public synchronized void setNativeSpeedModifier(ParticipantId participantId, float speed) {
+        if(Float.isNaN(speed) || Float.isInfinite(speed) || speed < 0)
+            throw new IllegalArgumentException("Invalid native movement speed modifier.");
+        MutableMovement participant = participants.get(participantId);
+        if(participant != null) participant.nativeSpeedModifier = speed;
+    }
+
+    public synchronized void setNativeTimeScale(ParticipantId participantId, float scale) {
+        if(Float.isNaN(scale) || Float.isInfinite(scale) || scale <= 0)
+            throw new IllegalArgumentException("Invalid native personal time scale.");
+        MutableMovement participant = participants.get(participantId);
+        if(participant != null) participant.nativeTimeScale = scale;
+    }
+
+    public synchronized void setNativeFlight(ParticipantId participantId, boolean floating, float speed) {
+        if(Float.isNaN(speed) || Float.isInfinite(speed) || speed < 0)
+            throw new IllegalArgumentException("Invalid native flight speed.");
+        MutableMovement participant = participants.get(participantId);
+        if(participant != null) { participant.floating = floating; participant.flightSpeed = speed; }
+    }
+
+    public synchronized void applyNativeImpulse(ParticipantId participantId,
+            float x, float y, float z) {
+        if(!finite(x) || !finite(y) || !finite(z)
+                || Math.abs(x) > 2f || Math.abs(y) > 2f || Math.abs(z) > 2f)
+            throw new IllegalArgumentException("Invalid native movement impulse.");
+        MutableMovement participant = participants.get(participantId);
+        if(participant != null && !participant.frozen) {
+            participant.nativeImpulseX += x * 60f;
+            participant.nativeImpulseY += y * 60f;
+            participant.nativeImpulseZ += z * 60f;
+        }
+    }
+
+    /** Host-native teleport result; client input never supplies these coordinates. */
+    public synchronized void setNativePosition(ParticipantId participantId,
+            float x, float y, float z) {
+        if(!finite(x) || !finite(y) || !finite(z) || !world.canOccupy(x, y, z)) {
+            throw new IllegalArgumentException("Invalid native participant position.");
+        }
+        MutableMovement participant = participants.get(participantId);
+        if(participant == null) return;
+        participant.x = x;
+        participant.y = y;
+        participant.z = z;
+        participant.velocityX = participant.velocityY = participant.velocityZ = 0f;
+        participant.nativeImpulseX = participant.nativeImpulseY = participant.nativeImpulseZ = 0f;
+        participant.jumpQueued = false;
+        participant.onFloor = Math.abs(z - world.getFloorZ(x, y, z)) <= 0.01f;
+        participant.movementState = participant.onFloor
+                ? MovementState.IDLE : MovementState.AIRBORNE;
+    }
+
+    private static boolean finite(float value) {
+        return !Float.isNaN(value) && !Float.isInfinite(value);
+    }
+
     private QueuedInput nextInput(MutableMovement participant, long hostTick) {
         long expectedTick = participant.lastProcessedInputTick + 1L;
         QueuedInput expected = participant.pendingInputs.remove(expectedTick);
@@ -144,6 +208,7 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
     }
 
     private void step(MutableMovement participant, float deltaSeconds) {
+        deltaSeconds *= participant.nativeTimeScale;
         MovementInputFrame input = participant.input;
         float forward = input == null ? 0f : input.getForward();
         float strafe = input == null ? 0f : input.getStrafe();
@@ -159,15 +224,35 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
             strafe *= 0.8f;
         }
 
+        float previousVelocityX = participant.velocityX, previousVelocityY = participant.velocityY;
         float targetVelocityX = (float)(strafe * Math.cos(rotation)
-                + forward * Math.sin(rotation)) * MAX_SPEED;
+                + forward * Math.sin(rotation)) * MAX_SPEED * participant.nativeSpeedModifier;
         float targetVelocityY = (float)(forward * Math.cos(rotation)
-                - strafe * Math.sin(rotation)) * MAX_SPEED;
+                - strafe * Math.sin(rotation)) * MAX_SPEED * participant.nativeSpeedModifier;
         float rate = Math.abs(forward) + Math.abs(strafe) > 0f
                 ? ACCELERATION : DECELERATION;
         float blend = Math.min(1f, rate * deltaSeconds);
         participant.velocityX += (targetVelocityX - participant.velocityX) * blend;
         participant.velocityY += (targetVelocityY - participant.velocityY) * blend;
+        participant.velocityX += participant.nativeImpulseX;
+        participant.velocityY += participant.nativeImpulseY;
+        participant.velocityZ += participant.nativeImpulseZ;
+        participant.nativeImpulseX = participant.nativeImpulseY = participant.nativeImpulseZ = 0f;
+        if(participant.floating && !participant.onFloor) {
+            float nativeDelta = deltaSeconds * 60f;
+            float lookY = input == null ? 0 : input.getLookY();
+            float horizontal = (float)Math.sqrt(Math.max(0, 1f - lookY * lookY));
+            float lookX = (float)-Math.sin(rotation + 3.14f) * horizontal;
+            float lookZ = (float)-Math.cos(rotation + 3.14f) * horizontal;
+            float nativeX = com.interrupt.dungeoneer.entities.Player.nativeFlightFriction(previousVelocityX / 60f, nativeDelta);
+            float nativeY = com.interrupt.dungeoneer.entities.Player.nativeFlightFriction(previousVelocityY / 60f, nativeDelta);
+            nativeX += com.interrupt.dungeoneer.entities.Player.nativeFlightMove(forward * 0.05f, strafe * 0.05f,
+                    lookX, (float)Math.cos(rotation), participant.flightSpeed, nativeDelta) * 0.14f;
+            nativeY += com.interrupt.dungeoneer.entities.Player.nativeFlightMove(forward * 0.05f, strafe * 0.05f,
+                    lookZ, (float)-Math.sin(rotation), participant.flightSpeed, nativeDelta) * 0.14f;
+            participant.velocityX = nativeX * 60f;
+            participant.velocityY = nativeY * 60f;
+        }
         participant.rotation = rotation;
 
         boolean requestedMovement = Math.abs(targetVelocityX) + Math.abs(targetVelocityY)
@@ -197,7 +282,12 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         }
         participant.jumpQueued = false;
 
-        if(!participant.onFloor) participant.velocityZ -= GRAVITY * deltaSeconds;
+        if(participant.floating) {
+            participant.velocityZ = com.interrupt.dungeoneer.entities.Player.nativeFlightVertical(
+                    participant.velocityZ / 60f, input == null ? 0f : input.getLookY(), forward,
+                    participant.flightSpeed, deltaSeconds * 60f) * 60f;
+        }
+        else if(!participant.onFloor) participant.velocityZ -= GRAVITY * deltaSeconds;
         float floorZ = world.getFloorZ(participant.x, participant.y, participant.z);
         float nextZ = participant.z + participant.velocityZ * deltaSeconds;
         if(nextZ <= floorZ) {
@@ -211,6 +301,12 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         }
         else {
             participant.velocityZ = 0f;
+        }
+
+        if(participant.floating && !participant.onFloor) {
+            // Native airborne world friction runs after movement.
+            participant.velocityX -= participant.velocityX * 0.02f * deltaSeconds * 60f;
+            participant.velocityY -= participant.velocityY * 0.02f * deltaSeconds * 60f;
         }
 
         if(!participant.onFloor) participant.movementState = MovementState.AIRBORNE;
@@ -244,6 +340,13 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         private boolean onFloor = true;
         private boolean jumpQueued;
         private boolean frozen;
+        private float nativeSpeedModifier = 1f;
+        private float nativeTimeScale = 1f;
+        private float nativeImpulseX;
+        private float nativeImpulseY;
+        private float nativeImpulseZ;
+        private boolean floating;
+        private float flightSpeed;
         private MovementState movementState = MovementState.IDLE;
 
         private MutableMovement(MovementEntityDescriptor descriptor, MovementSpawn spawn) {
@@ -267,6 +370,9 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
             velocityX = 0f;
             velocityY = 0f;
             velocityZ = 0f;
+            nativeImpulseX = 0f;
+            nativeImpulseY = 0f;
+            nativeImpulseZ = 0f;
             jumpQueued = false;
             frozen = true;
             movementState = MovementState.IDLE;
@@ -274,6 +380,10 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
 
         private void resume() {
             frozen = false;
+        }
+
+        private boolean hasNativeImpulse() {
+            return nativeImpulseX != 0f || nativeImpulseY != 0f || nativeImpulseZ != 0f;
         }
     }
 

@@ -1,0 +1,73 @@
+# Native gameplay fidelity inventory (#38)
+
+Status: active-floor implementation, automated validation, and owned-data gameplay acceptance complete on protocol 37. Owned v1.08 content inspected read-only; no retail classes, definitions, or assets copied.
+
+## Shared contract
+
+Host runs original native acceptance, targeting, collision, damage/healing, status combination and timers, AI, resource mutation, secondary spawning, destruction, and world time. Clients receive bounded current state for recoverable behavior and ordered events for live-only cues, then call presentation-safe native paths. Replica presentation cannot invoke damage, healing, spread, spawning, loot, charge use, or AI callbacks.
+
+Source, target, effect, dynamic entity, physical item, session, and floor generation identities remain stable. New snapshots recover current phase and remaining time; transient starts, pulses, frame sounds/lights, impacts, and fizzes are not replayed after reconnect. Owner-only camera, HUD, inventory, potion knowledge, dialogue, and map state remain private.
+
+## Owned-content audit
+
+Read-only JSON metadata from owned `delver.jar` records:
+
+| File | Relevant definitions |
+| --- | --- |
+| `data/items.dat` | 24 swords, 9 bows, 15 wands, 15 scrolls, 7 potions, 6 foods, 4 item stacks; 9 magic-missile projectiles, 4 missiles, 4 explosions |
+| `data/monsters.dat` | 30 monsters; 28 damage actions, 7 impulse actions, 5 spell-cast actions, 5 light actions, 4 stun actions; MagicMissile and SpreadMagicMissile specials |
+| `data/entities.dat` | 6 fused bombs, doors, spikes, breakables, movers, areas, spawners, triggers, Fire, Explosion; four Gun editor templates |
+| `data/animations.dat` | 20 native lerped first-person animations |
+| `generator/**`, `levels/**` | doors, breakables, movers, spikes, teleport areas, triggers, spawners, hazards, dialogue/progression objects; no configured Gun class outside `data/entities.dat` editor catalogue |
+
+Configured wand spells: MagicMissile (8), SpreadMagicMissile (5), Beam (2). Configured scroll spells: SplashExplosion (4), ApplyStatusEffect (4), Heal (2), Teleport, EnchantWeapon, EnchantArmor, Identify, FillMap. Counts are class occurrences, not drop probabilities.
+
+## Behavior inventory and disposition
+
+| Native family | Trigger and Host authority | Replicated state/event and local native presentation | Cleanup/recovery | Disposition/evidence |
+| --- | --- | --- | --- | --- |
+| Sword and enchanted melee | Native release frame; Host resolves exact physical Sword, aim, native `Level.checkEntityCollision`/`Level.isFree` sweep, damage, knockback, and target | Item-bound positioned swing; elemental entity hit; wall/floor particles, light, decal, and audio; target-bound Door/Breakable hit feedback; native hurt/death/status state | Client keeps first-person startup feedback but defers collision and world mutation; owner receives accepted impact; ordered cues, stable floor object IDs, state revisions, and generation resets reject duplicate/stale releases | Monster, corpse, Participant, wall/floor, Door, Breakable, and FusedBomb paths implemented. Dynamically spawned progression objects remain owned by #28/#31. |
+| Bow and Missile | Native charged release; Host atomically spends one exact owned Missile and creates projectile; client release never mutates inventory speculatively | Bow-item-bound positioned release audio; dynamic Missile identity, transform, rotation, texture, color, elemental light/trail and stuck state; exact impact cue | Inventory tombstone cannot stop an in-flight physical replica; dynamic tombstone removes projectile; reconnect restores current flight; floor generation clears old state | Implemented and tested through Host plus two TCP observers. Missing ammo creates no Host projectile or accepted release. Ammo/item identity uses #16 physical-item boundary. |
+| Wand: MagicMissile, SpreadMagicMissile, Beam | Accepted physical wand and submitted aim; Host copies actual spell/config and casts native path | Item-bound native cast VFX/audio plus MagicMissile/Beam/base Projectile atlas, texture, color, scale, light/trail/decal, beam cursor, and class-specific impact | Client local cast keeps first-person startup feedback but defers world spell; observers replay exact local spell presentation; Host tombstone prevents duplicate/resurrection | Implemented for every owned configured wand spell. Blue/nondefault variant, two observers, empty encounter, travel, impact, cleanup, reconnect, and enemy special tests pass. |
+| Gun | Source supports hitscan, projectile, or spell forms | Would require configured ammo/spell and hit/muzzle presentation | Normal dynamic/tombstone rules | Not in Base Campaign/generator/level content; four editor-only catalogue templates. Mods/editor scenarios are outside #38 Base Campaign gate. |
+| Scroll: SplashExplosion, ApplyStatusEffect, Heal | Physical owner submits bounded aim; Host consumes once and calls native spell | Explosion/status/health result shared; consumer alone gets scroll history/UI/cast feedback | Reliable targeted result releases pending use; stale rejection cannot release newer request | Implemented for remote and Host participants through #16 item identity. |
+| Scroll: Teleport | Host native Teleport selects valid same-floor location | Host-native Actor transform is committed into movement authority and reaches all observers | Velocity/impulse cleared; next movement snapshot cannot snap actor back | Implemented; authoritative movement regression passes. Teleport-area/trigger scope stays #28. |
+| Scroll: EnchantWeapon, EnchantArmor, Identify, FillMap | Native methods require owning `Player` inventory or personal map | Personal inventory/map mutations must update Campaign Slot state; no observer overlay | Persist with slot and physical item identity | Host-local native behavior retained. Remote no-op consumption is rejected. Shared campaign integration belongs to #24/#28 and is explicit gate work, not silently treated as success. |
+| Slow (ICE), Paralyze, Speed | Host Actor applies native same-class combination/refresh and movement modifier | Stable effect instance, remaining/elapsed time, shader/FOV/particles; native slow burst and paralysis ring | Removal/death clears attachments; reconnect restores current state without start burst | Implemented for monsters, Host player, affected client, and observer. ICE apply/refresh/expiry/resist and authoritative motion tests pass. |
+| Poison, Burning | Host owns periodic damage, cure/water, fire spread, and secondary attribution | Recoverable status plus monotonic pulse count; each live pulse reuses native burst/audio once | Reconnect receives count/state without replay; replica Fire cannot hurt or spread | Implemented. Two-observer TCP pulse test and chain/source tests pass. |
+| Shield, Invisibility | Host Actor owns mitigation/visibility | Current modifier, shader and invisibility state | Removal/death/reconnect converge from snapshot | Implemented for Participant and monster Actors; equipped resistance derives from accepted native equipment. |
+| RestoreHealth, Heal | Host applies original direct-health rule and clamp once | Authoritative health snapshot plus scoped presentation | Replica cannot heal or submit second action | Implemented; native resistance does not incorrectly reduce direct Heal. |
+| Drunk | Host uses native Player decay and accepted FOV modifier | Affected local player receives current intensity/FOV; observers receive Actor state without first-person overlay | Pause/reconnect/removal follow Host time | Implemented and tested. |
+| Levitate | Host applies native floating and flight speed to movement simulation | Current floating/flight state and visual effect | Expiry restores gravity; disconnect freeze removes pending impulse | Implemented and tested. |
+| SlowTime | Host computes accepted Player personal time and shared world minimum | Current actor/world time scale; each peer applies Host value | Pause prevents local expiry; recovery restores current scale | Implemented and tested for Host and remote Participant semantics. |
+| Monster melee, DamageAction, ImpulseAction, StunAnimationAction | Native Host AI and animation actions choose target/outcome | Ordered action/damage plus recoverable animation cursor | Interrupt/hurt/death replaces prior cursor; stale sequence rejected | Implemented on native monsters. Synthetic observer AI is disabled. |
+| Monster SpellCastAction/specials | Host animation action spawns configured native projectile/spell | Exact native positioned cast audio plus same dynamic projectile boundary as Participant casts | Secondary output attached once; death/floor cleanup removes it | Implemented for owned specials; actual ProjectileAttackAction and SpellCastAction regression covers variant retention. |
+| SpriteAnimation SoundAction/LightAnimationAction | Host animation frame crosses action time | Bounded live cue reuses native sound/light presentation; gameplay frame actions stay Host-only | Cursor recovery never replays past cue; pause/interruption/death preserve Host phase | Implemented; reconnect during death restores corpse cursor without death burst. |
+| Bomb, FusedBomb, Explosion | Host owns throw, fuse, wet/dud state, client or Host weapon ignition, chain reaction, impulse, targets, damage/status, secondary spawn | Dynamic bomb/fuse state; exact fizzle; immutable native explosion particles, sprite, light, decal, audio, shake | Item tombstone, dynamic tombstone, cue sequence and floor generation prevent repeats/resurrection | Implemented. Remote Lightning Sword ignition, chain source attribution, and two-observer native explosion tests pass. |
+| Spikes and native hazards | Host trap activation/damage | Ordered source/target action; affected Participant health and reaction | Stable hazard identity; replica cannot damage | Active-floor Spikes implemented. Full hazard/persistent object inventory belongs to #31. |
+| Door and Breakable | Host validates activator, collision, native hit, HP, physics, destruction, loot, and trigger outcome | Door/Breakable snapshots plus targeted Stuck/Locked/Unlocked/Opens-elsewhere message; native hit and destruction feedback | Feedback live-only; initiating Participant receives door text; reconnect restores current object state quietly; floor generation rebinds IDs and accepts new revisions | Initial active-floor objects implemented with #16 foundation. Host/two-client audience, remote break/ignition, two-observer state, and floor-rebind tests pass. Movers, puzzles, dynamically spawned objects, and progression persistence stay #28/#31. |
+| Death/corpse/gib | Host native monster lifecycle | Current health, corpse/gib state, death animation cursor; live death presentation only | Reconnect is quiet; stale effects/dynamics cleared | Implemented for native monster lifecycle. Participant Downed/revive/respawn remains #18/#19. |
+| Pause, reconnect, floor change | Host session tick and native world generation | Latest status/animation/dynamic baseline plus ordered live cues | Bounded queues, monotonic sequences, stale-generation rejection | Implemented for #38 state families. Save/dormant/revisit integrations remain #21/#22/#25-#27/#29. |
+| Dialogue, map/knowledge, progression, spawners, movers, trigger/area world scope | Host/activator/Party scope varies by PRD | Personal result or shared world state must use same native boundary | Campaign persistence and floor lifecycle required | Explicitly assigned to #23/#24/#28/#30/#31 and later campaign gates #34-#37. |
+
+`NativeStatusEffectState` allowlist covers Base, Burning, Drunk, Invisibility, Paralyze, Poison, RestoreHealth, Shield, Slow, Levitate, Speed, and SlowTime. Unsupported native subclasses fail with a controlled compatibility diagnostic instead of a generic visual fallback. Dynamic allowlist covers Projectile, MagicMissileProjectile, BeamProjectile, Missile, Bomb, and FusedBomb; required local definitions remain content-hash compatible.
+
+## Automated evidence
+
+Focused checks enter native/controller/session paths rather than only DTO constructors:
+
+- Host and remote Participant damage, healing, equipment resistance, movement slow/flight/impulse, consumable and scroll ownership.
+- Host/client ice attacks and two observers; native zero-damage rejection, refresh, expiry, simultaneous effects, status removal, death, reconnect, and periodic poison/fire pulses.
+- Actual configured blue wand, exact item-bound Wand cast, Sword swing/elemental hit/wall/floor mark, target-bound Door/Breakable hit, and Bow release feedback; Host-owned exact Bow ammo spending; native enemy special cast audio/projectiles; projectile travel/impact/tombstone; client-origin fused-bomb ignition, fuse/fizzle/chain attribution; and explosion presentation with replica gameplay disabled.
+- Host and remote door audience and destruction, Breakable state through two TCP observers, reliable authenticated item/aim requests, sequence/generation rejection, reconnect projectile/status/object restoration, animation pause/interruption/death recovery, and floor cleanup/rebinding.
+- Bounded 1024-byte wire frames and bounded client/Host queues. Native state/events use reliable ordered TCP; movement loss, duplicate, reordering, and reconciliation remain covered by #9 tests.
+- Host tick outputs publish after releasing session monitor, preventing render/network status updates from deadlocking simulation. Auto-selected Direct Connect ports retry until same TCP/UDP number is reserved.
+
+Current broad run: 285 tests completed with 1 existing skip and no failures on macOS Java 8; `DungeoneerDesktop:classes` passes on macOS and Windows. Windows Java 8 clean compilation and all changed-feature tests pass. Broad-suite fixed-deadline TCP timing noise was excluded after isolated changed-feature validation. Legacy synthetic encounter checks now validate queued native intent and Host-published native outcomes.
+
+## Validation status
+
+- Owned-data gameplay acceptance passed on Windows on 2026-09-11. Repository owner validated Host attacker, client attacker, and observer behavior across Sword marks, Door/wooden-object destruction, projectiles, ICE and resisted status behavior, client-origin bombs/explosions, concurrent effects, death, reconnect, pause, and floor transition.
+- Complete linked campaign integrations in their owning issues before corresponding #20/#34-#37 gates. No row above may disappear when later content reveals another native behavior.
+
+No game was launched by implementation agent, per request; repository owner performed gameplay validation with owned v1.08 data.

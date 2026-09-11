@@ -13,6 +13,7 @@ import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.Level.Source;
 import com.interrupt.dungeoneer.gfx.drawables.DrawableMesh;
 import com.interrupt.dungeoneer.gfx.drawables.DrawableSprite;
+import com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot;
 import com.interrupt.dungeoneer.tiles.Tile;
 import com.interrupt.managers.EntityManager;
 
@@ -102,6 +103,30 @@ public class Breakable extends Model {
 		this.textureFile = textureFile;
 		isSolid = true;
 		stepHeight = 0f;
+	}
+
+	public BreakableSnapshot snapshot(long entityId, long revision) {
+		return new BreakableSnapshot(entityId, revision, hp, isActive, isSolid,
+				x, y, z, xa, ya, za, rotation.x, rotation.y, rotation.z);
+	}
+
+	public void applyNetworkSnapshot(BreakableSnapshot snapshot) {
+		hp = snapshot.hp;
+		isActive = snapshot.active;
+		isSolid = snapshot.solid;
+		x = snapshot.x;
+		y = snapshot.y;
+		z = snapshot.z;
+		xa = snapshot.velocityX;
+		ya = snapshot.velocityY;
+		za = snapshot.velocityZ;
+		rotation.set(snapshot.rotationX, snapshot.rotationY, snapshot.rotationZ);
+		nativePresentationReplica = true;
+	}
+
+	/** Native break feedback only; never runs loot, triggers, or destruction gameplay. */
+	public void playNetworkBreakPresentation(Level level) {
+		gib(level, new Vector3());
 	}
 
 	// player is pushing
@@ -234,6 +259,7 @@ public class Breakable extends Model {
 	}
 
 	public void tick(Level level, float delta) {
+		if(nativePresentationReplica) return;
 
 		// Might need to keep track of how much we moved
 		float xBefore = x;
@@ -378,6 +404,16 @@ public class Breakable extends Model {
 
 	// effect to show when hit by a melee weapon
 	public void doHitEffect(float xLoc, float yLoc, float zLoc, Sword sword, Level lvl) {
+		doHitEffect(xLoc, yLoc, zLoc, sword, lvl, true);
+	}
+
+	public void playNetworkHitPresentation(float xLoc, float yLoc, float zLoc,
+			Sword sword, Level lvl) {
+		doHitEffect(xLoc, yLoc, zLoc, sword, lvl, false);
+	}
+
+	private void doHitEffect(float xLoc, float yLoc, float zLoc, Sword sword,
+			Level lvl, boolean shakeLocalPlayer) {
 		if(hp > 0) {
 			Audio.playPositionedSound(breakSound, new Vector3(x,y,z), 0.1f, Game.rand.nextFloat() * 0.1f + 0.95f, 12);
 		}
@@ -412,7 +448,8 @@ public class Breakable extends Model {
 		part.fullbrite = true;
 		lvl.SpawnNonCollidingEntity(part);
 
-		Game.instance.player.shake(0.8f);
+		if(shakeLocalPlayer && Game.instance != null && Game.instance.player != null)
+			Game.instance.player.shake(0.8f);
 	}
 
     @Override

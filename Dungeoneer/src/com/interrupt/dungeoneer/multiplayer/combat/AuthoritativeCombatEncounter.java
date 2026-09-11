@@ -268,6 +268,24 @@ public final class AuthoritativeCombatEncounter {
         if(changed) publish(hostTick, output);
     }
 
+    public synchronized boolean canApplyNativeParticipantEffect(ParticipantId participantId) {
+        MutableCombatant target = participants.get(participantId);
+        return target != null && target.isCombatEligible();
+    }
+
+    public synchronized void applyNativeParticipantDamage(long hostTick, String sourceId,
+            ParticipantId participantId, int amount, float x, float y, float z,
+            HostSessionOutput output) {
+        MutableCombatant target = participants.get(participantId);
+        if(sourceId == null || sourceId.isEmpty() || target == null
+                || !target.isCombatEligible() || amount == 0 || amount == Integer.MIN_VALUE) return;
+        boolean changed = amount > 0 ? target.damage(amount) : target.heal(-amount);
+        publishPresentation(hostTick, sourceId, target.id,
+                amount > 0 ? CombatAction.ENVIRONMENTAL_HAZARD : CombatAction.BENEFICIAL_SPELL,
+                CombatPresentationPhase.DAMAGE, x, y, z, x, y, z, changed, output);
+        if(changed) publish(hostTick, output);
+    }
+
     public synchronized void setParticipantCombatEligible(ParticipantId participantId,
             boolean combatEligible) {
         if(participantId == null) return;

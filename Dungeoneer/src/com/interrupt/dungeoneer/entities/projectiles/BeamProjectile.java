@@ -37,6 +37,17 @@ public class BeamProjectile extends Projectile {
 	
 	public BeamProjectile() { collision.set(0.05f, 0.05f, 0.1f); canStepUpOn = false; dropSound = ""; }
 
+	/** Initializes renderer state when explicit network fields reconstruct this projectile. */
+	public void prepareNetworkPresentation() {
+		if(!(drawable instanceof DrawableBeam)) {
+			drawable = new DrawableBeam(tex, ArtType.sprite);
+			((DrawableBeam)drawable).beamRenderMode = DrawableBeam.BeamRenderModes.LINE;
+			((DrawableBeam)drawable).size = 1f;
+		}
+		drawable.dir.set(xa, za, ya).nor();
+		drawable.color = color;
+	}
+
 	private transient DynamicLight light = null;
 	
 	public BeamProjectile(float x, float y, float z, float xa, float ya, float za, int damage, DamageType damageType, Color color, Entity owner) {
@@ -160,7 +171,10 @@ public class BeamProjectile extends Projectile {
 			return;
 		}
 		
-		Level level = Game.GetLevel();
+		playBeamImpactParticles(Game.GetLevel());
+	}
+
+	private void playBeamImpactParticles(Level level) {
 		Random r = new Random();
 		int particleCount = 12;
 		particleCount *= Options.instance.gfxQuality;
@@ -189,34 +203,21 @@ public class BeamProjectile extends Projectile {
 			level.SpawnNonCollidingEntity(p) ;
 		}
 	}
+
+	@Override
+	public void playNetworkImpactPresentation(Level level, boolean entityHit,
+			boolean secondaryExplosion) {
+		if(!nativePresentationReplica || level == null) return;
+		if(entityHit && damageType != DamageType.PHYSICAL)
+			playElementalImpactRing(xa, ya);
+		makeHitDecal();
+		if(!secondaryExplosion) playBeamImpactParticles(level);
+	}
 	
 	@Override
 	public void hit(float xa, float ya, int damage, float force, DamageType damageType, Entity instigator) {
 		if(damageType != DamageType.PHYSICAL) {
-			Particle ring = new Particle(x, y, z, 0, 0, 0, 0, color, true);
-			((DrawableSprite)ring.drawable).billboard = false;
-			((DrawableSprite)ring.drawable).dir.set(xa, za, ya).nor();
-			ring.xa = 0;
-			ring.ya = 0;
-			ring.za = 0;
-			ring.artType = ArtType.particle;
-			ring.tex = 16;
-			ring.x = x;
-			ring.y = y;
-			ring.z = z;
-			ring.lifetime = 20;
-			ring.startScale = 0.1f;
-			ring.fullbrite = true;
-			ring.endScale = 8f;
-			ring.scale = 0f;
-			ring.floating = true;
-			ring.yOffset = yOffset;
-			ring.checkCollision = false;
-			ring.color.set(color);
-			ring.isActive = true;
-			ring.initialized = false;
-			ring.isDynamic = true;
-			Game.instance.level.non_collidable_entities.add(ring);
+			playElementalImpactRing(xa, ya);
 		}
 		
 		super.hit(xa, ya, damage, force, damageType, instigator);

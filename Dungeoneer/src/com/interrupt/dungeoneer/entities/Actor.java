@@ -101,7 +101,21 @@ public class Actor extends Entity {
 	public transient Float stepUpTimer = null;
 
 	/** Strength of drunk effect. */
+    /** Native Player time semantics, also used by authoritative remote Participants. */
+    public boolean usesPlayerTime() { return this instanceof Player; }
+
 	public float drunkMod = 0;
+
+    public final void tickDrunkRecovery(float delta) {
+        // don't get sick
+		if(drunkMod > 0) {
+			if(drunkMod > 6) drunkMod = 6;
+			drunkMod -= delta * 0.02;
+		}
+		else {
+			drunkMod = 0;
+		}
+    }
 
 	/** Modifier for how fast we are moving through time, could have time sped up or down for just us. */
 	public float actorTimeScale = 1f;
@@ -182,6 +196,11 @@ public class Actor extends Entity {
 	}
 	
 	public int takeDamage(int damage, DamageType damageType, Entity instigator) {
+        return applyNativeDamage(damage, damageType, instigator);
+    }
+
+    /** Host bridge enters original Actor rules without re-entering a Participant intent hook. */
+    public final int applyNativeDamage(int damage, DamageType damageType, Entity instigator) {
 		// Some status effects change how much damage is being dealt
 		if(statusEffects != null && statusEffects.size > 0) {
 			for(StatusEffect s : statusEffects) {
@@ -341,7 +360,13 @@ public class Actor extends Entity {
 	
 	public int GetArmorClass() { return ac; }
 	
+    /** Replicated Actors receive accepted status state instead of evaluating native effects. */
+    private transient boolean statusEffectAuthority = true;
+    public boolean hasStatusEffectAuthority() { return statusEffectAuthority; }
+    public void setStatusEffectAuthority(boolean authority) { statusEffectAuthority = authority; }
+
 	public void tickStatusEffects(float delta) {
+        if(!hasStatusEffectAuthority()) return;
 		if(!isAlive()) return;
 		
 		if(statusEffects != null && statusEffects.size == 0) statusEffects = null;
@@ -364,6 +389,7 @@ public class Actor extends Entity {
 	}
 	
 	public void addStatusEffect(StatusEffect newEffect) {
+        if(!hasStatusEffectAuthority()) return;
 		if(statusEffects == null) {
 			statusEffects = new Array<StatusEffect>();
 		}
@@ -417,6 +443,7 @@ public class Actor extends Entity {
 	}
 
 	public void clearStatusEffects() {
+        if(!hasStatusEffectAuthority()) return;
 		if (this.statusEffects != null) {
 			for (StatusEffect e : this.statusEffects) {
 				e.onStatusEnd(this);

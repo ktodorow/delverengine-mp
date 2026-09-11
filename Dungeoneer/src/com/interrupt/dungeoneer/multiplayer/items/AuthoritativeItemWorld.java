@@ -24,6 +24,10 @@ public final class AuthoritativeItemWorld {
         boolean canAct(ParticipantContext participant);
         boolean canReach(ParticipantContext participant, float x, float y, float z);
         boolean useObject(long entityId, ParticipantContext participant);
+        default boolean consumeItem(long entityId, ParticipantContext participant) { return true; }
+        default boolean consumeItem(ItemRequest request, ParticipantContext participant) {
+            return consumeItem(request.entityId, participant);
+        }
     }
 
     private final Map<Long, PhysicalItemState> items =
@@ -128,6 +132,7 @@ public final class AuthoritativeItemWorld {
                 return Outcome.INVALID_SPEND;
             }
             boolean consumed = request.action == ItemAction.CONSUME;
+            if(consumed && !boundary.consumeItem(request, participant)) return Outcome.OBJECT_REJECTED;
             ItemProperties properties = new ItemProperties(request.condition, item.properties.level,
                     item.properties.suffix, item.properties.prefix, request.quantity, item.properties.potionType);
             items.put(item.entityId, new PhysicalItemState(item.entityId, ++revision,
@@ -180,6 +185,30 @@ public final class AuthoritativeItemWorld {
         if(partyKeys == 0) return false;
         partyKeys--; keyRevision++;
         return true;
+    }
+
+    /** Host-native attacks spend one owned ammunition unit after combat-request deduplication. */
+    public synchronized boolean spendNativeUnit(ParticipantId participant, long entityId) {
+        PhysicalItemState item = items.get(entityId);
+        if(participant == null || item == null || item.consumed
+                || !participant.equals(item.owner) || item.properties.quantity < 1) return false;
+        int quantity = item.properties.quantity - 1;
+        boolean consumed = quantity == 0;
+        ItemProperties properties = new ItemProperties(item.properties.condition,
+                item.properties.level, item.properties.suffix, item.properties.prefix,
+                quantity, item.properties.potionType);
+        items.put(entityId, new PhysicalItemState(item.entityId, ++revision,
+                item.templateId, consumed ? null : participant, item.x, item.y, item.z,
+                properties, consumed, consumed ? "" : item.equipmentSlot));
+        return true;
+    }
+
+    /** Native Host destruction (explosion, shattering) leaves a durable item tombstone. */
+    public synchronized void destroyWorldItem(long entityId) {
+        PhysicalItemState item = items.get(entityId);
+        if(item == null || item.consumed || item.owner != null) return;
+        items.put(entityId, new PhysicalItemState(item.entityId, ++revision, item.templateId,
+                null, item.x, item.y, item.z, item.properties, true));
     }
 
     /** Native Host physics can move world items, but cannot transfer ownership. */

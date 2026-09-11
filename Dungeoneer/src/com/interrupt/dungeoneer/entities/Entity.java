@@ -24,6 +24,9 @@ import java.util.Random;
 
 /** Base class for all entities in Delver Engine Levels. */
 public class Entity {
+    /** Causal Participant attribution; never used for native collision exclusion. */
+    public transient String multiplayerDamageSource;
+
 	/** Id of Entity. */
 	@EditorProperty( group = "General" )
 	public String id;
@@ -240,6 +243,9 @@ public class Entity {
 
 	/** The Entity this Entity is attached to. */
 	public transient Entity owner = null;
+
+	/** Cosmetic network replica. Never participates in local gameplay simulation. */
+	public transient boolean nativePresentationReplica = false;
 
 	public float slideEffectTimer = 0;
 
@@ -607,6 +613,11 @@ public class Entity {
 			attachmentTransform.set(x,y,z);
 		}
 	}
+
+    /** Remove and dispose one attachment immediately, including looping audio children. */
+    public void detach(Entity attachment) {
+        if(attached != null && attached.removeValue(attachment, true)) attachment.onDispose();
+    }
 
 	public void attach(Entity toAttach) {
 		if(attached == null) {

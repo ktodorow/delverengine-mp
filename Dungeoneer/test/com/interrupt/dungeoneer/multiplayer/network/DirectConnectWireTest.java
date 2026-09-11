@@ -1,8 +1,11 @@
 package com.interrupt.dungeoneer.multiplayer.network;
+import com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeStatusEffectState;
 
 import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
 import com.interrupt.dungeoneer.multiplayer.items.ItemProperties;
 import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
+import com.interrupt.dungeoneer.multiplayer.items.ItemRequest;
 import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
 import com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeCombatEncounter;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
@@ -41,6 +44,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -418,6 +422,11 @@ public class DirectConnectWireTest {
                         ItemAction.SPEND, 17L, 1, 2));
         assertEquals(1, request.condition);
         assertEquals(2, request.quantity);
+        DirectConnectWire.ItemRequestMessage aimed = (DirectConnectWire.ItemRequestMessage)
+                roundTrip(new DirectConnectWire.ItemRequestMessage("session", 9L,
+                        ItemAction.CONSUME, 18L, 2, 1, true, 0.25f, -0.5f, 0.75f));
+        assertTrue(aimed.hasAim); assertEquals(0.25f, aimed.aimX, 0f);
+        assertEquals(-0.5f, aimed.aimY, 0f); assertEquals(0.75f, aimed.aimZ, 0f);
         DirectConnectWire.ItemStateMessage state = (DirectConnectWire.ItemStateMessage)
                 roundTrip(new DirectConnectWire.ItemStateMessage("session",
                         new PhysicalItemState(
@@ -447,6 +456,218 @@ public class DirectConnectWireTest {
     public void exhaustedItemRequestIdCannotBeEncoded() {
         new DirectConnectWire.ItemRequestMessage("session", Long.MAX_VALUE,
                 ItemAction.PICKUP, 1L);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void absentAimCannotSmuggleUnusedCoordinatesIntoItemRequest() {
+        new ItemRequest(new ParticipantId("campaign-slot-1"), 1L,
+                ItemAction.CONSUME, 1L, 0, 0, false, 1f, 0f, 0f);
+    }
+
+    @Test public void maximumNativeStatusSetFitsFrameAndPreservesCurrentState() throws Exception {
+        java.util.List<NativeStatusEffectState> effects = new java.util.ArrayList<>();
+        for(NativeStatusEffectState.Kind kind : NativeStatusEffectState.Kind.values()) {
+            effects.add(new NativeStatusEffectState(kind.ordinal() + 1, kind, 123.5f,
+                    0.25f, "01234567890123456789012345678901", true, 40f, 1.075f,
+                    kind.ordinal() + 10));
+        }
+        ActorEffectsSnapshot state = new ActorEffectsSnapshot(repeat('m'), 99, true, effects, 4.25f, 0.75f, 0.4f, true, 0.4f,
+                new com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState(
+                        com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind.DODGE,
+                        77, 25f, true, false, 40));
+        DirectConnectWire.MonsterEffectsMessage decoded = (DirectConnectWire.MonsterEffectsMessage)
+                roundTrip(new DirectConnectWire.MonsterEffectsMessage("session", state));
+        assertTrue(state.sameState(decoded.state));
+        assertEquals(99, decoded.state.sequence);
+        assertTrue(decoded.live);
+        decoded = (DirectConnectWire.MonsterEffectsMessage)roundTrip(
+                new DirectConnectWire.MonsterEffectsMessage("session", state, false));
+        assertFalse(decoded.live);
+        assertTrue(state.sameState(decoded.state));
+    }
+
+    @Test public void doorFeedbackRoundTripsAllNativeOutcomes() throws Exception {
+        for(com.interrupt.dungeoneer.multiplayer.items.DoorFeedback feedback :
+                com.interrupt.dungeoneer.multiplayer.items.DoorFeedback.values()) {
+            DirectConnectWire.DoorFeedbackMessage decoded = (DirectConnectWire.DoorFeedbackMessage)
+                    roundTrip(new DirectConnectWire.DoorFeedbackMessage("session", feedback));
+            assertEquals("session", decoded.sessionId); assertEquals(feedback, decoded.feedback);
+        }
+    }
+
+    @Test public void nativeDynamicStateRoundTripsExactProjectileAndCleanup() throws Exception {
+        com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile projectile =
+                new com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile();
+        projectile.x = 1.25f; projectile.y = 2.5f; projectile.z = 0.75f;
+        projectile.xa = 0.2f; projectile.ya = -0.1f; projectile.za = 0.05f;
+        projectile.tex = 9; projectile.spriteAtlas = "magic-blue";
+        projectile.color.set(0.1f, 0.4f, 1f, 1f); projectile.scale = 1.5f;
+        com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState state =
+                com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(
+                        41L, 0L, projectile);
+        DirectConnectWire.NativeDynamicStateMessage decoded =
+                (DirectConnectWire.NativeDynamicStateMessage)roundTrip(
+                        new DirectConnectWire.NativeDynamicStateMessage("session", 7L, state, 3L));
+
+        assertEquals(7L, decoded.sequence); assertEquals(3L, decoded.generation);
+        com.interrupt.dungeoneer.entities.Entity replica = decoded.state.apply(null);
+        assertTrue(replica instanceof com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile);
+        assertTrue(replica.nativePresentationReplica); assertEquals(1.25f, replica.x, 0f);
+        assertEquals("magic-blue", replica.spriteAtlas); assertEquals(0.4f, replica.color.g, 0f);
+
+        com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState cleanup =
+                com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(
+                        41L, 0L, projectile, false);
+        decoded = (DirectConnectWire.NativeDynamicStateMessage)roundTrip(
+                new DirectConnectWire.NativeDynamicStateMessage("session", 8L, cleanup, 3L));
+        assertFalse(decoded.state.active);
+    }
+
+    @Test public void nativeBeamStateAndImpactCuePreserveConfiguredPresentation() throws Exception {
+        com.interrupt.dungeoneer.entities.projectiles.BeamProjectile beam =
+                new com.interrupt.dungeoneer.entities.projectiles.BeamProjectile();
+        beam.x = 2f; beam.y = 3f; beam.z = 0.8f;
+        beam.artType = com.interrupt.dungeoneer.entities.Entity.ArtType.sprite;
+        beam.xa = 0.4f; beam.ya = 0.2f; beam.za = -0.1f;
+        beam.startPos.set(1f, 2f, 0.7f); beam.length = 7.5f;
+        beam.startTex = 21; beam.endTex = 24; beam.animateTime = 4f;
+        beam.spriteAtlas = "blue-beam"; beam.color.set(0.1f, 0.5f, 1f, 1f);
+        beam.damageType = com.interrupt.dungeoneer.entities.items.Weapon.DamageType.ICE;
+        ((com.interrupt.dungeoneer.entities.projectiles.Projectile)beam).damageType = beam.damageType;
+        beam.explosion = new com.interrupt.dungeoneer.entities.Explosion();
+
+        com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState state =
+                com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(52L, 0L, beam);
+        DirectConnectWire.NativeDynamicStateMessage dynamic =
+                (DirectConnectWire.NativeDynamicStateMessage)roundTrip(
+                        new DirectConnectWire.NativeDynamicStateMessage("session", 10L, state, 4L));
+        com.interrupt.dungeoneer.entities.projectiles.BeamProjectile replica =
+                (com.interrupt.dungeoneer.entities.projectiles.BeamProjectile)dynamic.state.apply(null);
+        assertEquals("blue-beam", replica.spriteAtlas); assertEquals(7.5f, replica.length, 0f);
+        assertEquals(21, replica.startTex); assertEquals(24, replica.endTex);
+        assertEquals(com.interrupt.dungeoneer.entities.items.Weapon.DamageType.ICE,
+                replica.damageType); assertNotNull(replica.drawable); assertNotNull(replica.explosion);
+
+        com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue cue =
+                com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue.captureImpact(
+                        52L, 0L, beam, true, 3.5f, 4.5f, 1.1f);
+        DirectConnectWire.NativeDynamicCueMessage message =
+                (DirectConnectWire.NativeDynamicCueMessage)roundTrip(
+                        new DirectConnectWire.NativeDynamicCueMessage("session", 11L, cue, 4L));
+        assertEquals(11L, message.sequence); assertEquals(4L, message.generation);
+        assertEquals(com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue.Kind.PROJECTILE_IMPACT,
+                message.cue.kind); assertTrue(message.cue.entityHit);
+        assertTrue(message.cue.secondaryExplosion); assertEquals(3.5f, message.cue.x, 0f);
+    }
+
+    @Test public void nativeDynamicCaptureRejectsMalformedPresentationData() {
+        com.interrupt.dungeoneer.entities.projectiles.Projectile projectile =
+                new com.interrupt.dungeoneer.entities.projectiles.Projectile();
+        projectile.artType = null;
+        try {
+            com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(1L, 0L, projectile);
+            fail("Missing art type must fail cleanly");
+        }
+        catch(IllegalArgumentException expected) { }
+
+        projectile.artType = com.interrupt.dungeoneer.entities.Entity.ArtType.sprite;
+        projectile.x = Float.NaN;
+        try {
+            com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(1L, 0L, projectile);
+            fail("Nonfinite position must fail cleanly");
+        }
+        catch(IllegalArgumentException expected) { }
+
+        projectile.x = 0f;
+        projectile.spriteAtlas = new String(new char[129]).replace('\0', 'x');
+        try {
+            com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(1L, 0L, projectile);
+            fail("Unbounded atlas must fail cleanly");
+        }
+        catch(IllegalArgumentException expected) { }
+
+        try {
+            com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(1L, 0L,
+                    new com.interrupt.dungeoneer.entities.projectiles.Projectile() { });
+            fail("Unknown projectile subclass cannot fall back to generic presentation");
+        }
+        catch(IllegalArgumentException expected) { }
+    }
+
+    @Test public void nativeSpellPresentationRoundTripsAcceptedItemAndExactAudio() throws Exception {
+        com.interrupt.dungeoneer.entities.spells.Beam spell =
+                new com.interrupt.dungeoneer.entities.spells.Beam();
+        com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation presentation =
+                com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation.capture(
+                        "participant:campaign-slot-2", 71L, spell,
+                        new com.badlogic.gdx.math.Vector3(1.25f, 2.5f, 0.75f), true);
+        DirectConnectWire.NativeSpellPresentationMessage decoded =
+                (DirectConnectWire.NativeSpellPresentationMessage)roundTrip(
+                        new DirectConnectWire.NativeSpellPresentationMessage(
+                                "session", 9L, presentation, 4L));
+
+        assertEquals(9L, decoded.sequence); assertEquals(4L, decoded.generation);
+        assertEquals("participant:campaign-slot-2", decoded.presentation.sourceId);
+        assertEquals(71L, decoded.presentation.itemId); assertTrue(decoded.presentation.zap);
+        assertEquals(spell.getCastSoundAsset(), decoded.presentation.sound);
+        assertEquals(0.75f, decoded.presentation.volume, 0f);
+        assertEquals(13f, decoded.presentation.range, 0f);
+        assertEquals(2.5f, decoded.presentation.y, 0f);
+    }
+
+    @Test public void nativeMeleePresentationRoundTripsItemImpactAndDirection() throws Exception {
+        com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation presentation =
+                com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation.capture(
+                        "participant:campaign-slot-2", 72L,
+                        com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation.Kind.WORLD_HIT,
+                        new com.badlogic.gdx.math.Vector3(1f, 2f, 0.5f),
+                        new com.badlogic.gdx.math.Vector3(0.5f, 0.5f, 0f).nor(),
+                        1000007L);
+        DirectConnectWire.NativeMeleePresentationMessage decoded =
+                (DirectConnectWire.NativeMeleePresentationMessage)roundTrip(
+                        new DirectConnectWire.NativeMeleePresentationMessage(
+                                "session", 10L, presentation, 5L));
+
+        assertEquals(10L, decoded.sequence); assertEquals(5L, decoded.generation);
+        assertEquals(72L, decoded.presentation.itemId);
+        assertEquals(1000007L, decoded.presentation.targetObjectId);
+        assertEquals(com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation.Kind.WORLD_HIT,
+                decoded.presentation.kind);
+        assertEquals(2f, decoded.presentation.y, 0f);
+        assertEquals(0.70710677f, decoded.presentation.directionX, 0.00001f);
+    }
+
+    @Test public void breakableStateRoundTripsDamageMotionAndDestruction() throws Exception {
+        com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot state =
+                new com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot(
+                        1000007L, 9L, 1, false, false,
+                        1f, 2f, 0.5f, 0.1f, -0.2f, 0.3f, 4f, 5f, 6f);
+        DirectConnectWire.BreakableStateMessage decoded =
+                (DirectConnectWire.BreakableStateMessage)roundTrip(
+                        new DirectConnectWire.BreakableStateMessage("session", state));
+
+        assertEquals(1000007L, decoded.state.entityId);
+        assertEquals(9L, decoded.state.revision);
+        assertEquals(1, decoded.state.hp);
+        assertFalse(decoded.state.active);
+        assertEquals(-0.2f, decoded.state.velocityY, 0f);
+        assertEquals(6f, decoded.state.rotationZ, 0f);
+    }
+
+    @Test public void nativeRangedPresentationRoundTripsAcceptedBowRelease() throws Exception {
+        com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation presentation =
+                com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation.capture(
+                        "participant:campaign-slot-2", 73L,
+                        new com.badlogic.gdx.math.Vector3(1.5f, 2.75f, 0.5f));
+        DirectConnectWire.NativeRangedPresentationMessage decoded =
+                (DirectConnectWire.NativeRangedPresentationMessage)roundTrip(
+                        new DirectConnectWire.NativeRangedPresentationMessage(
+                                "session", 11L, presentation, 6L));
+
+        assertEquals(11L, decoded.sequence); assertEquals(6L, decoded.generation);
+        assertEquals("participant:campaign-slot-2", decoded.presentation.sourceId);
+        assertEquals(73L, decoded.presentation.itemId);
+        assertEquals(2.75f, decoded.presentation.y, 0f);
     }
 
     private DirectConnectWire.Message roundTrip(DirectConnectWire.Message message)

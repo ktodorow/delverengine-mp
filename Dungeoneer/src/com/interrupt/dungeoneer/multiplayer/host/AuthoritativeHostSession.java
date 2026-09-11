@@ -37,10 +37,11 @@ public final class AuthoritativeHostSession implements HostSessionCommandGateway
     public void advanceOneTick() {
         final long tick;
         final HostSessionSnapshot snapshot;
+        final TickOutput output;
         synchronized(this) {
             hostTick++;
             tick = hostTick;
-            HostSessionOutput output = new TickOutput(tick);
+            output = new TickOutput(tick);
             int commandCount = pendingCommands.size();
             for(int i = 0; i < commandCount; i++) {
                 simulation.applyCommand(tick, pendingCommands.remove(), output);
@@ -52,6 +53,7 @@ public final class AuthoritativeHostSession implements HostSessionCommandGateway
                 throw new IllegalStateException("Host simulation returned a null snapshot.");
             }
         }
+        output.publishPending();
         transport.publishSnapshot(tick, snapshot);
     }
 
@@ -61,33 +63,46 @@ public final class AuthoritativeHostSession implements HostSessionCommandGateway
 
     private final class TickOutput implements HostSessionOutput {
         private final long tick;
+        private final Queue<Runnable> pendingOutputs = new ArrayDeque<Runnable>();
 
         private TickOutput(long tick) {
             this.tick = tick;
         }
 
         @Override
-        public void event(HostSessionEvent event) {
+        public void event(final HostSessionEvent event) {
             if(event == null) throw new IllegalArgumentException("Host event cannot be null.");
-            transport.publishEvent(tick, event);
+            pendingOutputs.add(new Runnable() {
+                @Override public void run() { transport.publishEvent(tick, event); }
+            });
         }
 
         @Override
-        public void disconnect(HostDisconnectOutcome outcome) {
+        public void disconnect(final HostDisconnectOutcome outcome) {
             if(outcome == null) throw new IllegalArgumentException("Disconnect outcome cannot be null.");
-            transport.publishDisconnect(tick, outcome);
+            pendingOutputs.add(new Runnable() {
+                @Override public void run() { transport.publishDisconnect(tick, outcome); }
+            });
         }
 
         @Override
-        public void transition(HostTransitionOutcome outcome) {
+        public void transition(final HostTransitionOutcome outcome) {
             if(outcome == null) throw new IllegalArgumentException("Transition outcome cannot be null.");
-            transport.publishTransition(tick, outcome);
+            pendingOutputs.add(new Runnable() {
+                @Override public void run() { transport.publishTransition(tick, outcome); }
+            });
         }
 
         @Override
-        public void persist(HostPersistedState state) {
+        public void persist(final HostPersistedState state) {
             if(state == null) throw new IllegalArgumentException("Persisted Host state cannot be null.");
-            storage.persist(tick, state);
+            pendingOutputs.add(new Runnable() {
+                @Override public void run() { storage.persist(tick, state); }
+            });
+        }
+
+        private void publishPending() {
+            while(!pendingOutputs.isEmpty()) pendingOutputs.remove().run();
         }
     }
 }

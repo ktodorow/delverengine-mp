@@ -13,6 +13,9 @@ public final class RemoteAvatar extends Actor {
     public interface DamageAuthorityListener {
         void onDamageIntent(RemoteAvatar avatar, int damage, DamageType damageType,
                 Entity instigator);
+
+        default boolean onPhysicsImpulseIntent(RemoteAvatar avatar,
+                com.badlogic.gdx.math.Vector3 impulse) { return false; }
     }
 
     private static final String AVATAR_ATLAS = "tech_sprites";
@@ -26,11 +29,21 @@ public final class RemoteAvatar extends Actor {
     private float damageFlashTime;
     private CombatAction presentedAction = CombatAction.MELEE;
     private transient DamageAuthorityListener damageAuthorityListener;
+    private transient com.interrupt.dungeoneer.entities.Player nativeCombatStats;
+
+    @Override public boolean usesPlayerTime() { return true; }
+
+    public void setNativeCombatStats(com.interrupt.dungeoneer.entities.Player player) { nativeCombatStats = player; }
+
+    @Override public float getMagicResistModBoost() {
+        return nativeCombatStats == null ? super.getMagicResistModBoost() : nativeCombatStats.getMagicResistModBoost();
+    }
 
     public RemoteAvatar(MovementEntityDescriptor descriptor) {
         super(0f, 0f, 0);
         if(descriptor == null) throw new IllegalArgumentException("Remote Avatar descriptor cannot be null.");
         this.descriptor = descriptor;
+        multiplayerDamageSource = descriptor.getParticipantId().getValue();
         isSolid = false;
         ignorePlayerCollision = true;
         persists = false;
@@ -88,7 +101,7 @@ public final class RemoteAvatar extends Actor {
 
     @Override
     public int takeDamage(int damage, DamageType damageType, Entity instigator) {
-        if(damageAuthorityListener != null && damage > 0) {
+        if(damageAuthorityListener != null && damage != 0) {
             damageAuthorityListener.onDamageIntent(this, damage, damageType, instigator);
         }
         return Math.max(0, damage);
@@ -101,7 +114,18 @@ public final class RemoteAvatar extends Actor {
     }
 
     @Override
+    public void applyPhysicsImpulse(com.badlogic.gdx.math.Vector3 impulse) {
+        if(damageAuthorityListener != null
+                && damageAuthorityListener.onPhysicsImpulseIntent(this, impulse.cpy())) return;
+        super.applyPhysicsImpulse(impulse);
+    }
+
+    @Override
     public void tick(Level level, float delta) {
+        // Level passes world time, whereas native Player ticks in personal time.
+        com.interrupt.dungeoneer.game.Game game = com.interrupt.dungeoneer.game.Game.instance;
+        if(game != null && game.getTickWorldTimeScale() > 0) delta /= game.getTickWorldTimeScale();
+        delta *= actorTimeScale;
         animationTime += delta;
         if(movementState == MovementState.MOVING) {
             yOffset = 0.05f * Math.abs((float)Math.sin(animationTime * 0.35f));
@@ -133,6 +157,8 @@ public final class RemoteAvatar extends Actor {
         else {
             color.set(baseColor);
         }
+        if(hasStatusEffectAuthority()) tickDrunkRecovery(delta);
+        tickStatusEffects(delta);
         tickAttached(level, delta);
     }
 

@@ -145,6 +145,18 @@ public class Explosion extends Entity {
     }
 
     public void explode(Level level, float particleAmountMod) {
+        if(!isActive) return;
+        if(level.nativeExplosionListener != null
+                && !level.nativeExplosionListener.onExplosion(this, particleAmountMod)) return;
+        explode(level, particleAmountMod, true);
+    }
+
+    /** Original visual/audio path, without damage, impulses, statuses or secondary spawns. */
+    public void playPresentation(Level level, float particleAmountMod) {
+        explode(level, particleAmountMod, false);
+    }
+
+    private void explode(Level level, float particleAmountMod, boolean gameplay) {
 
 	    if(!isActive) return;
 
@@ -210,13 +222,27 @@ public class Explosion extends Entity {
         level.non_collidable_entities.add(l);
 
 
+        if(gameplay) applyGameplay(level);
+
+        if(makeDustRing && Options.instance.graphicsDetailLevel >= 2) {
+            makeDustRing(level);
+        }
+        if(this.makeFlyAways && Options.instance.graphicsDetailLevel >= 2) {
+            this.makeFlyAways(level);
+        }
+        if(gameplay) spawnStuff(level);
+    }
+
+    protected void applyGameplay(Level level) {
         // apply inpulses to physics objects
         Vector3 temp1 = new Vector3(x,y,z);
         Vector3 temp2 = new Vector3();
-        Array<Entity> nearby = level.spatialhash.getEntitiesAt(x, y, impulseDistance);
+        Array<Entity> nearby = new Array<Entity>(level.spatialhash.getEntitiesAt(x, y, impulseDistance));
+        if(level.nativeExplosionListener != null) level.nativeExplosionListener.addTargets(this, nearby);
         for(int i = 0; i < nearby.size; i++) {
             Entity n = nearby.get(i);
-            if(n != owner) {
+            if(n != owner && (level.nativeExplosionListener == null
+                    || level.nativeExplosionListener.canAffect(this, n))) {
                 temp2.set(n.x,n.y,n.z);
 
                 // find out how far away from the explosion center this entity is
@@ -251,15 +277,6 @@ public class Explosion extends Entity {
             }
         }
 
-        if(makeDustRing && Options.instance.graphicsDetailLevel >= 2) {
-            makeDustRing(level);
-        }
-
-        if(this.makeFlyAways && Options.instance.graphicsDetailLevel >= 2) {
-            this.makeFlyAways(level);
-        }
-
-        spawnStuff(level);
     }
 
     public void makeDustRing(Level level) {
@@ -328,7 +345,7 @@ public class Explosion extends Entity {
 
         for (int i = 0; i < amt; i++) {
             // Make dust particle!
-            Color particleColor = this.flyAwayColor == null ? color : this.flyAwayColor;
+            Color particleColor = new Color(this.flyAwayColor == null ? color : this.flyAwayColor);
             particleColor.a = 1f;
 
             Particle p = CachePools.getParticle(x, y, z - 0.12f, 0, 0, 0, 18, particleColor, fullbrite);

@@ -17,6 +17,10 @@ public class SlowTimeEffect extends StatusEffect {
     /** How much the effect should be eased into. Higher values means a faster lerp. */
     public float effectLerpScale = 5.0f;
 
+    private transient float currentWorldTimeMod = 1f;
+
+    public float getWorldTimeMod() { return currentWorldTimeMod; }
+
     private float initialTimer = 0.0f;
     private transient float calcedFieldOfView = 1f;
 
@@ -59,8 +63,10 @@ public class SlowTimeEffect extends StatusEffect {
         float playerTimeModLerp = InterpolationHelper.getInterpolator(InterpolationHelper.InterpolationMode.circle).apply(1.0f, playerTimeMod, lerpAlpha);
         calcedFieldOfView = InterpolationHelper.getInterpolator(InterpolationHelper.InterpolationMode.circle).apply(1.0f, fieldOfViewMod, lerpAlpha);
 
+        currentWorldTimeMod = timeModLerp;
+
         // Time is subjective. Need to handle if we have mucked with time, or another actor.
-        if(owner instanceof Player) {
+        if(owner.usesPlayerTime()) {
             // For us, we can slow down the game time
             game.SetGameTimeScale(timeModLerp);
             owner.actorTimeScale = playerTimeModLerp;
@@ -83,12 +89,16 @@ public class SlowTimeEffect extends StatusEffect {
             return;
 
         // Reset time back to normal
-        if(owner instanceof Player) {
+        if(owner.usesPlayerTime()) {
             game.SetGameTimeScale(1.0f);
         }
 
+        currentWorldTimeMod = 1f;
         owner.actorTimeScale = 1f;
     }
+
+    @Override
+    public void setPresentationFieldOfViewMod(float value) { calcedFieldOfView = value; }
 
     @Override
     public float getFieldOfViewMod() {

@@ -22,6 +22,19 @@ import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
 import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
 
 public class Door extends Entity {
+    public void use(ParticipantContext participant, java.util.function.BooleanSupplier spendKey,
+            java.util.function.Consumer<com.interrupt.dungeoneer.multiplayer.items.DoorFeedback> feedback) {
+        java.util.function.Consumer<com.interrupt.dungeoneer.multiplayer.items.DoorFeedback> previous = doorFeedback;
+        doorFeedback = java.util.Objects.requireNonNull(feedback);
+        try { use(participant, spendKey); }
+        finally { doorFeedback = previous; }
+    }
+
+    private transient java.util.function.Consumer<com.interrupt.dungeoneer.multiplayer.items.DoorFeedback> doorFeedback;
+    private void showDoorFeedback(com.interrupt.dungeoneer.multiplayer.items.DoorFeedback feedback) {
+        if(doorFeedback != null) doorFeedback.accept(feedback);
+        else Game.ShowMessage(StringManager.get(feedback.localizationKey), 3, 1f);
+    }
     private transient ParticipantContext usingParticipant;
     private transient DoorSnapshot networkSnapshot;
     private transient java.util.function.BooleanSupplier spendPartyKey;
@@ -53,6 +66,11 @@ public class Door extends Entity {
         x = snapshot.x; y = snapshot.y; z = snapshot.z; rot = snapshot.rotation;
         animateTime = snapshot.animation * animateSpeed;
     }
+
+	/** Native break feedback only; never runs door triggers or hit gameplay. */
+	public void playNetworkBreakPresentation(Level level) {
+		gib(level, new Vector3());
+	}
 
 	public enum DoorState {CLOSED, OPENING, OPEN, CLOSING, STUCK}
     public enum DoorOpenType {SLIDE, SLIDE_UP, ROTATE, ROTATE_UP}
@@ -241,7 +259,7 @@ public class Door extends Entity {
             if (!getsStuckOpen){
                 doClose(true);
             } else {
-                Game.ShowMessage(StringManager.get("entities.Door.stuckText"), 3, 1f);
+                showDoorFeedback(com.interrupt.dungeoneer.multiplayer.items.DoorFeedback.STUCK);
             }
         } 
 		else if (doorState == DoorState.STUCK && breakable) {
@@ -250,7 +268,7 @@ public class Door extends Entity {
 			}
 			else {
 				shakeTimer = 20f;
-				Game.ShowMessage(StringManager.get("entities.Door.stuckText"), 3, 1f);
+				showDoorFeedback(com.interrupt.dungeoneer.multiplayer.items.DoorFeedback.STUCK);
 			}
 		}
 		else {
@@ -261,13 +279,13 @@ public class Door extends Entity {
                     if(spendPartyKey != null ? spendPartyKey.getAsBoolean() : p != null && p.keys > 0) {
                         if(spendPartyKey == null) p.keys--;
                         isLocked=false;
-                        Game.ShowMessage(StringManager.get("entities.Door.unlockedText"), 3, 1f);
+                        showDoorFeedback(com.interrupt.dungeoneer.multiplayer.items.DoorFeedback.UNLOCKED);
                         doOpen(true);
                     } else {    
-                        Game.ShowMessage(StringManager.get("entities.Door.lockedText"), 3, 1f);
+                        showDoorFeedback(com.interrupt.dungeoneer.multiplayer.items.DoorFeedback.LOCKED);
                     }
                 } else {    
-                    Game.ShowMessage(StringManager.get("entities.Door.opensElsewhereText"), 3, 1f);
+                    showDoorFeedback(com.interrupt.dungeoneer.multiplayer.items.DoorFeedback.OPENS_ELSEWHERE);
                 }
             }
         }
@@ -701,6 +719,16 @@ public class Door extends Entity {
 	}
 	
 	public void doHitEffect(float xLoc, float yLoc, float zLoc, Sword sword, Level lvl) {
+		doHitEffect(xLoc, yLoc, zLoc, sword, lvl, true);
+	}
+
+	public void playNetworkHitPresentation(float xLoc, float yLoc, float zLoc,
+			Sword sword, Level lvl) {
+		doHitEffect(xLoc, yLoc, zLoc, sword, lvl, false);
+	}
+
+	private void doHitEffect(float xLoc, float yLoc, float zLoc, Sword sword,
+			Level lvl, boolean shakeLocalPlayer) {
 		if(hp > 0) {
 			if(breakSound != null)
 				Audio.playPositionedSound(breakSound, new Vector3(x,y,z), 0.1f, Game.rand.nextFloat() * 0.1f + 0.95f, 12);
@@ -740,7 +768,8 @@ public class Door extends Entity {
 			lvl.SpawnNonCollidingEntity(part);
 		}
 		
-		Game.instance.player.shake(0.8f);
+		if(shakeLocalPlayer && Game.instance != null && Game.instance.player != null)
+			Game.instance.player.shake(0.8f);
 	}
 	
 	@Override

@@ -35,7 +35,7 @@ public class AuthoritativeCombatEncounterTest {
     }
 
     @Test
-    public void hostResolvesMeleeProjectilesAndSpellsWithOneDamageSource() {
+    public void hostQueuesMeleeProjectilesAndSpellsForNativeResolution() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.updateParticipantPosition(participant(1), 0f, 0f, 0.5f);
@@ -48,23 +48,31 @@ public class AuthoritativeCombatEncounterTest {
         encounter.apply(3L, directedRequest(2, 1L, CombatAction.SPELL,
                 1f, -1f, 0f), output);
 
-        assertEquals(12, monsterHealth(encounter));
-        assertEquals(3, output.events.size());
-        assertEquals(12, output.events.get(2).getSnapshot().getCombatant(
-                AuthoritativeCombatEncounter.SHARED_MONSTER_ID).getHealth());
+        List<CombatRequest> requests = encounter.drainNativeCombatRequests();
+        assertEquals(3, requests.size());
+        assertEquals(CombatAction.MELEE, requests.get(0).getAction());
+        assertEquals(CombatAction.PROJECTILE, requests.get(1).getAction());
+        assertEquals(CombatAction.SPELL, requests.get(2).getAction());
+        assertEquals(24, monsterHealth(encounter));
+        assertEquals(0, output.events.size());
     }
 
     @Test
-    public void hostPublishesOrderedPresentationForPlayerAndMonsterAttacks() {
+    public void hostPublishesOrderedNativePresentationAndDamage() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.setMonsterPosition(0.5f, 0f, 0.5f);
         encounter.updateParticipantPosition(participant(1), 0f, 0f, 0.5f);
         encounter.updateParticipantPosition(participant(2), 20f, 20f, 0.5f);
 
-        encounter.apply(1L, directedRequest(1, 1L, CombatAction.SPELL,
-                1f, 0f, 0f), output);
-        encounter.tick(180L, output);
+        encounter.publishNativePresentation(1L,
+                AuthoritativeCombatEncounter.participantTargetId(participant(1)),
+                AuthoritativeCombatEncounter.SHARED_MONSTER_ID, CombatAction.SPELL,
+                CombatPresentationPhase.ATTACK, 0f, 0f, 0.85f,
+                0.5f, 0f, 0.5f, false, output);
+        encounter.applyNativeMonsterDamage(180L, participant(1), 1,
+                CombatAction.MELEE, 0.5f, 0f, 0.5f,
+                0f, 0f, 0.5f, output);
 
         assertEquals(2, output.presentations.size());
         CombatPresentationEvent playerAttack = output.presentations.get(0);
@@ -76,7 +84,7 @@ public class AuthoritativeCombatEncounterTest {
         assertEquals(CombatAction.SPELL, playerAttack.getAction());
         assertEquals(0f, playerAttack.getOriginX(), 0f);
         assertEquals(0.5f, playerAttack.getImpactX(), 0f);
-        assertTrue(playerAttack.isStateChanged());
+        assertTrue(!playerAttack.isStateChanged());
 
         CombatPresentationEvent monsterAttack = output.presentations.get(1);
         assertEquals(2L, monsterAttack.getSequence());
@@ -95,13 +103,13 @@ public class AuthoritativeCombatEncounterTest {
         encounter.setMonsterPosition(1f, 0f, 0.5f);
         encounter.updateParticipantPosition(participant(1), 0.9f, 0f);
         encounter.updateParticipantPosition(participant(2), 1.5f, 0f);
-        encounter.apply(1L, directedRequest(2, 1L, CombatAction.MELEE,
-                -1f, 0f, 0f), output);
+        encounter.recordNativeMonsterAttacker(1L,
+                AuthoritativeCombatEncounter.SHARED_MONSTER_ID, participant(2));
 
         encounter.tick(180L, output);
 
         CombatSnapshot snapshot = encounter.getSnapshot(180L);
-        assertEquals(7, snapshot.getCombatant(
+        assertEquals(8, snapshot.getCombatant(
                 AuthoritativeCombatEncounter.participantTargetId(participant(2))).getHealth());
         assertEquals(8, snapshot.getCombatant(
                 AuthoritativeCombatEncounter.participantTargetId(participant(1))).getHealth());
@@ -123,7 +131,7 @@ public class AuthoritativeCombatEncounterTest {
     }
 
     @Test
-    public void directedAttackPassesThroughCombatIneligibleParticipant() {
+    public void harmfulIntentQueuesWithoutSyntheticParticipantCollision() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.updateParticipantPosition(participant(1), 1f, 1f, 0.5f);
@@ -134,9 +142,9 @@ public class AuthoritativeCombatEncounterTest {
         encounter.apply(1L, directedRequest(1, 1L, CombatAction.MELEE,
                 1f, 0f, 0f), output);
 
-        assertEquals(20, monsterHealth(encounter));
-        assertEquals(AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
-                output.presentations.get(0).getTargetId());
+        assertEquals(24, monsterHealth(encounter));
+        assertEquals(1, encounter.drainNativeCombatRequests().size());
+        assertEquals(0, output.presentations.size());
     }
 
     @Test
@@ -158,7 +166,7 @@ public class AuthoritativeCombatEncounterTest {
         encounter.tick(360L, output);
 
         assertEquals(second, encounter.getSnapshot(360L).getMonsterTargetId());
-        assertEquals(7, encounter.getSnapshot(360L).getCombatant(second).getHealth());
+        assertEquals(8, encounter.getSnapshot(360L).getCombatant(second).getHealth());
     }
 
     @Test
@@ -184,7 +192,7 @@ public class AuthoritativeCombatEncounterTest {
     }
 
     @Test
-    public void duplicateAndStaleRequestsNeverApplyDamageTwice() {
+    public void duplicateAndStaleRequestsQueueOnlyOneNativeAction() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.updateParticipantPosition(participant(1), 0f, 0f, 0.5f);
@@ -197,10 +205,10 @@ public class AuthoritativeCombatEncounterTest {
         encounter.apply(3L, directedRequest(1, 1L, CombatAction.SPELL,
                 1f, 0f, 0f), output);
 
-        assertEquals(20, monsterHealth(encounter));
-        assertEquals(1, output.events.size());
-        assertEquals(1, output.presentations.size());
-        assertTrue(output.events.get(0).getSnapshot().getSequence() > 1L);
+        assertEquals(24, monsterHealth(encounter));
+        assertEquals(1, encounter.drainNativeCombatRequests().size());
+        assertEquals(0, output.events.size());
+        assertEquals(0, output.presentations.size());
     }
 
     @Test
@@ -233,20 +241,20 @@ public class AuthoritativeCombatEncounterTest {
         encounter.apply(2L, directedRequest(1, 3L, CombatAction.MELEE,
                 1f, 0f, 0f), output);
 
-        assertEquals(19, monsterHealth(encounter));
-        assertEquals(1, output.events.size());
-        assertEquals(1, output.presentations.size());
+        assertEquals(1, encounter.drainNativeCombatRequests().size());
+        assertEquals(24, monsterHealth(encounter));
+        assertEquals(0, output.events.size());
+        assertEquals(0, output.presentations.size());
 
         encounter.apply(31L, directedRequest(1, 4L, CombatAction.PROJECTILE,
                 1f, 0f, 0f), output);
 
-        assertEquals(16, monsterHealth(encounter));
-        assertEquals(2, output.events.size());
-        assertEquals(2, output.presentations.size());
+        assertEquals(1, encounter.drainNativeCombatRequests().size());
+        assertEquals(24, monsterHealth(encounter));
     }
 
     @Test
-    public void hostRejectsMeleeOutsideRangeButAcceptsRangedHit() {
+    public void hostDefersRangeAndHitValidationToNativeWorld() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.setMonsterPosition(3f, 0f, 0.5f);
@@ -258,12 +266,16 @@ public class AuthoritativeCombatEncounterTest {
         encounter.apply(31L, directedRequest(1, 2L, CombatAction.PROJECTILE,
                 1f, 0f, 0f), output);
 
-        assertEquals(21, monsterHealth(encounter));
-        assertEquals(1, output.events.size());
+        List<CombatRequest> requests = encounter.drainNativeCombatRequests();
+        assertEquals(2, requests.size());
+        assertEquals(CombatAction.MELEE, requests.get(0).getAction());
+        assertEquals(CombatAction.PROJECTILE, requests.get(1).getAction());
+        assertEquals(24, monsterHealth(encounter));
+        assertEquals(0, output.events.size());
     }
 
     @Test
-    public void hostTracesDirectedSpellIntoMonsterFromAuthoritativeSource() {
+    public void hostDefersDirectedSpellTraceToNativeWorld() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.updateParticipantPosition(participant(1), 1f, 1f, 0.5f);
@@ -272,18 +284,16 @@ public class AuthoritativeCombatEncounterTest {
         encounter.apply(1L, directedRequest(1, 1L, CombatAction.SPELL,
                 1f, 0f, 0f), output);
 
-        assertEquals(19, monsterHealth(encounter));
-        assertEquals(1, output.events.size());
-        assertEquals(1, output.presentations.size());
-        CombatPresentationEvent presentation = output.presentations.get(0);
-        assertEquals(AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
-                presentation.getTargetId());
-        assertEquals(3f, presentation.getImpactX(), 0f);
-        assertTrue(presentation.isStateChanged());
+        List<CombatRequest> requests = encounter.drainNativeCombatRequests();
+        assertEquals(1, requests.size());
+        assertEquals(CombatAction.SPELL, requests.get(0).getAction());
+        assertEquals(24, monsterHealth(encounter));
+        assertEquals(0, output.events.size());
+        assertEquals(0, output.presentations.size());
     }
 
     @Test
-    public void hostPublishesDerivedFloorImpactWhenDirectedSpellMisses() {
+    public void hostDoesNotInventFloorImpactBeforeNativeProjectileRuns() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.updateParticipantPosition(participant(1), 1f, 1f, 0.5f);
@@ -294,16 +304,12 @@ public class AuthoritativeCombatEncounterTest {
 
         assertEquals(24, monsterHealth(encounter));
         assertEquals(0, output.events.size());
-        assertEquals(1, output.presentations.size());
-        CombatPresentationEvent presentation = output.presentations.get(0);
-        assertEquals("", presentation.getTargetId());
-        assertTrue(presentation.getImpactX() > presentation.getOriginX());
-        assertEquals(0.5f, presentation.getImpactZ(), 0.0001f);
-        assertTrue(!presentation.isStateChanged());
+        assertEquals(0, output.presentations.size());
+        assertEquals(1, encounter.drainNativeCombatRequests().size());
     }
 
     @Test
-    public void directedMeleeCannotDamageMonsterOutsideAim() {
+    public void directedMeleeAimIsPreservedForNativeTrace() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.updateParticipantPosition(participant(1), 1f, 1f, 0.5f);
@@ -312,13 +318,15 @@ public class AuthoritativeCombatEncounterTest {
         encounter.apply(1L, directedRequest(1, 1L, CombatAction.MELEE,
                 0f, 1f, 0f), output);
 
+        CombatRequest queued = encounter.drainNativeCombatRequests().get(0);
+        assertEquals(0f, queued.getAimX(), 0f);
+        assertEquals(1f, queued.getAimY(), 0f);
         assertEquals(24, monsterHealth(encounter));
-        assertEquals(1, output.presentations.size());
-        assertEquals("", output.presentations.get(0).getTargetId());
+        assertEquals(0, output.presentations.size());
     }
 
     @Test
-    public void directedHarmfulAttackStopsOnTeammateWithoutDamage() {
+    public void directedHarmfulIntentCannotDamageTeammateBeforeNativeResolution() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         String second = AuthoritativeCombatEncounter.participantTargetId(participant(2));
@@ -332,8 +340,8 @@ public class AuthoritativeCombatEncounterTest {
         assertEquals(24, monsterHealth(encounter));
         assertEquals(8, encounter.getSnapshot(1L).getCombatant(second).getHealth());
         assertEquals(0, output.events.size());
-        assertEquals(second, output.presentations.get(0).getTargetId());
-        assertTrue(!output.presentations.get(0).isStateChanged());
+        assertEquals(0, output.presentations.size());
+        assertEquals(1, encounter.drainNativeCombatRequests().size());
     }
 
     @Test
@@ -382,8 +390,8 @@ public class AuthoritativeCombatEncounterTest {
         encounter.setMonsterPosition(2f, 1f, 0.5f);
         encounter.updateParticipantPosition(participant(1), 1f, 1f, 0.5f);
         encounter.updateParticipantPosition(participant(2), 0f, 1f, 0.5f);
-        encounter.apply(1L, directedRequest(1, 1L, CombatAction.MELEE,
-                1f, 0f, 0f), output);
+        encounter.recordNativeMonsterAttacker(1L,
+                AuthoritativeCombatEncounter.SHARED_MONSTER_ID, participant(1));
         encounter.apply(2L, request(1, 2L, CombatAction.SELF_DAMAGE, first), output);
         encounter.setMonsterPosition(10f, 10f, 0.5f);
         encounter.apply(3L, directedRequest(2, 1L, CombatAction.BENEFICIAL_SPELL,
@@ -396,7 +404,7 @@ public class AuthoritativeCombatEncounterTest {
 
         CombatSnapshot snapshot = encounter.getSnapshot(180L);
         assertEquals(first, snapshot.getMonsterTargetId());
-        assertEquals(7, snapshot.getCombatant(first).getHealth());
+        assertEquals(8, snapshot.getCombatant(first).getHealth());
         assertEquals(8, snapshot.getCombatant(second).getHealth());
     }
 
@@ -439,7 +447,7 @@ public class AuthoritativeCombatEncounterTest {
     }
 
     @Test
-    public void monsterApproachesButCannotDamageParticipantOutsideMeleeReach() {
+    public void encounterTracksTargetWithoutSimulatingNativeMonsterMovementOrDamage() {
         AuthoritativeCombatEncounter encounter = encounter();
         EventOutput output = new EventOutput();
         encounter.setMonsterPosition(1f, 1f, 0.5f);
@@ -451,8 +459,9 @@ public class AuthoritativeCombatEncounterTest {
         CombatSnapshot snapshot = encounter.getSnapshot(180L);
         assertEquals(8, snapshot.getCombatant(
                 AuthoritativeCombatEncounter.participantTargetId(participant(1))).getHealth());
-        assertTrue(snapshot.getMonsterX() > 1f);
-        assertTrue(snapshot.getMonsterX() < 8f);
+        assertEquals(AuthoritativeCombatEncounter.participantTargetId(participant(1)),
+                snapshot.getMonsterTargetId());
+        assertEquals(1f, snapshot.getMonsterX(), 0.0001f);
     }
 
     @Test
@@ -464,7 +473,7 @@ public class AuthoritativeCombatEncounterTest {
         encounter.updateParticipantPosition(participant(2), 20f, 20f, 0.5f);
         encounter.apply(1L, directedRequest(1, 1L, CombatAction.MELEE,
                 1f, 0f, 0f), output);
-        encounter.updateParticipantPosition(participant(1), 10f, 0f, 0.5f);
+        encounter.updateParticipantPosition(participant(1), 20f, 0f, 0.5f);
 
         encounter.tick(2L, 1f / 60f, output);
         assertEquals(first, encounter.getSnapshot(2L).getMonsterTargetId());

@@ -14,7 +14,7 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
     private static final float[] SPAWN_X_OFFSETS = { 0f, 0.4f, -0.4f, 0f };
     private static final float[] SPAWN_Y_OFFSETS = { 0f, 0f, 0f, 0.4f };
 
-    private volatile java.util.List<MovementObstacle> doorObstacles = java.util.Collections.emptyList();
+    private volatile java.util.List<MovementObstacle> worldObstacles = java.util.Collections.emptyList();
     private final Level level;
     private final Vector3 collision = new Vector3(RADIUS, RADIUS, HEIGHT);
     private final float baseSpawnX;
@@ -71,18 +71,22 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
         if(!finite(x) || !finite(y) || !finite(z)
                 || x < RADIUS || x > level.width - RADIUS
                 || y < RADIUS || y > level.height - RADIUS) return false;
-        for(MovementObstacle obstacle : doorObstacles) {
+        for(MovementObstacle obstacle : worldObstacles) {
             if(obstacle.overlaps(x, y, z, RADIUS, HEIGHT)) return false;
         }
         return level.isFree(x, y, z, collision, STEP_HEIGHT, false, null);
     }
 
-    public void setDoorObstacles(java.util.List<MovementObstacle> obstacles) {
+    public void setWorldObstacles(java.util.List<MovementObstacle> obstacles) {
         if(obstacles == null || obstacles.size() > 4096) {
             throw new IllegalArgumentException("Door obstacle count is outside bounds.");
         }
-        doorObstacles = java.util.Collections.unmodifiableList(
+        worldObstacles = java.util.Collections.unmodifiableList(
                 new java.util.ArrayList<MovementObstacle>(obstacles));
+    }
+
+    public void setDoorObstacles(java.util.List<MovementObstacle> obstacles) {
+        setWorldObstacles(obstacles);
     }
 
     @Override
@@ -98,7 +102,7 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
     @Override
     public boolean hasLineOfSight(float fromX, float fromY, float toX, float toY) {
         if(!finite(fromX) || !finite(fromY) || !finite(toX) || !finite(toY)) return false;
-        for(MovementObstacle obstacle : doorObstacles) {
+        for(MovementObstacle obstacle : worldObstacles) {
             if(obstacle.blocksSegment(fromX, fromY, toX, toY)) return false;
         }
         return level.canSee(fromX, fromY, toX, toY);

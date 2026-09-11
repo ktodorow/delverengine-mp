@@ -9,8 +9,10 @@ import com.interrupt.dungeoneer.entities.triggers.BasicTrigger;
 import com.interrupt.dungeoneer.game.CachePools;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation;
 
 import java.util.Random;
+import java.util.function.Predicate;
 
 public class Sword extends Weapon {
 	
@@ -43,7 +45,7 @@ public class Sword extends Weapon {
 		if(p == null || p.handAnimation == null) {
 			return;
 		}
-		
+
 		p.setAttackSpeed(getSpeed());
 		p.handAnimateTimer = (p.handAnimation.length() / p.handAnimation.speed) * 0.75f;
 		
@@ -53,84 +55,167 @@ public class Sword extends Weapon {
 		hitTime = (p.handAnimation.actionTime / p.handAnimation.speed) * 0.5f;
 		
 		Audio.playSound(swingSound, 0.25f, Game.rand.nextFloat() * 0.1f + 0.95f);
+		Vector3 swingDirection = new Vector3(Game.camera.direction.x,
+				Game.camera.direction.z, Game.camera.direction.y);
+		notifyMeleePresentation(p, lvl, NativeMeleePresentation.Kind.SWING, null,
+				new Vector3(p.x, p.y, p.z), swingDirection);
 	}
 	
 	public void tickAttack(Player p, Level lvl, float time) {
 		attackTimer += time;
 		
 		if(attackTimer >= hitTime && lastTickTime < hitTime) {
-			float usedist = reach;
-			Entity near = null;
-			
 			Vector3 attackDir = new Vector3(Game.camera.direction);
 			notifyWeaponAttack(p, attackDir, attackPower);
-			
-			float hitX = 0f;
-			float hitY = 0f;
-			float hitZ = 0f;
-			
-			// sweep the collision
-			for(int i = 1; i < 10 && near == null; i++)
-			{
-				float dstep = (i / 6.0f) * usedist;
-				float projx = attackDir.x * dstep;
-				float projy = attackDir.z * dstep;
-				float projz = attackDir.y * dstep;
-				
-				hitX = p.x + projx;
-				hitY = p.y + projy;
-				hitZ = p.z + projz - 0.14f;
-				
-				near = lvl.checkEntityCollision(p.x + projx, p.y + projy, p.z + projz + 0.4f, 0.2f, 0.2f, 0.2f, null, p);
+			if(p.deferWeaponWorldAttack()) {
+				lastTickTime = attackTimer;
+				return;
 			}
-			
-			if(near != null)
-			{
-				float projx = ( 0 * (float)Math.cos(p.rot) + usedist * (float)Math.sin(p.rot)) * 1;
-				float projy = (usedist * (float)Math.cos(p.rot) - 0 * (float)Math.sin(p.rot)) * 1;
-				
-				int attackroll = doAttackRoll(attackPower, p);
-				near.hit(projx, projy, attackroll, attackPower * (knockback + p.getKnockbackStatBoost()), getDamageType(), Game.instance.player);
-				
-				if (near instanceof Breakable) {
-					((Breakable)near).doHitEffect(hitX, hitY, hitZ, this, lvl);
-				}
-				else if (near instanceof Door) {
-					((Door)near).doHitEffect(hitX, hitY, hitZ, this, lvl);
-				}
-				else if(near instanceof BasicTrigger) {
-					doHitEffect(hitX, hitY, hitZ, lvl);
-				}
-				else if(!near.isDynamic) {
-					doHitEffect(hitX, hitY, hitZ, lvl);
-				}
+			resolveAttack(p, p, lvl,
+					new Vector3(attackDir.x, attackDir.z, attackDir.y),
+					attackPower, false, entity -> true);
+			}
 
-				magicHitVfx(hitX, hitY, hitZ, lvl);
+			lastTickTime = attackTimer;
+	}
+
+	public static final class AttackResult {
+		public final Entity target;
+		public final NativeMeleePresentation.Kind kind;
+		public final Vector3 position;
+		public final Vector3 direction;
+
+		private AttackResult(Entity target, NativeMeleePresentation.Kind kind,
+				Vector3 position, Vector3 direction) {
+			this.target = target;
+			this.kind = kind;
+			this.position = position;
+			this.direction = direction;
+		}
+	}
+
+	/** Host-side native Sword release for an accepted remote Participant attack. */
+	public AttackResult resolveNetworkAttack(Entity owner, Player stats, Level lvl,
+			Vector3 worldDirection, float power, Predicate<Entity> canAffect) {
+		return resolveAttack(owner, stats, lvl, worldDirection, power, true, canAffect);
+	}
+
+	private AttackResult resolveAttack(Entity owner, Player stats, Level lvl,
+			Vector3 worldDirection, float power, boolean networkAttack,
+			Predicate<Entity> canAffect) {
+		if(owner == null || stats == null || lvl == null || worldDirection == null
+				|| worldDirection.len2() < 0.000001f) return null;
+		Vector3 direction = worldDirection.cpy().nor();
+		Entity near = null;
+		float hitX = owner.x;
+		float hitY = owner.y;
+		float hitZ = owner.z;
+
+		// Keep original Sword sweep distances and collision volume.
+		for(int i = 1; i < 10 && near == null; i++) {
+			float dstep = (i / 6.0f) * reach;
+			float projx = direction.x * dstep;
+			float projy = direction.y * dstep;
+			float projz = direction.z * dstep;
+			hitX = owner.x + projx;
+			hitY = owner.y + projy;
+			hitZ = owner.z + projz - 0.14f;
+			near = lvl.checkEntityCollision(owner.x + projx, owner.y + projy,
+					owner.z + projz + 0.4f, 0.2f, 0.2f, 0.2f, null, owner);
+		}
+
+		if(near != null) {
+			if(canAffect != null && !canAffect.test(near)) return null;
+			int attackroll = doAttackRoll(power, stats);
+			near.hit(direction.x * reach, direction.y * reach, attackroll,
+					power * (knockback + stats.getKnockbackStatBoost()),
+					getDamageType(), owner);
+
+			if(near instanceof Breakable) {
+				if(networkAttack) ((Breakable)near).playNetworkHitPresentation(
+						hitX, hitY, hitZ, this, lvl);
+				else ((Breakable)near).doHitEffect(hitX, hitY, hitZ, this, lvl);
 			}
-			else
-			{	
-				for(int i = 1; i < 10 && near == null; i++)
-				{
-					float dstep = (i / 6.0f) * usedist;
-					float projx = attackDir.x * dstep;
-					float projy = attackDir.z * dstep;
-					float projz = attackDir.y * dstep;
-					if(!lvl.isFree(p.x + projx, p.y + projy, p.z + projz + 0.26f, new Vector3(0.15f, 0.15f, 0.25f), 0, false, null))
-					{
-						doHitEffect(p.x + projx, p.y + projy, p.z + projz - 0.14f, lvl);
-						magicHitVfx(p.x + projx, p.y + projy, p.z + projz - 0.14f, lvl);
-						wasUsed();
-						break;
-					}
-				}
+			else if(near instanceof Door) {
+				if(networkAttack) ((Door)near).playNetworkHitPresentation(
+						hitX, hitY, hitZ, this, lvl);
+				else ((Door)near).doHitEffect(hitX, hitY, hitZ, this, lvl);
+			}
+			else if(near instanceof BasicTrigger || !near.isDynamic) {
+				if(networkAttack) playNetworkWorldHitPresentation(
+						hitX, hitY, hitZ, lvl, direction);
+				else doHitEffect(hitX, hitY, hitZ, lvl);
+			}
+
+			magicHitVfx(hitX, hitY, hitZ, lvl);
+			NativeMeleePresentation.Kind kind = near instanceof BasicTrigger
+					|| !near.isDynamic ? NativeMeleePresentation.Kind.WORLD_HIT
+					: NativeMeleePresentation.Kind.ENTITY_HIT;
+			if(near instanceof Breakable || near instanceof Door)
+				kind = NativeMeleePresentation.Kind.ENTITY_HIT;
+			AttackResult result = new AttackResult(near, kind,
+					new Vector3(hitX, hitY, hitZ), direction);
+			notifyMeleePresentation(owner, lvl, kind, near, result.position, direction);
+			return result;
+		}
+
+		for(int i = 1; i < 10; i++) {
+			float dstep = (i / 6.0f) * reach;
+			float projx = direction.x * dstep;
+			float projy = direction.y * dstep;
+			float projz = direction.z * dstep;
+			if(!lvl.isFree(owner.x + projx, owner.y + projy,
+					owner.z + projz + 0.26f,
+					new Vector3(0.15f, 0.15f, 0.25f), 0, false, null)) {
+				hitX = owner.x + projx;
+				hitY = owner.y + projy;
+				hitZ = owner.z + projz - 0.14f;
+				if(networkAttack) playNetworkWorldHitPresentation(
+						hitX, hitY, hitZ, lvl, direction);
+				else doHitEffect(hitX, hitY, hitZ, lvl);
+				magicHitVfx(hitX, hitY, hitZ, lvl);
+				wasUsed();
+				AttackResult result = new AttackResult(null,
+						NativeMeleePresentation.Kind.WORLD_HIT,
+						new Vector3(hitX, hitY, hitZ), direction);
+				notifyMeleePresentation(owner, lvl, result.kind, null,
+						result.position, direction);
+				return result;
 			}
 		}
-		
-		lastTickTime = attackTimer;
+		return null;
 	}
 	
 	public void doHitEffect(float xLoc, float yLoc, float zLoc, Level lvl) {
-		Audio.playSound(wallHitSound, 0.25f, Game.rand.nextFloat() * 0.1f + 0.95f);
+		playWorldHitPresentation(xLoc, yLoc, zLoc, lvl,
+				new Vector3(Game.camera.direction.x, Game.camera.direction.z,
+						Game.camera.direction.y), false);
+	}
+
+	/** Original Sword wall feedback for observers, without first-person shake or gameplay. */
+	public void playNetworkWorldHitPresentation(float xLoc, float yLoc, float zLoc,
+			Level lvl, Vector3 direction) {
+		playWorldHitPresentation(xLoc, yLoc, zLoc, lvl, direction, true);
+	}
+
+	/** Original elemental hit feedback for observers, without applying another hit. */
+	public void playNetworkEntityHitPresentation(float xLoc, float yLoc, float zLoc,
+			Level lvl) {
+		magicHitVfx(xLoc, yLoc, zLoc, lvl);
+	}
+
+	public void playNetworkSwingPresentation(float xLoc, float yLoc, float zLoc) {
+		Audio.playPositionedSound(swingSound, new Vector3(xLoc, yLoc, zLoc),
+				0.25f, Game.rand.nextFloat() * 0.1f + 0.95f, 12f);
+	}
+
+	private void playWorldHitPresentation(float xLoc, float yLoc, float zLoc,
+			Level lvl, Vector3 direction, boolean networkReplica) {
+		if(networkReplica) {
+			Audio.playPositionedSound(wallHitSound, new Vector3(xLoc, yLoc, zLoc),
+					0.25f, Game.rand.nextFloat() * 0.1f + 0.95f, 12f);
+		}
+		else Audio.playSound(wallHitSound, 0.25f, Game.rand.nextFloat() * 0.1f + 0.95f);
 		
 		Color hitColor = getEnchantmentColor();
 		boolean fullBright = getDamageType() != DamageType.PHYSICAL;
@@ -181,30 +266,46 @@ public class Sword extends Weapon {
 			p.za = 0.004f;
 			p.maxVelocity = 0.005f;
 
-			Game.GetLevel().SpawnNonCollidingEntity(p);
+			lvl.SpawnNonCollidingEntity(p);
 		}
 		
-		makeHitDecal(xLoc, yLoc, zLoc + 0.18f, new Vector3(Game.camera.direction.x, Game.camera.direction.z, Game.camera.direction.y));
+		makeHitDecal(xLoc, yLoc, zLoc + 0.18f, direction, lvl);
 
 		wallHitSpark(xLoc, yLoc, zLoc, lvl);
 		
-		Game.instance.player.shake(1.5f);
+		if(!networkReplica && Game.instance != null && Game.instance.player != null) {
+			Game.instance.player.shake(1.5f);
+		}
 	}
 	
 	public void makeHitDecal(float hitx, float hity, float hitz, Vector3 direction) {
+		makeHitDecal(hitx, hity, hitz, direction, Game.GetLevel());
+	}
+
+	public void makeHitDecal(float hitx, float hity, float hitz, Vector3 direction,
+			Level lvl) {
 		if(hitDecal != null) {
 			ProjectedDecal proj = new ProjectedDecal(hitDecal.artType, hitDecal.tex, hitDecal.decalWidth);
 			proj.x = hitx;
 			proj.y = hity;
 			proj.z = hitz;
-			proj.direction = new Vector3(Game.camera.direction.x, Game.camera.direction.z, Game.camera.direction.y);
+			proj.direction = direction.cpy();
 			proj.roll = Game.rand.nextFloat() * 360f;
 			
 			proj.end = 0.6f;
 			proj.start = 0.01f;
 			proj.isOrtho = true;
 			
-			Game.instance.level.entities.add(proj);
+			lvl.entities.add(proj);
+		}
+	}
+
+	private void notifyMeleePresentation(Entity owner, Level level,
+			NativeMeleePresentation.Kind kind, Entity target, Vector3 position,
+			Vector3 direction) {
+		if(level != null && level.nativeMeleePresentationListener != null) {
+			level.nativeMeleePresentationListener.onMeleePresentation(owner, this, kind,
+					target, position.cpy(), direction.cpy());
 		}
 	}
 

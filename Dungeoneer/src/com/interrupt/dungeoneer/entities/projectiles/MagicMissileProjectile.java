@@ -11,6 +11,7 @@ import com.interrupt.dungeoneer.entities.items.Weapon.DamageType;
 import com.interrupt.dungeoneer.game.CachePools;
 import com.interrupt.dungeoneer.game.Colors;
 import com.interrupt.dungeoneer.game.Game;
+import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.Options;
 import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.gfx.animation.SpriteAnimation;
@@ -173,31 +174,7 @@ public class MagicMissileProjectile extends Projectile {
 		Game.instance.player.shake(4f, 4f, new Vector3(x,y,z));
 
 		if(damageType != DamageType.PHYSICAL) {
-			Particle ring = new Particle(x, y, z, 0, 0, 0, 0, color, true);
-			((DrawableSprite)ring.drawable).billboard = false;
-			((DrawableSprite)ring.drawable).dir.set(xa, za, ya).nor();
-			ring.xa = 0;
-			ring.ya = 0;
-			ring.za = 0;
-			ring.artType = ArtType.particle;
-			ring.tex = 16;
-			ring.x = x;
-			ring.y = y;
-			ring.z = z;
-			ring.lifetime = 20;
-			ring.startScale = 0.1f;
-			ring.fullbrite = true;
-			ring.endScale = 8f;
-			ring.scale = 0f;
-			ring.floating = true;
-			ring.yOffset = yOffset;
-			ring.checkCollision = false;
-			ring.color.set(color);
-			ring.isActive = true;
-			ring.initialized = false;
-			ring.isDynamic = true;
-			ring.haloMode = HaloMode.CORONA_ONLY;
-			Game.instance.level.non_collidable_entities.add(ring);
+			playElementalImpactRing(xa, ya);
 
 			// destroy!
 			if (this.explosion.damage == 0) {
@@ -217,6 +194,15 @@ public class MagicMissileProjectile extends Projectile {
 				super.hit(xa, ya, damage, force, damageType, instigator);
 			}
 		}
+	}
+
+	@Override
+	public void playNetworkImpactPresentation(Level level, boolean entityHit,
+			boolean secondaryExplosion) {
+		if(!nativePresentationReplica || level == null) return;
+		if(entityHit && damageType != DamageType.PHYSICAL)
+			playElementalImpactRing(xa, ya);
+		makeHitDecal();
 	}
 
 	// Start an animation on this projectile

@@ -20,6 +20,8 @@ public class SoundAction extends AnimationAction {
 		this.range = range;
 	}
 
+    @Override public boolean isPresentationOnly() { return true; }
+
 	@Override
 	public void doAction(Entity instigator) {
 		Audio.playPositionedSound(soundFile, new Vector3(instigator.x, instigator.y, instigator.z), volume, range, pitch);

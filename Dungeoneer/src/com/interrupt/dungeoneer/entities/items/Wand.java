@@ -94,11 +94,18 @@ public class Wand extends Weapon {
 		Vector3 direction = getCrosshairDirection(-0.3f);
 		if(direction == null) direction = Game.camera.direction;
 		notifyWeaponAttack(p, direction, attackPower);
-		
-		spell.damageType = damageType;
-		spell.baseDamage = getBaseDamage();
-		spell.randDamage = getRandDamage();
-		spell.zap(p, direction.cpy(), new Vector3(x + direction.x * 0.15f, y + direction.z * 0.15f, z + direction.y * 0.15f));
+
+		Vector3 castPosition = new Vector3(x + direction.x * 0.15f,
+				y + direction.z * 0.15f, z + direction.y * 0.15f);
+		if(p.deferWeaponWorldAttack()) {
+			spell.playZapPresentation(p, castPosition);
+		}
+		else {
+			spell.damageType = damageType;
+			spell.baseDamage = getBaseDamage();
+			spell.randDamage = getRandDamage();
+			spell.zap(p, direction.cpy(), castPosition);
+		}
 		
 		p.history.usedWand(this);
 

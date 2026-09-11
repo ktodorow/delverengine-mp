@@ -26,6 +26,34 @@ public class BurningEffect extends StatusEffect {
 		this.statusEffectType = StatusEffectType.BURNING;
 	}
 	
+    private transient Fire presentationFire;
+
+    @Override
+    public void playStartPresentation(Actor owner) { doFireEffect(owner); }
+
+    @Override
+    public void beginPresentation(Actor owner) {
+        presentationFire = new Fire();
+        presentationFire.setPresentationOnly();
+        presentationFire.playAnimation();
+        presentationFire.z = 0.125f;
+        owner.attach(presentationFire);
+    }
+
+    @Override
+    public void tickPresentation(Actor owner, float hostElapsed) {
+        if(presentationFire != null) presentationFire.advancePresentation(hostElapsed);
+    }
+
+    @Override
+    public void endPresentation(Actor owner) {
+        if(presentationFire != null) {
+            presentationFire.isActive = false;
+            owner.detach(presentationFire);
+            presentationFire = null;
+        }
+    }
+
 	@Override
 	public void doTick(Actor owner, float delta) { 
 		dtimer += delta;
@@ -33,8 +61,8 @@ public class BurningEffect extends StatusEffect {
 		if(dtimer > damageTimer) {
 			dtimer = 0;
 			owner.takeDamage(damage, DamageType.PHYSICAL, null);
-			doFireEffect(owner);
-			Audio.playPositionedSound("mg_pass_poison.mp3", new Vector3(owner.x,owner.y,owner.z), 0.5f, 6f);
+			noteMultiplayerPulse();
+			playPulsePresentation(owner);
 		}
 
 		// put out the fire, if this is water
@@ -45,6 +73,12 @@ public class BurningEffect extends StatusEffect {
 			}
 		}
 	}
+
+    @Override
+    public void playPulsePresentation(Actor owner) {
+        doFireEffect(owner);
+        Audio.playPositionedSound("mg_pass_poison.mp3", new Vector3(owner.x,owner.y,owner.z), 0.5f, 6f);
+    }
 
 	public void doFireEffect(Entity owner) {
 		if (!this.showParticleEffect) {

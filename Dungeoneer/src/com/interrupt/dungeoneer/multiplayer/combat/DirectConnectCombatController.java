@@ -1,13 +1,16 @@
 package com.interrupt.dungeoneer.multiplayer.combat;
 
 import com.badlogic.gdx.graphics.Color;
+import com.interrupt.dungeoneer.Audio;
 import com.interrupt.dungeoneer.entities.Item;
 import com.interrupt.dungeoneer.entities.spells.Spell;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.badlogic.gdx.math.Vector3;
 import com.badlogic.gdx.utils.Array;
 import com.interrupt.dungeoneer.entities.Entity;
+import com.interrupt.dungeoneer.entities.Breakable;
 import com.interrupt.dungeoneer.entities.Corpse;
+import com.interrupt.dungeoneer.entities.Door;
 import com.interrupt.dungeoneer.entities.Monster;
 import com.interrupt.dungeoneer.entities.Monster.MultiplayerAttackKind;
 import com.interrupt.dungeoneer.entities.Player;
@@ -18,6 +21,7 @@ import com.interrupt.dungeoneer.entities.items.Wand;
 import com.interrupt.dungeoneer.entities.items.Weapon;
 import com.interrupt.dungeoneer.entities.items.Weapon.DamageType;
 import com.interrupt.dungeoneer.entities.items.Sword;
+import com.interrupt.dungeoneer.entities.items.Scroll;
 import com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile;
 import com.interrupt.dungeoneer.entities.projectiles.Missile;
 import com.interrupt.dungeoneer.entities.projectiles.Projectile;
@@ -62,11 +66,25 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             new IdentityHashMap<Monster, CombatAction>();
     private final Map<String, Spikes> traps = new LinkedHashMap<String, Spikes>();
     private final Map<Spikes, String> trapIds = new IdentityHashMap<Spikes, String>();
+    private final Map<com.interrupt.dungeoneer.entities.Actor, NativeStatusPresentation> participantEffects =
+            new IdentityHashMap<com.interrupt.dungeoneer.entities.Actor, NativeStatusPresentation>();
+    private long participantEffectGeneration;
     private CombatWeaponResolver weaponResolver;
     private final Map<ParticipantId, Player> authoritativePlayers =
             new LinkedHashMap<ParticipantId, Player>();
     private final Map<Entity, ProjectilePresentation> projectilePresentations =
             new IdentityHashMap<Entity, ProjectilePresentation>();
+    private final Map<Entity, Long> nativeDynamicIds =
+            new IdentityHashMap<Entity, Long>();
+    private final Map<Long, Long> nativeDynamicItemIds =
+            new LinkedHashMap<Long, Long>();
+    private final Map<Long, Entity> nativeDynamicReplicas =
+            new LinkedHashMap<Long, Entity>();
+    private final Set<Entity> createdNativeDynamicReplicas =
+            Collections.newSetFromMap(new IdentityHashMap<Entity, Boolean>());
+    private long nativeDynamicGeneration;
+    private long nextNativeDynamicId = 1L;
+    private long pendingNativeSpellItemId;
     private Level attachedLevel;
     private Player attachedPlayer;
     private int lastLocalHealth = -1;
@@ -98,25 +116,108 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         attachNativeMonstersIfPresent();
         attachNativeTrapsIfPresent();
         attachNativeProjectiles();
+        if(nativeAuthority == null) applyNativeDynamicStates(game.level);
         applySnapshot(peer.getCombatSnapshot());
+        synchronizeWorldTime(game);
+    }
+
+    private void synchronizeWorldTime(Game game) {
+        float scale = 1f;
+        if(nativeAuthority != null) {
+            if(attachedPlayer != null) scale = ActorEffectsSnapshot.worldTimeScale(attachedPlayer);
+            for(RemoteAvatar avatar : attachedRemoteAvatars)
+                scale = Math.min(scale, ActorEffectsSnapshot.worldTimeScale(avatar));
+        } else {
+            for(ActorEffectsSnapshot state : peer.getActorEffects())
+                scale = Math.min(scale, state.worldTimeScale);
+        }
+        game.SetGameTimeScale(scale);
     }
 
     /** Runs after movement reconciliation and native Level.tick. */
     public void update(Game game) {
         if(game == null || game.player == null || game.level == null) return;
+        if(nativeAuthority != null && !peer.isSessionPaused() && attachedLevel == game.level) {
+            // Native restore/consumable effects may change hp directly during the tick.
+            synchronizeNativeParticipantHealth(attachedPlayer, localParticipantId());
+            for(RemoteAvatar avatar : attachedRemoteAvatars)
+                synchronizeNativeParticipantHealth(avatar, avatar.getDescriptor().getParticipantId());
+        }
         prepare(game);
         if(nativeAuthority != null) {
             resolveNativeCombatRequests();
             synchronizeNativeMonsters();
+            if(attachedPlayer != null && localParticipantId() != null)
+                nativeAuthority.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(
+                        localCombatantId(), 1, attachedPlayer));
+            for(RemoteAvatar avatar : attachedRemoteAvatars)
+                nativeAuthority.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(
+                        AuthoritativeCombatEncounter.participantTargetId(avatar.getDescriptor().getParticipantId()),
+                        1, avatar));
             attachNativeProjectiles();
+            synchronizeNativeDynamics();
         }
         applySnapshot(peer.getCombatSnapshot());
+        synchronizeWorldTime(game);
         replayPresentations(game.level, localCombatantId());
+        if(nativeAuthority == null) {
+            for(NativeAnimationCue cue : peer.drainNativeAnimationCues()) cue.replay();
+            replayNativeSpellPresentations(localCombatantId());
+            replayNativeMeleePresentations(localCombatantId());
+            replayNativeRangedPresentations(localCombatantId());
+            for(NativeDynamicCue cue : peer.drainNativeDynamicCues()) cue.replay(game.level);
+            for(NativeExplosionPresentation explosion : peer.drainNativeExplosions()) explosion.replay(game.level);
+        }
     }
 
     public void setWeaponResolver(CombatWeaponResolver resolver) { weaponResolver = resolver; }
 
+    public boolean consumeNativeItem(ParticipantId participant, Item item) {
+        return consumeNativeItem(participant, item, null);
+    }
+
+    public boolean consumeNativeItem(ParticipantId participant, Item item,
+            com.badlogic.gdx.math.Vector3 direction) {
+        if(nativeAuthority == null || !nativeAuthority.canApplyNativeParticipantEffect(participant)) return false;
+        com.interrupt.dungeoneer.entities.Actor target = participant.equals(localParticipantId())
+                ? attachedPlayer : remoteAvatar(AuthoritativeCombatEncounter.participantTargetId(participant));
+        if(target == null) return false;
+        if(item instanceof com.interrupt.dungeoneer.entities.items.Potion)
+            ((com.interrupt.dungeoneer.entities.items.Potion)item).applyNativeEffect(target);
+        else if(item instanceof com.interrupt.dungeoneer.entities.items.Food)
+            ((com.interrupt.dungeoneer.entities.items.Food)item).applyNativeEffect(target);
+        else if(item instanceof com.interrupt.dungeoneer.entities.items.Scroll) {
+            if(direction == null) return false;
+            com.interrupt.dungeoneer.entities.items.Scroll scroll =
+                    (com.interrupt.dungeoneer.entities.items.Scroll)item;
+            if(target instanceof RemoteAvatar && isPersonalPlayerSpell(scroll.spell)) return false;
+            float previousX = target.x, previousY = target.y, previousZ = target.z;
+            long previousSpellItemId = pendingNativeSpellItemId;
+            pendingNativeSpellItemId = weaponResolver == null ? 0L
+                    : weaponResolver.physicalIdentity(item);
+            try { scroll.applyNativeEffect(target, direction); }
+            finally { pendingNativeSpellItemId = previousSpellItemId; }
+            if(target.x != previousX || target.y != previousY || target.z != previousZ) {
+                nativeAuthority.setNativeParticipantPosition(participant,
+                        target.x, target.y, target.z);
+            }
+        }
+        else return false;
+        synchronizeNativeParticipantHealth(target, participant);
+        nativeAuthority.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(
+                AuthoritativeCombatEncounter.participantTargetId(participant), 1, target));
+        return true;
+    }
+
+    private static boolean isPersonalPlayerSpell(Spell spell) {
+        return spell instanceof com.interrupt.dungeoneer.entities.spells.Identify
+                || spell instanceof com.interrupt.dungeoneer.entities.spells.FillMap
+                || spell instanceof com.interrupt.dungeoneer.entities.spells.EnchantWeapon
+                || spell instanceof com.interrupt.dungeoneer.entities.spells.EnchantArmor;
+    }
+
     public void dispose() {
+        if(Game.instance != null) Game.instance.SetGameTimeScale(1f);
         detachFromPlayer();
         detachFromLevel();
     }
@@ -151,6 +252,9 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     }
 
     @Override
+    public boolean deferWeaponWorldAttack() { return nativeAuthority == null; }
+
+    @Override
     public boolean onHealthIntent(Player player, int amount, DamageType damageType,
             Entity instigator) {
         ParticipantId participantId = localParticipantId();
@@ -158,23 +262,12 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 : AuthoritativeCombatEncounter.participantTargetId(participantId);
         if(player == null || targetId == null || amount == 0) return false;
         ParticipantId participantSource = participantId(instigator);
-        if(amount > 0 && participantSource != null
+        if(nativeAuthority != null) {
+            applyNativeParticipantDamage(player, participantId, amount, damageType, instigator);
+            return true;
+        }
+        if(amount > 0 && damageType != DamageType.HEALING && participantSource != null
                 && !participantSource.equals(participantId)) return true;
-        Monster sourceMonster = nativeMonsterInstigator(instigator);
-        Spikes sourceTrap = nativeTrapInstigator(instigator);
-        if(nativeAuthority != null && sourceMonster != null) {
-            nativeAuthority.applyNativeMonsterDamage(monsterIds.get(sourceMonster),
-                    participantId, amount, monsterDamageAction(sourceMonster, damageType),
-                    sourceMonster.x, sourceMonster.y,
-                    sourceMonster.z + ATTACK_ORIGIN_HEIGHT, player.x, player.y,
-                    player.z + ATTACK_ORIGIN_HEIGHT);
-            return true;
-        }
-        if(nativeAuthority != null && sourceTrap != null && amount > 0) {
-            applyNativeTrapDamage(sourceTrap, participantId, amount, player);
-            return true;
-        }
-
         CombatAction action;
         if(damageType == DamageType.HEALING || amount < 0) {
             action = CombatAction.BENEFICIAL_SPELL;
@@ -193,21 +286,56 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     @Override
     public void onDamageIntent(RemoteAvatar avatar, int damage, DamageType damageType,
             Entity instigator) {
-        Monster sourceMonster = nativeMonsterInstigator(instigator);
-        Spikes sourceTrap = nativeTrapInstigator(instigator);
-        if(nativeAuthority == null || avatar == null || damage <= 0) return;
-        ParticipantId targetId = avatar.getDescriptor().getParticipantId();
-        if(participantId(instigator) != null) return;
-        if(sourceMonster != null) {
-            nativeAuthority.applyNativeMonsterDamage(monsterIds.get(sourceMonster),
-                    targetId, damage, monsterDamageAction(sourceMonster, damageType),
-                    sourceMonster.x, sourceMonster.y,
-                    sourceMonster.z + ATTACK_ORIGIN_HEIGHT, avatar.x, avatar.y,
-                    avatar.z + ATTACK_ORIGIN_HEIGHT);
-        }
-        else if(sourceTrap != null) {
-            applyNativeTrapDamage(sourceTrap, targetId, damage, avatar);
-        }
+        if(nativeAuthority == null || avatar == null || damage == 0) return;
+        applyNativeParticipantDamage(avatar, avatar.getDescriptor().getParticipantId(),
+                damage, damageType, instigator);
+    }
+
+    @Override
+    public boolean onPhysicsImpulseIntent(Player player, Vector3 impulse) {
+        ParticipantId participant = localParticipantId();
+        if(participant == null || impulse == null) return false;
+        if(nativeAuthority != null)
+            nativeAuthority.applyNativeParticipantImpulse(participant, impulse.x, impulse.y, impulse.z);
+        return true;
+    }
+
+    @Override
+    public boolean onPhysicsImpulseIntent(RemoteAvatar avatar, Vector3 impulse) {
+        if(avatar == null || impulse == null) return false;
+        if(nativeAuthority != null) nativeAuthority.applyNativeParticipantImpulse(
+                avatar.getDescriptor().getParticipantId(), impulse.x, impulse.y, impulse.z);
+        return true;
+    }
+
+    private void synchronizeNativeParticipantHealth(com.interrupt.dungeoneer.entities.Actor actor,
+            ParticipantId participant) {
+        if(actor == null || participant == null || peer.getCombatSnapshot() == null) return;
+        CombatantSnapshot state = peer.getCombatSnapshot().getCombatant(
+                AuthoritativeCombatEncounter.participantTargetId(participant));
+        if(state != null && nativeAuthority.canApplyNativeParticipantEffect(participant))
+            nativeAuthority.applyNativeParticipantDamage("native-effect", participant,
+                    state.getHealth() - Math.max(0, actor.hp), actor.x, actor.y, actor.z);
+    }
+
+    private void applyNativeParticipantDamage(com.interrupt.dungeoneer.entities.Actor target,
+            ParticipantId targetId, int amount, DamageType damageType, Entity instigator) {
+        if(!nativeAuthority.canApplyNativeParticipantEffect(targetId)) return;
+        ParticipantId source = participantId(instigator);
+        if(amount > 0 && damageType != DamageType.HEALING && source != null
+                && !source.equals(targetId)) return;
+        Monster monster = nativeMonsterInstigator(instigator);
+        Spikes trap = nativeTrapInstigator(instigator);
+        String sourceId = source != null ? AuthoritativeCombatEncounter.participantTargetId(source)
+                : monster != null ? monsterIds.get(monster)
+                : trap != null ? trapIds.get(trap) : "native-world";
+        if(sourceId == null) sourceId = "native-world";
+        if(target instanceof RemoteAvatar) ((RemoteAvatar)target).setNativeCombatStats(authoritativePlayer(targetId));
+        int accepted = target.applyNativeDamage(amount, damageType, instigator);
+        nativeAuthority.applyNativeParticipantDamage(sourceId, targetId, accepted,
+                target.x, target.y, target.z);
+        nativeAuthority.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(
+                AuthoritativeCombatEncounter.participantTargetId(targetId), 1, target));
     }
 
     @Override
@@ -291,6 +419,18 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             float impactX, float impactY, float impactZ) {
         ProjectilePresentation presentation = projectilePresentations.get(projectile);
         if(nativeAuthority == null || presentation == null) return;
+        Long dynamicId = ensureNativeDynamicIdentity(projectile);
+        if(dynamicId != null) {
+            try {
+                nativeAuthority.publishNativeDynamicCue(NativeDynamicCue.captureImpact(
+                        dynamicId, nativeDynamicItemIds.containsKey(dynamicId)
+                                ? nativeDynamicItemIds.get(dynamicId) : 0L, projectile,
+                        hit != null, impactX, impactY, impactZ));
+            }
+            catch(IllegalArgumentException invalid) {
+                nativeAuthority.failNativePresentation(invalid.getMessage());
+            }
+        }
         nativeAuthority.publishNativePresentation(
                 presentation.sourceId, impactTargetId(hit), presentation.action,
                 CombatPresentationPhase.IMPACT,
@@ -338,7 +478,22 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                     action, CombatPresentationPhase.ATTACK,
                     trace.originX, trace.originY, trace.originZ,
                     trace.impactX, trace.impactY, trace.impactZ, false);
-            if(participantId.equals(localParticipantId())) continue;
+            boolean localParticipant = participantId.equals(localParticipantId());
+            if(!localParticipant && weapon instanceof Sword) {
+                publishRemoteMelee(participantId, request.getWeaponEntityId(), (Sword)weapon,
+                        NativeMeleePresentation.Kind.SWING,
+                        new Vector3(source.x, source.y, source.z),
+                        new Vector3(trace.directionX, trace.directionY, trace.directionZ));
+            }
+            if(localParticipant) continue;
+            if(action == CombatAction.MELEE && weapon instanceof Sword) {
+                ((Sword)weapon).resolveNetworkAttack(source,
+                        authoritativePlayer(participantId), attachedLevel,
+                        new Vector3(trace.directionX, trace.directionY, trace.directionZ),
+                        request.getAttackPower(), target -> !(target instanceof Player)
+                                && !(target instanceof RemoteAvatar));
+                continue;
+            }
             if(action == CombatAction.MELEE
                     && (trace.monster != null || trace.corpse != null) && weapon != null) {
                 Player stats = authoritativePlayer(participantId);
@@ -353,12 +508,25 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                     trace.corpse.hit(trace.directionX, trace.directionY, damage,
                             knockback, weapon.getDamageType(), source);
                 }
+                if(weapon instanceof Sword) publishRemoteMelee(participantId,
+                        request.getWeaponEntityId(), (Sword)weapon,
+                        NativeMeleePresentation.Kind.ENTITY_HIT,
+                        new Vector3(trace.impactX, trace.impactY, trace.impactZ),
+                        new Vector3(trace.directionX, trace.directionY, trace.directionZ));
+            }
+            else if(action == CombatAction.MELEE && trace.blocked
+                    && weapon instanceof Sword) {
+                ((Sword)weapon).wasUsed();
+                publishRemoteMelee(participantId, request.getWeaponEntityId(), (Sword)weapon,
+                        NativeMeleePresentation.Kind.WORLD_HIT,
+                        new Vector3(trace.impactX, trace.impactY, trace.impactZ),
+                        new Vector3(trace.directionX, trace.directionY, trace.directionZ));
             }
             else if(action == CombatAction.PROJECTILE && weapon instanceof Bow) {
                 spawnNativeArrow(source, participantId, request, trace, (Bow)weapon);
             }
             else if(action == CombatAction.SPELL && weapon instanceof Wand) {
-                spawnNativeSpell(source, participantId, trace, (Wand)weapon);
+                spawnNativeSpell(source, participantId, request, trace, (Wand)weapon);
             }
         }
     }
@@ -388,20 +556,20 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             float y = source.y + directionY * distance;
             float z = originZ + directionZ * distance;
             if(!hasLineOfSight(source.x, source.y, x, y)) {
-                return new NativeTrace(null, null, null,
+                return new NativeTrace(null, null, null, true,
                         directionX, directionY, directionZ,
                         source.x, source.y, originZ, previousX, previousY, previousZ);
             }
             Monster hit = intersectedMonster(x, y, z);
             if(hit != null) {
-                return new NativeTrace(hit, null, monsterIds.get(hit),
+                return new NativeTrace(hit, null, monsterIds.get(hit), false,
                         directionX, directionY, directionZ,
                         source.x, source.y, originZ, hit.x, hit.y,
                         hit.z + hit.collision.z * 0.5f);
             }
             Corpse corpse = intersectedCorpse(x, y, z);
             if(corpse != null) {
-                return new NativeTrace(null, corpse, monsterIdForCorpse(corpse),
+                return new NativeTrace(null, corpse, monsterIdForCorpse(corpse), false,
                         directionX, directionY, directionZ,
                         source.x, source.y, originZ, corpse.x, corpse.y,
                         corpse.z + corpse.collision.z * 0.5f);
@@ -410,34 +578,35 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             previousY = y;
             previousZ = z;
         }
-        return new NativeTrace(null, null, null,
+        return new NativeTrace(null, null, null, false,
                 directionX, directionY, directionZ,
                 source.x, source.y, originZ, previousX, previousY, previousZ);
     }
 
     private void spawnNativeArrow(Entity source, ParticipantId participantId,
             CombatRequest request, NativeTrace trace, Bow bow) {
+        Missile missile = weaponResolver == null ? null
+                : weaponResolver.takeOwnedMissile(participantId);
+        if(missile == null) return;
         Player stats = authoritativePlayer(participantId);
-        float power = request.getAttackPower();
-        float speed = power * (bow.range / 4f) * 0.5f;
-        Vector3 position = new Vector3(source.x, source.y, source.z);
-        Vector3 velocity = new Vector3(trace.directionX * speed,
-                trace.directionY * speed, trace.directionZ * speed);
-        Missile missile = new Missile(position, velocity, 73, source);
-        missile.owner = source;
-        missile.damage = bow.doAttackRoll(power, stats);
-        missile.damageType = bow.getDamageType();
-        missile.knockback = (bow.knockback + stats.getKnockbackStatBoost()) * power;
-        missile.ignorePlayerCollision = true;
-        missile.isActive = true;
-        missile.isDynamic = true;
-        missile.isOnFloor = false;
+        bow.configureNetworkMissile(missile, stats, source,
+                new Vector3(trace.directionX, trace.directionY, trace.directionZ),
+                request.getAttackPower());
         attachedLevel.entities.add(missile);
         attachNativeProjectile(missile);
+        bow.playNetworkFirePresentation(source.x, source.y, source.z);
+        try {
+            nativeAuthority.publishNativeRangedPresentation(NativeRangedPresentation.capture(
+                    AuthoritativeCombatEncounter.participantTargetId(participantId),
+                    request.getWeaponEntityId(), new Vector3(source.x, source.y, source.z)));
+        }
+        catch(IllegalArgumentException invalid) {
+            nativeAuthority.failNativePresentation(invalid.getMessage());
+        }
     }
 
     private void spawnNativeSpell(Entity source, ParticipantId participantId,
-            NativeTrace trace, Wand wand) {
+            CombatRequest request, NativeTrace trace, Wand wand) {
         // Preserve configured spell class, colour, appearance, spread, speed, and impact effects.
         Spell spell =
                 (Spell)
@@ -445,9 +614,131 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         spell.baseDamage = wand.getBaseDamage();
         spell.randDamage = wand.getRandDamage();
         spell.damageType = wand.getDamageType();
-        spell.doCast(source, new Vector3(trace.directionX, trace.directionZ, trace.directionY),
-                new Vector3(source.x, source.y, source.z));
+        long previousSpellItemId = pendingNativeSpellItemId;
+        pendingNativeSpellItemId = request.getWeaponEntityId();
+        try {
+            spell.zap((com.interrupt.dungeoneer.entities.Actor)source,
+                    new Vector3(trace.directionX, trace.directionZ, trace.directionY),
+                    new Vector3(source.x, source.y, source.z));
+        }
+        finally { pendingNativeSpellItemId = previousSpellItemId; }
         attachNativeProjectiles();
+    }
+
+    private void replayNativeSpellPresentations(String localCombatantId) {
+        for(NativeSpellPresentation presentation : peer.drainNativeSpellPresentations()) {
+            if(presentation.sourceId.equals(localCombatantId)) continue;
+            if(presentation.itemId == 0L) {
+                if(!presentation.sound.isEmpty()) Audio.playPositionedSound(
+                        presentation.sound,
+                        new Vector3(presentation.x, presentation.y, presentation.z),
+                        presentation.volume, presentation.range);
+                continue;
+            }
+            Entity source = presentationSource(presentation.sourceId);
+            Entity item = weaponResolver == null ? null
+                    : weaponResolver.physicalEntity(presentation.itemId);
+            Spell spell = item instanceof Wand ? ((Wand)item).spell
+                    : item instanceof Scroll ? ((Scroll)item).spell : null;
+            if(!(source instanceof com.interrupt.dungeoneer.entities.Actor) || spell == null) {
+                peer.failNativePresentation("Accepted spell item " + presentation.itemId
+                        + " is unavailable for native cast presentation.");
+                continue;
+            }
+            Vector3 position = new Vector3(presentation.x, presentation.y, presentation.z);
+            if(presentation.zap) spell.playZapPresentation(
+                    (com.interrupt.dungeoneer.entities.Actor)source, position);
+            else spell.playCastPresentation(
+                    (com.interrupt.dungeoneer.entities.Actor)source, position);
+        }
+    }
+
+    private void publishRemoteMelee(ParticipantId participantId, long itemId, Sword sword,
+            NativeMeleePresentation.Kind kind, Vector3 position, Vector3 direction) {
+        if(kind == NativeMeleePresentation.Kind.SWING) {
+            sword.playNetworkSwingPresentation(position.x, position.y, position.z);
+        }
+        else if(kind == NativeMeleePresentation.Kind.WORLD_HIT) {
+            sword.playNetworkWorldHitPresentation(position.x, position.y, position.z,
+                    attachedLevel, direction);
+        }
+        else sword.playNetworkEntityHitPresentation(position.x, position.y, position.z,
+                    attachedLevel);
+        try {
+            nativeAuthority.publishNativeMeleePresentation(NativeMeleePresentation.capture(
+                    AuthoritativeCombatEncounter.participantTargetId(participantId), itemId,
+                    kind, position, direction));
+        }
+        catch(IllegalArgumentException invalid) {
+            nativeAuthority.failNativePresentation(invalid.getMessage());
+        }
+    }
+
+    private void replayNativeMeleePresentations(String localCombatantId) {
+        for(NativeMeleePresentation presentation : peer.drainNativeMeleePresentations()) {
+            if(presentation.kind == NativeMeleePresentation.Kind.SWING
+                    && presentation.sourceId.equals(localCombatantId)) continue;
+            Entity item = weaponResolver == null ? null
+                    : weaponResolver.physicalEntity(presentation.itemId);
+            if(!(item instanceof Sword)) {
+                peer.failNativePresentation("Accepted Sword item " + presentation.itemId
+                        + " is unavailable for native melee presentation.");
+                continue;
+            }
+            Sword sword = (Sword)item;
+            if(presentation.kind == NativeMeleePresentation.Kind.SWING) {
+                sword.playNetworkSwingPresentation(presentation.x, presentation.y, presentation.z);
+            }
+            else if(presentation.kind == NativeMeleePresentation.Kind.WORLD_HIT) {
+                sword.playNetworkWorldHitPresentation(presentation.x, presentation.y,
+                        presentation.z, attachedLevel, new Vector3(presentation.directionX,
+                                presentation.directionY, presentation.directionZ));
+            }
+            else {
+                if(presentation.targetObjectId > 0L) {
+                    Entity target = weaponResolver == null ? null
+                            : weaponResolver.worldObject(presentation.targetObjectId);
+                    if(target instanceof Breakable) {
+                        ((Breakable)target).playNetworkHitPresentation(presentation.x,
+                                presentation.y, presentation.z, sword, attachedLevel);
+                    }
+                    else if(target instanceof Door) {
+                        ((Door)target).playNetworkHitPresentation(presentation.x,
+                                presentation.y, presentation.z, sword, attachedLevel);
+                    }
+                    else {
+                        peer.failNativePresentation("Accepted Sword target "
+                                + presentation.targetObjectId
+                                + " is unavailable for native hit presentation.");
+                        continue;
+                    }
+                }
+                sword.playNetworkEntityHitPresentation(presentation.x, presentation.y,
+                        presentation.z, attachedLevel);
+            }
+        }
+    }
+
+    private void replayNativeRangedPresentations(String localCombatantId) {
+        for(NativeRangedPresentation presentation : peer.drainNativeRangedPresentations()) {
+            if(presentation.sourceId.equals(localCombatantId)) continue;
+            Entity item = weaponResolver == null ? null
+                    : weaponResolver.physicalEntity(presentation.itemId);
+            if(!(item instanceof Bow)) {
+                peer.failNativePresentation("Accepted Bow item " + presentation.itemId
+                        + " is unavailable for native ranged presentation.");
+                continue;
+            }
+            ((Bow)item).playNetworkFirePresentation(
+                    presentation.x, presentation.y, presentation.z);
+        }
+    }
+
+    private Entity presentationSource(String sourceId) {
+        Monster monster = monsters.get(sourceId);
+        if(monster != null) return monster;
+        if(sourceId != null && sourceId.equals(localCombatantId())) return attachedPlayer;
+        return remoteAvatar(sourceId);
     }
 
     private void attachNativeProjectiles() {
@@ -462,15 +753,120 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         }
     }
 
+    private void synchronizeNativeDynamics() {
+        if(nativeAuthority == null || attachedLevel == null) return;
+        Set<Entity> seen = Collections.newSetFromMap(new IdentityHashMap<Entity, Boolean>());
+        synchronizeNativeDynamics(attachedLevel.entities, seen);
+        synchronizeNativeDynamics(attachedLevel.non_collidable_entities, seen);
+        synchronizeNativeDynamics(attachedLevel.static_entities, seen);
+        for(Map.Entry<Entity, Long> entry : new ArrayList<Map.Entry<Entity, Long>>(
+                nativeDynamicIds.entrySet())) {
+            if(seen.contains(entry.getKey())) continue;
+            long itemId = nativeDynamicItemIds.containsKey(entry.getValue())
+                    ? nativeDynamicItemIds.get(entry.getValue()) : 0L;
+            publishNativeDynamic(entry.getValue(), itemId, entry.getKey(), false);
+            nativeDynamicIds.remove(entry.getKey());
+            nativeDynamicItemIds.remove(entry.getValue());
+        }
+    }
+
+    private void synchronizeNativeDynamics(Array<Entity> entities, Set<Entity> seen) {
+        for(Entity entity : entities) {
+            if(entity == null || entity.nativePresentationReplica
+                    || !NativeDynamicState.supports(entity)) continue;
+            seen.add(entity);
+            Long id = ensureNativeDynamicIdentity(entity);
+            if(id == null) return;
+            long itemId = nativeDynamicItemIds.containsKey(id) ? nativeDynamicItemIds.get(id) : 0L;
+            publishNativeDynamic(id, itemId, entity, entity.isActive);
+        }
+    }
+
+    private Long ensureNativeDynamicIdentity(Entity entity) {
+        Long id = nativeDynamicIds.get(entity);
+        if(id != null) return id;
+        if(nativeDynamicIds.size() >= com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES
+                || nextNativeDynamicId == Long.MAX_VALUE) {
+            nativeAuthority.failNativePresentation("Native dynamic entity count exceeded.");
+            return null;
+        }
+        id = nextNativeDynamicId++;
+        nativeDynamicIds.put(entity, id);
+        long itemId = weaponResolver == null ? 0L : weaponResolver.physicalIdentity(entity);
+        nativeDynamicItemIds.put(id, itemId);
+        return id;
+    }
+
+    private void publishNativeDynamic(long id, long itemId, Entity entity, boolean active) {
+        try {
+            nativeAuthority.synchronizeNativeDynamicState(
+                    NativeDynamicState.capture(id, itemId, entity, active));
+        }
+        catch(IllegalArgumentException invalid) {
+            nativeAuthority.failNativePresentation(invalid.getMessage());
+        }
+    }
+
+    private void applyNativeDynamicStates(Level level) {
+        long generation = peer.getNativeWorldGeneration();
+        if(nativeDynamicGeneration != generation) {
+            clearNativeDynamicReplicas(level);
+            nativeDynamicGeneration = generation;
+        }
+        for(NativeDynamicState state : peer.getNativeDynamicStates()) {
+            Entity replica = nativeDynamicReplicas.get(state.id);
+            if(!state.active) {
+                if(replica != null) removeNativeDynamicReplica(level, replica);
+                nativeDynamicReplicas.remove(state.id);
+                continue;
+            }
+            boolean newlyTracked = replica == null;
+            if(replica == null && state.itemId > 0L) {
+                if(weaponResolver == null) continue;
+                replica = weaponResolver.physicalEntity(state.itemId);
+                if(replica == null) continue;
+            }
+            replica = state.apply(replica);
+            nativeDynamicReplicas.put(state.id, replica);
+            if(newlyTracked) {
+                createdNativeDynamicReplicas.add(replica);
+                if(!level.entities.contains(replica, true)
+                        && !level.non_collidable_entities.contains(replica, true)
+                        && !level.static_entities.contains(replica, true)) level.addEntity(replica);
+            }
+        }
+    }
+
+    private void clearNativeDynamicReplicas(Level level) {
+        for(Entity replica : new ArrayList<Entity>(createdNativeDynamicReplicas))
+            removeNativeDynamicReplica(level, replica);
+        createdNativeDynamicReplicas.clear();
+        nativeDynamicReplicas.clear();
+    }
+
+    private void removeNativeDynamicReplica(Level level, Entity replica) {
+        if(createdNativeDynamicReplicas.remove(replica)) {
+            level.entities.removeValue(replica, true);
+            level.non_collidable_entities.removeValue(replica, true);
+            level.static_entities.removeValue(replica, true);
+        }
+        replica.isActive = false;
+    }
+
     private void attachNativeProjectiles(Array<Entity> entities) {
         for(Entity entity : entities) attachNativeProjectile(entity);
     }
 
     private void attachNativeProjectile(Entity projectile) {
         if(nativeAuthority == null || projectile == null || !projectile.isActive
-                || projectilePresentations.containsKey(projectile)
                 || (!(projectile instanceof Projectile)
                         && !(projectile instanceof Missile))) return;
+        if(!NativeDynamicState.supports(projectile)) {
+            nativeAuthority.failNativePresentation("Unsupported native projectile class: "
+                    + projectile.getClass().getName());
+            return;
+        }
+        if(projectilePresentations.containsKey(projectile)) return;
 
         if(projectile instanceof Missile && !((Missile)projectile).isInFlight()) return;
         ParticipantId participantId = participantId(projectile);
@@ -561,6 +957,8 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             player = new Player();
             authoritativePlayers.put(participantId, player);
         }
+        if(weaponResolver != null) weaponResolver.synchronizeEquipment(participantId, player);
+        player.calculatedStats.Recalculate(player);
         return player;
     }
 
@@ -605,6 +1003,12 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     }
 
     private void applySnapshot(CombatSnapshot snapshot) {
+        if(nativeAuthority == null) {
+            if(participantEffectGeneration != peer.getNativeWorldGeneration()) {
+                clearParticipantEffects(); participantEffectGeneration = peer.getNativeWorldGeneration();
+            }
+            for(Monster monster : monsters.values()) monster.beginNetworkEffectGeneration(peer.getNativeWorldGeneration());
+        }
         if(snapshot == null) return;
         for(MonsterSnapshot networkState : snapshot.getMonsters()) {
             Monster monster = monsters.get(networkState.getId());
@@ -618,6 +1022,34 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             }
             else {
                 monster.setMultiplayerTarget(monsterTarget(networkState.getTargetId()));
+            }
+        }
+
+        if(nativeAuthority == null) {
+            for(ActorEffectsSnapshot effects : peer.getActorEffects()) {
+                Monster monster = monsters.get(effects.monsterId);
+                if(monster != null) monster.applyNetworkEffects(effects);
+                else {
+                    com.interrupt.dungeoneer.entities.Actor actor = effects.monsterId.equals(localCombatantId())
+                            ? attachedPlayer : remoteAvatar(effects.monsterId);
+                    if(actor != null) {
+                        NativeStatusPresentation presentation = participantEffects.get(actor);
+                        if(presentation == null) {
+                            presentation = new NativeStatusPresentation(); participantEffects.put(actor, presentation);
+                        }
+                        presentation.apply(actor, effects); presentation.updateAttachments(actor);
+                    }
+                }
+            }
+            for(NativeStatusCue cue : peer.drainNativeStatusCues()) {
+                Monster monster = monsters.get(cue.monsterId);
+                if(monster != null) monster.playNetworkStatusStart(cue);
+                else {
+                    com.interrupt.dungeoneer.entities.Actor actor = cue.monsterId.equals(localCombatantId())
+                            ? attachedPlayer : remoteAvatar(cue.monsterId);
+                    NativeStatusPresentation presentation = participantEffects.get(actor);
+                    if(presentation != null) presentation.playStart(actor, cue);
+                }
             }
         }
 
@@ -637,13 +1069,18 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             if(!attachedRemoteAvatars.contains(avatar)) {
                 attachedRemoteAvatars.add(avatar);
                 avatar.setDamageAuthorityListener(this);
+                avatar.setStatusEffectAuthority(nativeAuthority != null);
             }
+            avatar.setStatusEffectAuthority(nativeAuthority != null
+                    && nativeAuthority.canApplyNativeParticipantEffect(avatar.getDescriptor().getParticipantId()));
             avatar.applyAuthoritativeHealth(combatant.getHealth(),
                     combatant.getMaximumHealth());
         }
         for(RemoteAvatar avatar : new ArrayList<RemoteAvatar>(attachedRemoteAvatars)) {
             if(visible.contains(avatar)) continue;
             avatar.clearDamageAuthorityListener(this);
+            NativeStatusPresentation presentation = participantEffects.remove(avatar);
+            if(presentation != null) presentation.clear(avatar);
             attachedRemoteAvatars.remove(avatar);
         }
     }
@@ -751,6 +1188,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
 
     private void synchronizeNativeMonster(String monsterId, Monster monster) {
         if(nativeAuthority == null || monster == null) return;
+        nativeAuthority.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(monsterId, 1, monster));
         if(monster.hp <= 0 && !monster.isMultiplayerDeathProcessed()) return;
         bindNativeMonster(monsterId, monster);
         Entity stateEntity = nativeMonsterStateEntity(monster);
@@ -833,6 +1271,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     private ParticipantId participantId(Entity entity) {
         Entity current = entity;
         for(int depth = 0; current != null && depth < 4; depth++) {
+            if(current.multiplayerDamageSource != null) return new ParticipantId(current.multiplayerDamageSource);
             if(current == attachedPlayer) return localParticipantId();
             if(current instanceof RemoteAvatar) {
                 return ((RemoteAvatar)current).getDescriptor().getParticipantId();
@@ -941,9 +1380,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     }
 
     private boolean suppressHostNativeProjectileEffect(CombatPresentationEvent event) {
-        if(nativeAuthority == null || event.getPhase() == CombatPresentationPhase.DAMAGE) {
-            return false;
-        }
+        if(event.getPhase() == CombatPresentationPhase.DAMAGE) return false;
         CombatAction action = event.getAction();
         return action == CombatAction.PROJECTILE || action == CombatAction.SPELL
                 || action == CombatAction.BENEFICIAL_SPELL;
@@ -952,25 +1389,147 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     private void attachToLevel(Level level) {
         detachFromLevel();
         attachedLevel = level;
+        if(nativeAuthority != null) nativeAuthority.beginNativeWorld();
+        attachedLevel.nativeExplosionListener = new NativeExplosionListener() {
+            @Override public boolean isSimulationAuthority() { return nativeAuthority != null; }
+            @Override public void addTargets(com.interrupt.dungeoneer.entities.Explosion explosion, Array<Entity> targets) {
+                if(nativeAuthority == null) return;
+                for(RemoteAvatar avatar : attachedRemoteAvatars) {
+                    if(avatar.isActive && !targets.contains(avatar, true)) targets.add(avatar);
+                }
+            }
+            @Override public boolean canAffect(com.interrupt.dungeoneer.entities.Explosion explosion, Entity target) {
+                ParticipantId source = participantId(explosion);
+                ParticipantId recipient = participantId(target);
+                return source == null || recipient == null || source.equals(recipient)
+                        || explosion.damageType == DamageType.HEALING;
+            }
+            @Override public boolean onExplosion(com.interrupt.dungeoneer.entities.Explosion explosion, float amount) {
+                if(nativeAuthority == null) return false;
+                try {
+                    nativeAuthority.publishNativeExplosion(NativeExplosionPresentation.capture(explosion, amount));
+                    return true;
+                }
+                catch(IllegalArgumentException incompatible) {
+                    nativeAuthority.failNativePresentation(incompatible.getMessage());
+                    return false;
+                }
+            }
+        };
+        attachedLevel.nativeAnimationListener = (owner, action) -> {
+            if(nativeAuthority == null) return;
+            try { nativeAuthority.publishNativeAnimationCue(NativeAnimationCue.capture(owner, action)); }
+            catch(IllegalArgumentException invalid) { nativeAuthority.failNativePresentation(invalid.getMessage()); }
+        };
+        attachedLevel.nativeDynamicListener = bomb -> {
+            if(nativeAuthority == null) return;
+            Long id = ensureNativeDynamicIdentity(bomb);
+            if(id == null) return;
+            try {
+                nativeAuthority.publishNativeDynamicCue(NativeDynamicCue.captureFizzle(
+                        id, nativeDynamicItemIds.containsKey(id)
+                                ? nativeDynamicItemIds.get(id) : 0L, bomb));
+            }
+            catch(IllegalArgumentException invalid) {
+                nativeAuthority.failNativePresentation(invalid.getMessage());
+            }
+        };
+        attachedLevel.nativeSpellPresentationListener = (owner, spell, position, zap) -> {
+            if(nativeAuthority == null) return;
+            String sourceId = spellSourceId(owner);
+            if(sourceId == null) return;
+            try {
+                nativeAuthority.publishNativeSpellPresentation(NativeSpellPresentation.capture(
+                        sourceId, nativeSpellItemId(owner), spell, position, zap));
+            }
+            catch(IllegalArgumentException invalid) {
+                nativeAuthority.failNativePresentation(invalid.getMessage());
+            }
+        };
+        attachedLevel.nativeMeleePresentationListener = (owner, sword, kind, target, position, direction) -> {
+            if(nativeAuthority == null) return;
+            String sourceId = spellSourceId(owner);
+            long itemId = weaponResolver == null ? 0L : weaponResolver.identity(sword);
+            try {
+                long targetObjectId = weaponResolver == null || target == null ? 0L
+                        : weaponResolver.worldObjectIdentity(target);
+                nativeAuthority.publishNativeMeleePresentation(NativeMeleePresentation.capture(
+                        sourceId, itemId, kind, position, direction, targetObjectId));
+            }
+            catch(IllegalArgumentException invalid) {
+                nativeAuthority.failNativePresentation(invalid.getMessage());
+            }
+        };
+        attachedLevel.nativeRangedPresentationListener = (owner, bow, position) -> {
+            if(nativeAuthority == null) return;
+            String sourceId = spellSourceId(owner);
+            long itemId = weaponResolver == null ? 0L : weaponResolver.identity(bow);
+            try {
+                nativeAuthority.publishNativeRangedPresentation(NativeRangedPresentation.capture(
+                        sourceId, itemId, position));
+            }
+            catch(IllegalArgumentException invalid) {
+                nativeAuthority.failNativePresentation(invalid.getMessage());
+            }
+        };
         lastLocalHealth = -1;
+    }
+
+    private String spellSourceId(Entity owner) {
+        if(owner instanceof Monster) return monsterIds.get((Monster)owner);
+        ParticipantId participant = participantId(owner);
+        return participant == null ? null
+                : AuthoritativeCombatEncounter.participantTargetId(participant);
+    }
+
+    private long nativeSpellItemId(Entity owner) {
+        if(pendingNativeSpellItemId > 0L) return pendingNativeSpellItemId;
+        if(owner != attachedPlayer || weaponResolver == null || attachedPlayer == null) return 0L;
+        Item held = attachedPlayer.GetHeldItem();
+        return held instanceof Weapon ? weaponResolver.identity((Weapon)held) : 0L;
     }
 
     private void attachToPlayer(Player player) {
         detachFromPlayer();
         attachedPlayer = player;
+        attachedPlayer.multiplayerDamageSource = localParticipantId() == null ? null : localParticipantId().getValue();
         attachedPlayer.setWeaponAttackListener(this);
         attachedPlayer.setHealthAuthorityListener(this);
+        attachedPlayer.setStatusEffectAuthority(nativeAuthority != null);
     }
 
     private void detachFromPlayer() {
         if(attachedPlayer != null) {
             attachedPlayer.clearWeaponAttackListener(this);
             attachedPlayer.clearHealthAuthorityListener(this);
+            NativeStatusPresentation presentation = participantEffects.remove(attachedPlayer);
+            if(presentation != null) presentation.clear(attachedPlayer);
+            attachedPlayer.setStatusEffectAuthority(true);
         }
         attachedPlayer = null;
     }
 
+    private void clearParticipantEffects() {
+        for(Map.Entry<com.interrupt.dungeoneer.entities.Actor, NativeStatusPresentation> entry : participantEffects.entrySet())
+            entry.getValue().clear(entry.getKey());
+        participantEffects.clear();
+    }
+
     private void detachFromLevel() {
+        if(attachedLevel != null) clearNativeDynamicReplicas(attachedLevel);
+        if(attachedLevel != null) attachedLevel.nativeAnimationListener = null;
+        if(attachedLevel != null) attachedLevel.nativeDynamicListener = null;
+        if(attachedLevel != null) attachedLevel.nativeSpellPresentationListener = null;
+        if(attachedLevel != null) attachedLevel.nativeMeleePresentationListener = null;
+        if(attachedLevel != null) attachedLevel.nativeRangedPresentationListener = null;
+        clearParticipantEffects();
+        if(attachedLevel != null) attachedLevel.nativeExplosionListener = null;
+        peer.drainNativeExplosions();
+        peer.drainNativeAnimationCues();
+        peer.drainNativeDynamicCues();
+        peer.drainNativeSpellPresentations();
+        peer.drainNativeMeleePresentations();
+        peer.drainNativeRangedPresentations();
         for(RemoteAvatar avatar : attachedRemoteAvatars) {
             avatar.clearDamageAuthorityListener(this);
         }
@@ -996,6 +1555,9 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             clearNativeProjectile(projectile);
         }
         projectilePresentations.clear();
+        nativeDynamicIds.clear();
+        nativeDynamicItemIds.clear();
+        nextNativeDynamicId = 1L;
         authoritativePlayers.clear();
         attachedLevel = null;
     }
@@ -1032,6 +1594,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         if(damageType == DamageType.HEALING) return CombatAction.BENEFICIAL_SPELL;
         if(weapon instanceof Wand) return CombatAction.SPELL;
         if(weapon instanceof Bow || weapon instanceof Gun) return CombatAction.PROJECTILE;
+        if(weapon instanceof Sword) return CombatAction.MELEE;
         if(damageType != null && damageType != DamageType.PHYSICAL) return CombatAction.SPELL;
         return CombatAction.MELEE;
     }
@@ -1062,6 +1625,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         private final Monster monster;
         private final Corpse corpse;
         private final String monsterId;
+        private final boolean blocked;
         private final float directionX;
         private final float directionY;
         private final float directionZ;
@@ -1072,13 +1636,14 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         private final float impactY;
         private final float impactZ;
 
-        private NativeTrace(Monster monster, Corpse corpse, String monsterId,
+        private NativeTrace(Monster monster, Corpse corpse, String monsterId, boolean blocked,
                 float directionX, float directionY, float directionZ,
                 float originX, float originY, float originZ,
                 float impactX, float impactY, float impactZ) {
             this.monster = monster;
             this.corpse = corpse;
             this.monsterId = monsterId;
+            this.blocked = blocked;
             this.directionX = directionX;
             this.directionY = directionY;
             this.directionZ = directionZ;

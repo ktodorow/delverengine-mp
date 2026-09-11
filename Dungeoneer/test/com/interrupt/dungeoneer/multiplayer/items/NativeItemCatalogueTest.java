@@ -33,6 +33,7 @@ public class NativeItemCatalogueTest {
         DirectConnectPeer peer = (DirectConnectPeer)Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[]{DirectConnectPeer.class}, (proxy, method, args) -> {
             if(method.getName().equals("getNextItemRequestId")) return 1L;
+            if(method.getName().equals("getNativeWorldGeneration")) return 1L;
             if(method.getName().equals("getLocalMovementEntityId")) return new NetworkEntityId(2L);
             if(method.getName().equals("getMovementEntities")) return Collections.singletonList(
                     new MovementEntityDescriptor(1L, new NetworkEntityId(2L),

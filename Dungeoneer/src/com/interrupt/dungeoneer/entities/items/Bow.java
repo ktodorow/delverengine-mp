@@ -5,11 +5,13 @@ import com.badlogic.gdx.math.Vector3;
 import com.interrupt.dungeoneer.Audio;
 import com.interrupt.dungeoneer.annotations.EditorProperty;
 import com.interrupt.dungeoneer.entities.DynamicLight;
+import com.interrupt.dungeoneer.entities.Entity;
 import com.interrupt.dungeoneer.entities.Item;
 import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.entities.projectiles.Missile;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentationListener;
 import com.interrupt.managers.ItemManager;
 import com.interrupt.managers.StringManager;
 
@@ -36,49 +38,76 @@ public class Bow extends Weapon {
 
 	@Override
 	public void doAttack(Player p, Level lvl, float attackPower) {
-		Missile missile = getAmmo();
+		Missile missile = p.hasAuthoritativeAttackAmmo()
+				? p.takeAuthoritativeAttackAmmo() : getAmmo();
 
 		if(missile == null) {
 			Audio.playSound("ui/ui_noammo_bow.mp3", 0.4f);
 			return;
 		}
 
-		int damageRoll = doAttackRoll(attackPower, p);
-		if(damageRoll == 0) damageRoll = 1;
-		
-		float power = attackPower * (this.range / 4.0f) * 0.5f;
-		missile.isActive = true;
-		missile.isDynamic = true;
-		missile.owner = p;
-		missile.damage = damageRoll;
-		missile.damageType = this.getDamageType();
-		missile.ignorePlayerCollision = true;
-        missile.isOnFloor = false;
-		missile.scale = 2.0f;
-		missile.leaveTrail = false;
-		missile.knockback = (this.knockback + p.getKnockbackStatBoost()) * attackPower;
-		missile.ignorePlayerCollision = true;
+		float power = configureMissile(missile, p, p, attackPower);
         Vector3 direction = setMissileDirectionAndPosition(missile, power, p);
 		notifyWeaponAttack(p, direction, attackPower);
-
-		Color hitColor = getEnchantmentColor();
-		boolean fullBright = getDamageType() != DamageType.PHYSICAL;
-
-		if (fullBright) {
-			DynamicLight l = new DynamicLight();
-			l.lightColor.set(hitColor.r, hitColor.g, hitColor.b);
-			l.range = 2.0f;
-
-			missile.attach(l);
-			missile.color = hitColor;
-			missile.leaveTrail = true;
-			missile.trailTimer = missile.trailInterval * 0.5f;
-			missile.effectLifetime = 200f;
+		if(p.deferWeaponWorldAttack()) {
+			Audio.playSound(fireSound, 0.25f);
+			notifyRangedPresentation(p, lvl);
+			return;
 		}
 
 		lvl.entities.add(missile);
 		
 		Audio.playSound(fireSound, 0.25f);
+		notifyRangedPresentation(p, lvl);
+	}
+
+	private void notifyRangedPresentation(Entity owner, Level level) {
+		NativeRangedPresentationListener listener = level == null
+				? null : level.nativeRangedPresentationListener;
+		if(listener != null) listener.onRangedPresentation(owner, this,
+				new Vector3(owner.x, owner.y, owner.z));
+	}
+
+	/** Configure exact native ammo for a Host-accepted remote Bow release. */
+	public void configureNetworkMissile(Missile missile, Player stats, Entity owner,
+			Vector3 worldDirection, float attackPower) {
+		float power = configureMissile(missile, stats, owner, attackPower);
+		missile.SetPositionAndVelocity(new Vector3(owner.x, owner.y, owner.z),
+				worldDirection.cpy().scl(power));
+	}
+
+	public void playNetworkFirePresentation(float x, float y, float z) {
+		Audio.playPositionedSound(fireSound, new Vector3(x, y, z), 0.25f, 12f);
+	}
+
+	private float configureMissile(Missile missile, Player stats, Entity owner,
+			float attackPower) {
+		int damageRoll = doAttackRoll(attackPower, stats);
+		if(damageRoll == 0) damageRoll = 1;
+		float power = attackPower * (this.range / 4.0f) * 0.5f;
+		missile.isActive = true;
+		missile.isDynamic = true;
+		missile.owner = owner;
+		missile.damage = damageRoll;
+		missile.damageType = this.getDamageType();
+		missile.ignorePlayerCollision = true;
+		missile.isOnFloor = false;
+		missile.scale = 2.0f;
+		missile.leaveTrail = false;
+		missile.knockback = (this.knockback + stats.getKnockbackStatBoost()) * attackPower;
+
+		Color hitColor = getEnchantmentColor();
+		if(getDamageType() != DamageType.PHYSICAL) {
+			DynamicLight light = new DynamicLight();
+			light.lightColor.set(hitColor.r, hitColor.g, hitColor.b);
+			light.range = 2.0f;
+			missile.attach(light);
+			missile.color = hitColor;
+			missile.leaveTrail = true;
+			missile.trailTimer = missile.trailInterval * 0.5f;
+			missile.effectLifetime = 200f;
+		}
+		return power;
 	}
 
 	public Vector3 setMissileDirectionAndPosition(Missile missile, float power, Player p) {

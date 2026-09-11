@@ -14,6 +14,11 @@ import com.interrupt.managers.EntityManager;
 
 public class Fire extends AnimatedSprite {
     public float hurtTimer = 0f;
+    private transient boolean presentationOnly;
+    private transient float presentationDelta;
+
+    public void setPresentationOnly() { presentationOnly = true; burnsOut = false; }
+    public void advancePresentation(float hostElapsed) { presentationDelta += hostElapsed; }
 
     @EditorProperty
     public float hurtTime = 160f;
@@ -89,20 +94,26 @@ public class Fire extends AnimatedSprite {
 
     @Override
     public void tick(Level level, float delta) {
+        if(presentationOnly) {
+            delta = presentationDelta;
+            presentationDelta = 0;
+        }
         super.tick(level, delta);
 
-        spreadTimer -= delta;
-        if(spreadTimer < 0) {
-            spreadTimer = spreadTime;
-            spread(level);
-        }
+        if(!presentationOnly) {
+            spreadTimer -= delta;
+            if(spreadTimer < 0) {
+                spreadTimer = spreadTime;
+                spread(level);
+            }
 
-        hurtTimer -= delta;
-        if(hurtTimer < 0) {
-            hurtTimer = hurtTime;
-            burn(level);
-        }
+            hurtTimer -= delta;
+            if(hurtTimer < 0) {
+                hurtTimer = hurtTime;
+                burn(level);
+            }
 
+        }
         if(burnsOut) {
             lifeTimeTimer += delta;
             if (lifeTimeTimer > lifeTime) isActive = false;
@@ -143,6 +154,7 @@ public class Fire extends AnimatedSprite {
     }
 
     public void burn(Level level) {
+        if(presentationOnly) return;
         //Array<Entity> entities = level.getEntitiesColliding(x - 0.5f, y - 0.5f, z, collision, this);
         Array<Entity> entities = level.getEntitiesColliding(x, y, z, this.fireCollision, this);
 
@@ -167,6 +179,7 @@ public class Fire extends AnimatedSprite {
     }
 
     public void spread(Level level) {
+        if(presentationOnly) return;
         Array<Entity> entities = level.getEntitiesColliding(x, y, z, collision, this);
         for(Entity e : entities) {
             if(e instanceof Breakable) {
@@ -176,6 +189,7 @@ public class Fire extends AnimatedSprite {
     }
 
     public void spreadTo(Entity e, Level level) {
+        if(presentationOnly) return;
         Fire currentFire = (Fire)e.getAttached(Fire.class);
         boolean isOnFire = currentFire != null;
 

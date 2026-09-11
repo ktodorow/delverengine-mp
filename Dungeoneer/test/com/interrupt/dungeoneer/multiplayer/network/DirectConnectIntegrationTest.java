@@ -1,4 +1,12 @@
 package com.interrupt.dungeoneer.multiplayer.network;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeStatusEffectState;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeStatusCue;
+import com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController;
+import com.interrupt.dungeoneer.entities.Monster;
+import com.interrupt.dungeoneer.entities.items.Weapon.DamageType;
+import com.interrupt.managers.StringManager;
+import com.interrupt.dungeoneer.game.LocalizedString;
 
 import com.interrupt.dungeoneer.multiplayer.combat.CombatRequest;
 import com.interrupt.dungeoneer.multiplayer.combat.ProjectileVisual;
@@ -68,6 +76,696 @@ public class DirectConnectIntegrationTest {
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     private int campaignStoreCounter;
+
+    @Test public void nativeParticipantDamageUsesResistanceStatusAndHealingForBothRoles() throws Exception {
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<String, LocalizedString>();
+        DirectConnectCompatibility compatibility = compatibility("native-participant");
+        HostFixture fixture = host(compatibility, 3, "native-participant");
+        DirectConnectClient first = null, second = null;
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+            DirectConnectCombatController controller = new DirectConnectCombatController(fixture.host, false);
+            for(MovementEntityDescriptor descriptor : fixture.host.getMovementEntities()) {
+                com.interrupt.dungeoneer.entities.Actor target;
+                if(descriptor.getEntityId().equals(fixture.host.getLocalMovementEntityId())) {
+                    com.interrupt.dungeoneer.entities.Player player = new com.interrupt.dungeoneer.entities.Player();
+                    player.hp = player.maxHp = 8; player.calculatedStats.Recalculate(player);
+                    player.setHealthAuthorityListener(controller); target = player;
+                }
+                else {
+                    com.interrupt.dungeoneer.multiplayer.movement.RemoteAvatar avatar =
+                            new com.interrupt.dungeoneer.multiplayer.movement.RemoteAvatar(descriptor);
+                    avatar.setDamageAuthorityListener(controller); target = avatar;
+                }
+                String id = AuthoritativeCombatEncounter.participantTargetId(descriptor.getParticipantId());
+                target.takeDamage(3, DamageType.ICE, null);
+                assertTrue(target.statusEffects.first() instanceof com.interrupt.dungeoneer.statuseffects.SlowEffect);
+                assertEquals(5, target.hp);
+                awaitCombatHealth(first, id, 5); awaitCombatHealth(second, id, 5);
+                awaitEffects(first, id, 500); awaitEffects(second, id, 500);
+                for(DirectConnectClient observer : java.util.Arrays.asList(first, second)) {
+                    com.interrupt.dungeoneer.entities.Actor replica = applyParticipantObserver(observer, descriptor);
+                    assertEquals(target.getShader(), replica.getShader());
+                    assertEquals(0.5f, replica.statusEffects.first().speedMod, 0);
+                    assertEquals(5, replica.hp);
+                    assertFalse(replica.hasStatusEffectAuthority());
+                }
+                com.interrupt.dungeoneer.entities.Explosion healing = new com.interrupt.dungeoneer.entities.Explosion();
+                target.takeDamage(2, DamageType.HEALING, healing);
+                assertEquals("Healing explosion must heal", 7, target.hp);
+                awaitCombatHealth(first, id, 7); awaitCombatHealth(second, id, 7);
+                com.interrupt.dungeoneer.statuseffects.StatusEffect shield = new com.interrupt.dungeoneer.statuseffects.StatusEffect();
+                shield.damageMod = 0.5f; target.addStatusEffect(shield);
+                target.takeDamage(4, DamageType.PHYSICAL, null);
+                assertEquals("Native shield multiplier runs once", 5, target.hp);
+                awaitCombatHealth(first, id, 5); awaitCombatHealth(second, id, 5);
+                fixture.host.setSessionPaused(true);
+                target.takeDamage(2, DamageType.HEALING, healing);
+                assertEquals("Shared pause blocks mutation", 5, target.hp);
+                fixture.host.setSessionPaused(false);
+            }
+        } finally {
+            if(first != null) first.close(); if(second != null) second.close(); fixture.close();
+            StringManager.localizedStrings = strings;
+        }
+    }
+
+    private com.interrupt.dungeoneer.entities.Actor applyParticipantObserver(DirectConnectClient peer,
+            MovementEntityDescriptor target) throws Exception {
+        com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
+                new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(peer);
+        java.lang.reflect.Field avatarsField = movement.getClass().getDeclaredField("remoteAvatars");
+        avatarsField.setAccessible(true);
+        @SuppressWarnings("unchecked") Map<NetworkEntityId, com.interrupt.dungeoneer.multiplayer.movement.RemoteAvatar> avatars =
+                (Map<NetworkEntityId, com.interrupt.dungeoneer.multiplayer.movement.RemoteAvatar>)avatarsField.get(movement);
+        for(MovementEntityDescriptor descriptor : peer.getMovementEntities()) {
+            if(!descriptor.getEntityId().equals(peer.getLocalMovementEntityId())) avatars.put(descriptor.getEntityId(),
+                    new com.interrupt.dungeoneer.multiplayer.movement.RemoteAvatar(descriptor));
+        }
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, movement, false);
+        com.interrupt.dungeoneer.entities.Player player = new com.interrupt.dungeoneer.entities.Player();
+        java.lang.reflect.Method attach = controller.getClass().getDeclaredMethod("attachToPlayer", com.interrupt.dungeoneer.entities.Player.class);
+        attach.setAccessible(true); attach.invoke(controller, player);
+        java.lang.reflect.Method apply = controller.getClass().getDeclaredMethod("applySnapshot", CombatSnapshot.class);
+        apply.setAccessible(true); apply.invoke(controller, peer.getCombatSnapshot());
+        return target.getEntityId().equals(peer.getLocalMovementEntityId()) ? player : avatars.get(target.getEntityId());
+    }
+
+    @Test public void nativeExplosionTraversesControllerAndTcpToTwoObservers() throws Exception {
+        com.interrupt.dungeoneer.game.Game previousGame = com.interrupt.dungeoneer.game.Game.instance;
+        com.interrupt.dungeoneer.game.Options previousOptions = com.interrupt.dungeoneer.game.Options.instance;
+        DirectConnectCompatibility compatibility = compatibility("native-explosion");
+        HostFixture fixture = host(compatibility, 3, "native-explosion");
+        DirectConnectClient first = null, second = null;
+        DirectConnectCombatController controller = new DirectConnectCombatController(fixture.host, false);
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = new org.objenesis.ObjenesisStd().newInstance(com.interrupt.dungeoneer.game.Game.class);
+            com.interrupt.dungeoneer.game.Game.instance = game;
+            game.player = new com.interrupt.dungeoneer.entities.Player();
+            game.level = new com.interrupt.dungeoneer.game.Level(4, 4);
+            com.interrupt.dungeoneer.game.Options.instance = new com.interrupt.dungeoneer.game.Options();
+            com.interrupt.dungeoneer.game.Options.instance.graphicsDetailLevel = 1;
+            java.lang.reflect.Method attach = DirectConnectCombatController.class.getDeclaredMethod("attachToLevel", com.interrupt.dungeoneer.game.Level.class);
+            attach.setAccessible(true); attach.invoke(controller, game.level);
+            com.badlogic.gdx.utils.Array<com.interrupt.dungeoneer.gfx.animation.AnimationAction> actions = new com.badlogic.gdx.utils.Array<>();
+            actions.add(new com.interrupt.dungeoneer.gfx.animation.LightAnimationAction());
+            java.util.HashMap<String, com.badlogic.gdx.utils.Array<com.interrupt.dungeoneer.gfx.animation.AnimationAction>> frames = new java.util.HashMap<>();
+            frames.put("0", actions);
+            com.interrupt.dungeoneer.gfx.animation.SpriteAnimation animation =
+                    new com.interrupt.dungeoneer.gfx.animation.SpriteAnimation(0, 2, 60, frames);
+            animation.play(); animation.animate(1, game.player);
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                List<com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationCue> cues = new java.util.ArrayList<>();
+                long cueDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+                while(cues.isEmpty() && System.currentTimeMillis() < cueDeadline) {
+                    cues.addAll(observer.drainNativeAnimationCues()); Thread.sleep(5);
+                }
+                assertEquals("First native animation frame reaches each observer once", 1, cues.size());
+                int entityCount = game.level.entities.size;
+                cues.get(0).replay();
+                assertEquals(entityCount + 1, game.level.entities.size);
+                java.lang.reflect.Method deliverCue = DirectConnectClient.class.getDeclaredMethod("nativeAnimationCue", DirectConnectWire.NativeAnimationCueMessage.class);
+                deliverCue.setAccessible(true);
+                java.lang.reflect.Field cueSession = DirectConnectClient.class.getDeclaredField("sessionId"); cueSession.setAccessible(true);
+                deliverCue.invoke(observer, new DirectConnectWire.NativeAnimationCueMessage((String)cueSession.get(observer), 1, cues.get(0), observer.getNativeWorldGeneration()));
+                assertTrue(observer.drainNativeAnimationCues().isEmpty());
+            }
+            final int[] hits = {0};
+            com.interrupt.dungeoneer.entities.Entity target = new com.interrupt.dungeoneer.entities.Entity() {
+                @Override public void hit(float x, float y, int damage, float force, DamageType type, com.interrupt.dungeoneer.entities.Entity source) { hits[0]++; }
+            };
+            target.x = 0.1f; target.isSolid = true; game.level.spatialhash.AddEntity(target);
+            com.interrupt.dungeoneer.entities.Explosion explosion = new com.interrupt.dungeoneer.entities.Explosion();
+            explosion.damage = 8; explosion.explodeSound = null; explosion.particleCount = 2;
+            explosion.color = new com.badlogic.gdx.graphics.Color(com.badlogic.gdx.graphics.Color.BLUE);
+            explosion.explode(game.level, 1);
+            assertEquals(1, hits[0]);
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                List<com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionPresentation> received = new java.util.ArrayList<>();
+                long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+                while(received.isEmpty() && System.currentTimeMillis() < deadline) {
+                    received.addAll(observer.drainNativeExplosions()); Thread.sleep(5);
+                }
+                assertEquals(1, received.size());
+                game.level.non_collidable_entities.clear(); received.get(0).replay(game.level);
+                assertEquals(4, game.level.non_collidable_entities.size);
+                assertEquals(com.badlogic.gdx.graphics.Color.BLUE, game.level.non_collidable_entities.get(2).color);
+                assertEquals("Observer replay cannot repeat Host damage", 1, hits[0]);
+                java.lang.reflect.Method deliver = DirectConnectClient.class.getDeclaredMethod("nativeExplosion", DirectConnectWire.NativeExplosionMessage.class);
+                deliver.setAccessible(true);
+                java.lang.reflect.Field session = DirectConnectClient.class.getDeclaredField("sessionId"); session.setAccessible(true);
+                deliver.invoke(observer, new DirectConnectWire.NativeExplosionMessage((String)session.get(observer), 1, received.get(0), observer.getNativeWorldGeneration()));
+                assertTrue("Duplicate reliable event cannot replay", observer.drainNativeExplosions().isEmpty());
+            }
+            long obsoleteGeneration = fixture.host.getNativeWorldGeneration();
+            String monsterId = AuthoritativeCombatEncounter.monsterTargetId(1);
+            ActorEffectsSnapshot effect = new ActorEffectsSnapshot(monsterId, 1, false,
+                    java.util.Collections.singletonList(new NativeStatusEffectState(99,
+                            NativeStatusEffectState.Kind.SLOW, 500, 0.5f, "magic-item-white", false)));
+            fixture.host.synchronizeNativeActorEffects(effect);
+            awaitEffects(first, monsterId, 500); awaitEffects(second, monsterId, 500);
+            fixture.host.beginNativeWorld();
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+                while(observer.getNativeWorldGeneration() == obsoleteGeneration && System.currentTimeMillis() < deadline) Thread.sleep(5);
+                assertEquals(obsoleteGeneration + 1, observer.getNativeWorldGeneration());
+                assertTrue(observer.getActorEffects().isEmpty());
+                java.lang.reflect.Field session = DirectConnectClient.class.getDeclaredField("sessionId"); session.setAccessible(true);
+                String sessionId = (String)session.get(observer);
+                java.lang.reflect.Method effects = DirectConnectClient.class.getDeclaredMethod("monsterEffects", DirectConnectWire.MonsterEffectsMessage.class);
+                effects.setAccessible(true);
+                effects.invoke(observer, new DirectConnectWire.MonsterEffectsMessage(sessionId, effect, true, obsoleteGeneration));
+                assertTrue("Old floor cannot resurrect status", observer.getActorEffects().isEmpty());
+                java.lang.reflect.Method deliver = DirectConnectClient.class.getDeclaredMethod("nativeExplosion", DirectConnectWire.NativeExplosionMessage.class);
+                deliver.setAccessible(true);
+                deliver.invoke(observer, new DirectConnectWire.NativeExplosionMessage(sessionId, 999,
+                        com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionPresentation.capture(explosion, 1), obsoleteGeneration));
+                assertTrue("Old floor cannot replay explosion", observer.drainNativeExplosions().isEmpty());
+                assertTrue(observer.drainNativeStatusCues().isEmpty());
+            }
+            assertTrue(fixture.host.drainNativeExplosions().isEmpty());
+        }
+        finally {
+            controller.dispose(); if(first != null) first.close(); if(second != null) second.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previousGame;
+            com.interrupt.dungeoneer.game.Options.instance = previousOptions;
+        }
+    }
+
+    @Test public void nativeProjectileTravelAndCleanupReachTwoObservers() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("native-projectile-travel");
+        HostFixture fixture = host(compatibility, 3, "native-projectile-travel");
+        DirectConnectClient first = null, second = null;
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+
+            com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile projectile =
+                    new com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile();
+            projectile.x = 1f; projectile.y = 2f; projectile.z = 0.5f;
+            projectile.xa = 0.25f; projectile.ya = 0.125f; projectile.floating = true;
+            projectile.spriteAtlas = "magic-blue"; projectile.tex = 12;
+            projectile.color.set(0.1f, 0.35f, 1f, 1f);
+            fixture.host.synchronizeNativeDynamicState(
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(
+                            77L, 0L, projectile));
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState received =
+                        awaitNativeDynamic(observer, 77L, true);
+                com.interrupt.dungeoneer.entities.Entity replica = received.apply(null);
+                assertEquals(1f, replica.x, 0f); assertEquals("magic-blue", replica.spriteAtlas);
+                assertEquals(0.35f, replica.color.g, 0f); assertTrue(replica.nativePresentationReplica);
+            }
+
+            Thread.sleep(75);
+            projectile.x = 3.5f; projectile.y = 2.75f;
+            fixture.host.synchronizeNativeDynamicState(
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(
+                            77L, 0L, projectile));
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState received =
+                        awaitNativeDynamicPosition(observer, 77L, 3.5f);
+                assertEquals(2.75f, received.apply(null).y, 0f);
+            }
+
+            com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue impact =
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue.captureImpact(
+                            77L, 0L, projectile, true, 3.5f, 2.75f, 0.5f);
+            fixture.host.publishNativeDynamicCue(impact);
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue received =
+                        awaitNativeDynamicCue(observer);
+                assertEquals(com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue.Kind.PROJECTILE_IMPACT,
+                        received.kind);
+                assertEquals("magic-blue", received.state.apply(null).spriteAtlas);
+                assertTrue(received.entityHit);
+            }
+
+            fixture.host.synchronizeNativeDynamicState(
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(
+                            77L, 0L, projectile, false));
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                assertFalse(awaitNativeDynamic(observer, 77L, false).active);
+                assertTrue(observer.getNativeDynamicStates().isEmpty());
+            }
+
+            java.lang.reflect.Field session = DirectConnectClient.class.getDeclaredField("sessionId");
+            session.setAccessible(true);
+            String sessionId = (String)session.get(first);
+            java.lang.reflect.Method deliver = DirectConnectClient.class.getDeclaredMethod(
+                    "nativeDynamicCue", DirectConnectWire.NativeDynamicCueMessage.class);
+            deliver.setAccessible(true);
+            long generation = first.getNativeWorldGeneration();
+            deliver.invoke(first, new DirectConnectWire.NativeDynamicCueMessage(
+                    sessionId, 1L, impact, generation));
+            assertTrue("Duplicate cue cannot replay", first.drainNativeDynamicCues().isEmpty());
+            deliver.invoke(first, new DirectConnectWire.NativeDynamicCueMessage(
+                    sessionId, 3L, impact, generation));
+            deliver.invoke(first, new DirectConnectWire.NativeDynamicCueMessage(
+                    sessionId, 2L, impact, generation));
+            assertEquals("Out-of-order cue cannot replay", 1, first.drainNativeDynamicCues().size());
+
+            fixture.host.beginNativeWorld();
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(first.getNativeWorldGeneration() == generation && System.currentTimeMillis() < deadline)
+                Thread.sleep(10L);
+            assertTrue(first.getNativeWorldGeneration() > generation);
+            deliver.invoke(first, new DirectConnectWire.NativeDynamicCueMessage(
+                    sessionId, 999L, impact, generation));
+            assertTrue("Old floor cue cannot replay", first.drainNativeDynamicCues().isEmpty());
+        }
+        finally {
+            if(first != null) first.close(); if(second != null) second.close(); fixture.close();
+        }
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState awaitNativeDynamic(
+            DirectConnectPeer peer, long id, boolean active) throws Exception {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            for(com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState state :
+                    peer.getNativeDynamicStates())
+                if(state.id == id && state.active == active) return state;
+            Thread.sleep(5);
+        }
+        fail("Timed out waiting for native dynamic state " + id + " active=" + active);
+        return null;
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState awaitNativeDynamicPosition(
+            DirectConnectPeer peer, long id, float x) throws Exception {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            for(com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState state :
+                    peer.getNativeDynamicStates())
+                if(state.id == id && state.active && state.apply(null).x == x) return state;
+            Thread.sleep(5);
+        }
+        fail("Timed out waiting for native dynamic position " + x);
+        return null;
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue awaitNativeDynamicCue(
+            DirectConnectPeer peer) throws Exception {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            java.util.List<com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue> cues =
+                    peer.drainNativeDynamicCues();
+            if(!cues.isEmpty()) return cues.get(0);
+            Thread.sleep(5);
+        }
+        fail("Timed out waiting for native dynamic cue");
+        return null;
+    }
+
+    @Test public void acceptedNativeItemFeedbackReachesTwoObserversAndRejectsStaleReplay()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("native-cast-presentation");
+        HostFixture fixture = host(compatibility, 3, "native-cast-presentation");
+        DirectConnectClient first = null, second = null;
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+
+            com.interrupt.dungeoneer.entities.spells.Beam spell =
+                    new com.interrupt.dungeoneer.entities.spells.Beam();
+            com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation cast =
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation.capture(
+                            "participant:campaign-slot-2", 71L, spell,
+                            new com.badlogic.gdx.math.Vector3(2f, 3f, 0.75f), true);
+            fixture.host.publishNativeSpellPresentation(cast);
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation received =
+                        awaitNativeSpellPresentation(observer);
+                assertEquals(71L, received.itemId); assertTrue(received.zap);
+                assertEquals(spell.getCastSoundAsset(), received.sound);
+                assertEquals(2f, received.x, 0f);
+            }
+            com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation impact =
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation.capture(
+                            "participant:campaign-slot-2", 72L,
+                            com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation.Kind.WORLD_HIT,
+                            new com.badlogic.gdx.math.Vector3(4f, 5f, 0.5f),
+                            new com.badlogic.gdx.math.Vector3(1f, 0f, 0f), 1000007L);
+            fixture.host.publishNativeMeleePresentation(impact);
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation received =
+                        awaitNativeMeleePresentation(observer);
+                assertEquals(72L, received.itemId);
+                assertEquals(1000007L, received.targetObjectId);
+                assertEquals(com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation.Kind.WORLD_HIT,
+                        received.kind);
+                assertEquals(5f, received.y, 0f);
+            }
+            com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation release =
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation.capture(
+                            "participant:campaign-slot-2", 73L,
+                            new com.badlogic.gdx.math.Vector3(6f, 7f, 0.5f));
+            fixture.host.publishNativeRangedPresentation(release);
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation received =
+                        awaitNativeRangedPresentation(observer);
+                assertEquals(73L, received.itemId);
+                assertEquals("participant:campaign-slot-2", received.sourceId);
+                assertEquals(7f, received.y, 0f);
+            }
+            com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot broken =
+                    new com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot(
+                            1000007L, 3L, 0, false, false, 4f, 5f, 0.5f,
+                            0.1f, 0.2f, 0.3f, 1f, 2f, 3f);
+            fixture.host.publishBreakable(broken);
+            for(DirectConnectClient observer : new DirectConnectClient[]{first, second}) {
+                com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot received =
+                        awaitBreakableSnapshot(observer, 1000007L);
+                assertEquals(3L, received.revision);
+                assertEquals(0, received.hp);
+                assertFalse(received.active);
+                assertEquals(0.3f, received.velocityZ, 0f);
+            }
+
+            long generation = first.getNativeWorldGeneration();
+            fixture.host.beginNativeWorld();
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(first.getNativeWorldGeneration() == generation
+                    && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            java.lang.reflect.Field session = DirectConnectClient.class.getDeclaredField("sessionId");
+            session.setAccessible(true);
+            java.lang.reflect.Method deliver = DirectConnectClient.class.getDeclaredMethod(
+                    "nativeSpellPresentation",
+                    DirectConnectWire.NativeSpellPresentationMessage.class);
+            deliver.setAccessible(true);
+            deliver.invoke(first, new DirectConnectWire.NativeSpellPresentationMessage(
+                    (String)session.get(first), 999L, cast, generation));
+            assertTrue("Old floor cannot replay cast feedback",
+                    first.drainNativeSpellPresentations().isEmpty());
+            java.lang.reflect.Method deliverMelee = DirectConnectClient.class.getDeclaredMethod(
+                    "nativeMeleePresentation",
+                    DirectConnectWire.NativeMeleePresentationMessage.class);
+            deliverMelee.setAccessible(true);
+            deliverMelee.invoke(first, new DirectConnectWire.NativeMeleePresentationMessage(
+                    (String)session.get(first), 999L, impact, generation));
+            assertTrue("Old floor cannot replay melee feedback",
+                    first.drainNativeMeleePresentations().isEmpty());
+            java.lang.reflect.Method deliverRanged = DirectConnectClient.class.getDeclaredMethod(
+                    "nativeRangedPresentation",
+                    DirectConnectWire.NativeRangedPresentationMessage.class);
+            deliverRanged.setAccessible(true);
+            deliverRanged.invoke(first, new DirectConnectWire.NativeRangedPresentationMessage(
+                    (String)session.get(first), 999L, release, generation));
+            assertTrue("Old floor cannot replay ranged feedback",
+                    first.drainNativeRangedPresentations().isEmpty());
+        }
+        finally {
+            if(first != null) first.close(); if(second != null) second.close(); fixture.close();
+        }
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation
+            awaitNativeSpellPresentation(DirectConnectPeer peer) throws Exception {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            java.util.List<com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation> casts =
+                    peer.drainNativeSpellPresentations();
+            if(!casts.isEmpty()) return casts.get(0);
+            Thread.sleep(5L);
+        }
+        fail("Timed out waiting for native spell presentation");
+        return null;
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation
+            awaitNativeMeleePresentation(DirectConnectPeer peer) throws Exception {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            java.util.List<com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation> events =
+                    peer.drainNativeMeleePresentations();
+            if(!events.isEmpty()) return events.get(0);
+            Thread.sleep(5L);
+        }
+        fail("Timed out waiting for native melee presentation");
+        return null;
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation
+            awaitNativeRangedPresentation(DirectConnectPeer peer) throws Exception {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            java.util.List<com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation> events =
+                    peer.drainNativeRangedPresentations();
+            if(!events.isEmpty()) return events.get(0);
+            Thread.sleep(5L);
+        }
+        fail("Timed out waiting for native ranged presentation");
+        return null;
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot awaitBreakableSnapshot(
+            DirectConnectPeer peer, long entityId) throws Exception {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            for(com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot state
+                    : peer.getBreakableSnapshots()) {
+                if(state.entityId == entityId) return state;
+            }
+            Thread.sleep(5L);
+        }
+        fail("Timed out waiting for breakable state " + entityId);
+        return null;
+    }
+
+    @Test public void nativeDoorFeedbackReachesOnlyInitiatingParticipant() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("door-feedback");
+        HostFixture fixture = host(compatibility, 3, "door-feedback");
+        DirectConnectClient first = null, second = null;
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController controller =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            com.interrupt.dungeoneer.game.Game game = new org.objenesis.ObjenesisStd().newInstance(
+                    com.interrupt.dungeoneer.game.Game.class);
+            game.level = new com.interrupt.dungeoneer.game.Level(4, 4) {
+                @Override public boolean canSee(float x, float y, float targetX, float targetY) { return true; }
+            };
+            java.lang.reflect.Field gameField = controller.getClass().getDeclaredField("game");
+            gameField.setAccessible(true); gameField.set(controller, game);
+            java.lang.reflect.Field objectsField = controller.getClass().getDeclaredField("objects");
+            objectsField.setAccessible(true);
+            @SuppressWarnings("unchecked") Map<Long, com.interrupt.dungeoneer.entities.Entity> objects =
+                    (Map<Long, com.interrupt.dungeoneer.entities.Entity>)objectsField.get(controller);
+            java.lang.reflect.Field boundaryField = controller.getClass().getDeclaredField("boundary");
+            boundaryField.setAccessible(true);
+            AuthoritativeItemWorld.InteractionBoundary boundary =
+                    (AuthoritativeItemWorld.InteractionBoundary)boundaryField.get(controller);
+            for(MovementEntityDescriptor descriptor : fixture.host.getMovementEntities()) {
+                ParticipantContext participant = new ParticipantContext(descriptor.getParticipantId(),
+                        new ParticipantCharacterState(1, 1, 0, 0), new SharedPartyProgression());
+                com.interrupt.dungeoneer.entities.Door door = new com.interrupt.dungeoneer.entities.Door();
+                door.doorState = com.interrupt.dungeoneer.entities.Door.DoorState.OPEN;
+                door.getsStuckOpen = true;
+                door.x = door.y = 1; door.z = 0;
+                objects.put(1L, door);
+                assertTrue(boundary.useObject(1L, participant));
+                DirectConnectPeer recipient = descriptor.getCampaignSlot() == 1 ? fixture.host
+                        : descriptor.getCampaignSlot() == 2 ? first : second;
+                List<com.interrupt.dungeoneer.multiplayer.items.DoorFeedback> received = new java.util.ArrayList<>();
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+                while(received.isEmpty() && System.nanoTime() < deadline) {
+                    received.addAll(recipient.drainDoorFeedback()); Thread.sleep(5);
+                }
+                assertEquals(java.util.Collections.singletonList(
+                        com.interrupt.dungeoneer.multiplayer.items.DoorFeedback.STUCK), received);
+                assertTrue(fixture.host.drainDoorFeedback().isEmpty());
+                assertTrue(first.drainDoorFeedback().isEmpty()); assertTrue(second.drainDoorFeedback().isEmpty());
+                fixture.host.publishItemActionResult(descriptor.getParticipantId(),
+                        new com.interrupt.dungeoneer.multiplayer.items.ItemActionResult(19, 41, false));
+                List<com.interrupt.dungeoneer.multiplayer.items.ItemActionResult> results = new java.util.ArrayList<>();
+                deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+                while(results.isEmpty() && System.nanoTime() < deadline) {
+                    results.addAll(recipient.drainItemActionResults()); Thread.sleep(5);
+                }
+                assertEquals(1, results.size()); assertEquals(19, results.get(0).requestId);
+                assertEquals(41, results.get(0).entityId); assertFalse(results.get(0).accepted);
+                assertTrue(fixture.host.drainItemActionResults().isEmpty());
+                assertTrue(first.drainItemActionResults().isEmpty()); assertTrue(second.drainItemActionResults().isEmpty());
+            }
+        } finally {
+            if(first != null) first.close(); if(second != null) second.close(); fixture.close();
+        }
+    }
+
+    @Test public void nativeIceStateReachesTwoClientsAndReconnectRestoresRemainingEffect() throws Exception {
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<String, LocalizedString>();
+        DirectConnectCompatibility compatibility = compatibility("native-status");
+        HostFixture fixture = host(compatibility, 3, "native-status");
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient first = client(fixture.host.getBoundPort(), '2', "Two",
+                AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+        DirectConnectClient second = null, returning = null;
+        try {
+            awaitPhase(first, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(first, DirectConnectPhase.LOBBY);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+            Monster hostMonster = new Monster(); hostMonster.hp = hostMonster.maxHp = 20;
+            hostMonster.takeDamage(1, DamageType.ICE, null);
+            hostMonster.statusEffects.first().showParticleEffect = false;
+            DirectConnectCombatController authority = new DirectConnectCombatController(fixture.host, false);
+            java.lang.reflect.Method capture = DirectConnectCombatController.class.getDeclaredMethod(
+                    "synchronizeNativeMonster", String.class, Monster.class);
+            capture.setAccessible(true);
+            String id = AuthoritativeCombatEncounter.monsterTargetId(1);
+            capture.invoke(authority, id, hostMonster);
+            final java.util.List<Long> startsA = new java.util.ArrayList<>(), startsB = new java.util.ArrayList<>();
+            Monster a = new Monster() {
+                @Override public void playNetworkStatusStart(long id) { startsA.add(id); super.playNetworkStatusStart(id); }
+            }, b = new Monster() {
+                @Override public void playNetworkStatusStart(long id) { startsB.add(id); super.playNetworkStatusStart(id); }
+            };
+            a.setNetworkReplica(true); b.setNetworkReplica(true);
+            a.applyNetworkState(19, 20, 1, 1, 0); b.applyNetworkState(19, 20, 1, 1, 0);
+            awaitEffects(first, id, 500); awaitEffects(second, id, 500);
+            capture.invoke(authority, id, hostMonster); // Unchanged state cannot create another start.
+            applyNativeObserver(first, a, awaitEffects(first, id, 500));
+            applyNativeObserver(second, b, awaitEffects(second, id, 500));
+            assertEquals(1, startsA.size()); assertEquals(1, startsB.size());
+            applyNativeObserver(first, a, awaitEffects(first, id, 500));
+            assertEquals("Rendering same snapshot cannot replay start", 1, startsA.size());
+            assertEquals(hostMonster.getShader(), a.getShader());
+            assertEquals(hostMonster.getShader(), b.getShader());
+            assertEquals(19, a.hp); assertEquals(19, b.hp);
+            first.close();
+            awaitPartyState(second, 2, PartyMemberState.RECONNECTING);
+            hostMonster.tickStatusEffects(120);
+            capture.invoke(authority, id, hostMonster);
+            fixture.host.setSessionPaused(true); // Flush even a throttled last countdown update.
+            awaitEffects(second, id, 380);
+            assertTrue("Countdown is not another status start", second.drainNativeStatusCues().isEmpty());
+            fixture.host.setSessionPaused(false);
+            returning = client(fixture.host.getBoundPort(), '2', "Two", AvatarCatalog.HUMANOID_2,
+                    0, tokens, compatibility);
+            awaitPhase(returning, DirectConnectPhase.READY);
+            Monster recovered = new Monster() {
+                @Override public void playNetworkStatusStart(long id) { fail("Recovery must not deliver a live start"); }
+            }; recovered.setNetworkReplica(true);
+            recovered.applyNetworkState(19, 20, 1, 1, 0);
+            applyNativeObserver(returning, recovered, awaitEffects(returning, id, 380));
+            assertTrue("Reconnect baseline must not replay live starts", returning.drainNativeStatusCues().isEmpty());
+            assertEquals(380, recovered.statusEffects.first().timer, 0);
+            assertEquals(hostMonster.getShader(), recovered.getShader());
+            hostMonster.tickStatusEffects(381); hostMonster.tickStatusEffects(1);
+            capture.invoke(authority, id, hostMonster);
+            applyNativeObserver(second, b, awaitEffects(second, id, -1));
+            applyNativeObserver(returning, recovered, awaitEffects(returning, id, -1));
+            assertNull(b.statusEffects); assertNull(recovered.statusEffects);
+        }
+        finally {
+            first.close(); if(second != null) second.close(); if(returning != null) returning.close();
+            fixture.close(); StringManager.localizedStrings = strings;
+        }
+    }
+
+    @Test public void nativePeriodicStatusPulseReachesTwoObserversExactlyOnce() throws Exception {
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<String, LocalizedString>();
+        DirectConnectCompatibility compatibility = compatibility("native-status-pulse");
+        HostFixture fixture = host(compatibility, 3, "native-status-pulse");
+        DirectConnectClient first = null, second = null;
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+            Monster hostMonster = new Monster(); hostMonster.hp = hostMonster.maxHp = 20;
+            com.interrupt.dungeoneer.statuseffects.PoisonEffect poison =
+                    new com.interrupt.dungeoneer.statuseffects.PoisonEffect(1000, 10, 1, false);
+            poison.showParticleEffect = false;
+            hostMonster.statusEffects = new com.badlogic.gdx.utils.Array<com.interrupt.dungeoneer.statuseffects.StatusEffect>();
+            hostMonster.statusEffects.add(poison);
+            DirectConnectCombatController authority = new DirectConnectCombatController(fixture.host, false);
+            java.lang.reflect.Method capture = DirectConnectCombatController.class.getDeclaredMethod(
+                    "synchronizeNativeMonster", String.class, Monster.class);
+            capture.setAccessible(true);
+            String id = AuthoritativeCombatEncounter.monsterTargetId(1);
+            capture.invoke(authority, id, hostMonster);
+            awaitEffectsPulse(first, id, 0); awaitEffectsPulse(second, id, 0);
+            assertEquals(NativeStatusCue.Kind.START, first.drainNativeStatusCues().get(0).kind);
+            assertEquals(NativeStatusCue.Kind.START, second.drainNativeStatusCues().get(0).kind);
+
+            hostMonster.tickStatusEffects(11);
+            capture.invoke(authority, id, hostMonster);
+            awaitEffectsPulse(first, id, 1); awaitEffectsPulse(second, id, 1);
+            List<NativeStatusCue> firstPulses = first.drainNativeStatusCues();
+            List<NativeStatusCue> secondPulses = second.drainNativeStatusCues();
+            assertEquals(1, firstPulses.size()); assertEquals(1, secondPulses.size());
+            assertEquals(NativeStatusCue.Kind.PULSE, firstPulses.get(0).kind);
+            assertEquals(NativeStatusCue.Kind.PULSE, secondPulses.get(0).kind);
+            assertEquals(firstPulses.get(0).instanceId, secondPulses.get(0).instanceId);
+            capture.invoke(authority, id, hostMonster);
+            Thread.sleep(50);
+            assertTrue(first.drainNativeStatusCues().isEmpty());
+            assertTrue(second.drainNativeStatusCues().isEmpty());
+        }
+        finally {
+            if(first != null) first.close(); if(second != null) second.close();
+            fixture.close(); StringManager.localizedStrings = strings;
+        }
+    }
+
+    private ActorEffectsSnapshot awaitEffectsPulse(DirectConnectPeer peer, String id, long pulses)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            for(ActorEffectsSnapshot state : peer.getActorEffects()) {
+                if(state.monsterId.equals(id) && !state.effects.isEmpty()
+                        && state.effects.get(0).pulses == pulses) return state;
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("Native effect pulse did not converge: " + pulses);
+    }
+
+    private ActorEffectsSnapshot awaitEffects(DirectConnectPeer peer, String id, float remaining)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            for(ActorEffectsSnapshot state : peer.getActorEffects()) {
+                if(state.monsterId.equals(id) && (remaining < 0 ? state.effects.isEmpty()
+                        : !state.effects.isEmpty() && state.effects.get(0).remaining == remaining)) return state;
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("Native effect did not converge: " + remaining);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void applyNativeObserver(DirectConnectPeer peer, Monster monster, ActorEffectsSnapshot effects)
+            throws Exception {
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        java.lang.reflect.Field monsters = DirectConnectCombatController.class.getDeclaredField("monsters");
+        monsters.setAccessible(true);
+        ((Map<String, Monster>)monsters.get(controller)).put(effects.monsterId, monster);
+        java.lang.reflect.Method apply = DirectConnectCombatController.class.getDeclaredMethod(
+                "applySnapshot", CombatSnapshot.class);
+        apply.setAccessible(true); apply.invoke(controller, peer.getCombatSnapshot());
+    }
 
     @Test
     public void reliableItemRequestsUseAuthenticatedParticipantAndConvergeAfterSharing() throws Exception {
@@ -166,6 +864,31 @@ public class DirectConnectIntegrationTest {
             awaitPartyKeys(client, 0);
         }
         finally { client.close(); fixture.close(); }
+    }
+
+    @Test public void reliableScrollRequestRetainsAuthenticatedParticipantAndAim() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("scroll-aim");
+        HostFixture fixture = host(compatibility, 2, "scroll-aim");
+        DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
+        try {
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+
+            client.submitItemAction(1L, ItemAction.CONSUME, 41L, 2, 1,
+                    true, 0.25f, -0.5f, 0.75f);
+            ItemRequest request = awaitItemRequest(fixture.host);
+
+            assertEquals(new ParticipantId("campaign-slot-2"), request.getParticipantId());
+            assertTrue(request.hasAim); assertEquals(0.25f, request.aimX, 0f);
+            assertEquals(-0.5f, request.aimY, 0f); assertEquals(0.75f, request.aimZ, 0f);
+        }
+        finally {
+            client.close(); fixture.close();
+        }
     }
 
     private void awaitPartyKeys(DirectConnectPeer peer, int expected) throws InterruptedException {
@@ -351,7 +1074,7 @@ public class DirectConnectIntegrationTest {
     }
 
     @Test
-    public void twoParticipantsObserveOneHostAuthoritativeCombatResult() throws Exception {
+    public void twoParticipantsObserveOneHostPublishedNativeCombatResult() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("combat-floor");
         HostFixture fixture = host(compatibility, 2, "combat");
         DirectConnectClient client = approveClient(fixture, compatibility, '2', "Friend",
@@ -363,6 +1086,17 @@ public class DirectConnectIntegrationTest {
             assertEquals(24, combatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
 
             submitDirectedAtMonster(client, 1L, CombatAction.MELEE);
+            CombatRequest clientMelee = awaitNativeCombatRequest(fixture.host);
+            assertEquals(new ParticipantId("campaign-slot-2"), clientMelee.getParticipantId());
+            assertEquals(CombatAction.MELEE, clientMelee.getAction());
+            CombatSnapshot initial = fixture.host.getCombatSnapshot();
+            fixture.host.synchronizeNativeMonster(20, 24, initial.getMonsterX(),
+                    initial.getMonsterY(), initial.getMonsterZ());
+            fixture.host.publishNativePresentation(
+                    AuthoritativeCombatEncounter.participantTargetId(clientMelee.getParticipantId()),
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID, CombatAction.MELEE,
+                    CombatPresentationPhase.DAMAGE, 0f, 0f, 0.5f,
+                    initial.getMonsterX(), initial.getMonsterY(), initial.getMonsterZ(), true);
             awaitCombatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 20);
             awaitCombatPresentations(client, 1);
             assertEquals(20, combatHealth(fixture.host,
@@ -372,10 +1106,18 @@ public class DirectConnectIntegrationTest {
                     client.getCombatPresentationEvents().get(0).getAction());
 
             submitDirectedAtMonster(fixture.host, 1L, CombatAction.SPELL);
+            CombatRequest hostSpell = awaitNativeCombatRequest(fixture.host);
+            assertEquals(new ParticipantId("campaign-slot-1"), hostSpell.getParticipantId());
+            assertEquals(CombatAction.SPELL, hostSpell.getAction());
+            fixture.host.synchronizeNativeMonster(15, 24, initial.getMonsterX(),
+                    initial.getMonsterY(), initial.getMonsterZ());
+            fixture.host.publishNativePresentation(
+                    AuthoritativeCombatEncounter.participantTargetId(hostSpell.getParticipantId()),
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID, CombatAction.SPELL,
+                    CombatPresentationPhase.DAMAGE, 0f, 0f, 0.5f,
+                    initial.getMonsterX(), initial.getMonsterY(), initial.getMonsterZ(), true);
             awaitCombatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 15);
             awaitCombatPresentations(client, 2);
-            submitDirectedAtMonster(client, 1L, CombatAction.PROJECTILE);
-            Thread.sleep(100L);
             assertEquals(15, combatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
             assertEquals(15, combatHealth(fixture.host,
                     AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
@@ -425,6 +1167,13 @@ public class DirectConnectIntegrationTest {
             awaitPartyHealth(fixture.host, 2, 7);
 
             submitDirectedAtParticipant(third, 2L, CombatAction.MELEE, 2);
+            CombatRequest friendlyFire = awaitNativeCombatRequest(fixture.host);
+            assertEquals(new ParticipantId("campaign-slot-3"), friendlyFire.getParticipantId());
+            fixture.host.publishNativePresentation(
+                    AuthoritativeCombatEncounter.participantTargetId(
+                            friendlyFire.getParticipantId()),
+                    "", CombatAction.MELEE, CombatPresentationPhase.ATTACK,
+                    0f, 0f, 0.5f, 1f, 0f, 0.5f, false);
             awaitCombatPresentations(second, 4);
             awaitCombatPresentations(third, 4);
             assertEquals(7, combatHealth(second, secondTarget));
@@ -451,8 +1200,8 @@ public class DirectConnectIntegrationTest {
 
             third.submitCombatAction(3L, CombatAction.BENEFICIAL_SPELL, secondTarget);
             submitDirectedAtMonster(third, 4L, CombatAction.MELEE);
-            awaitCombatPresentations(second, 9);
-            awaitCombatPresentations(third, 9);
+            CombatRequest postDeathAttack = awaitNativeCombatRequest(fixture.host);
+            assertEquals(CombatAction.MELEE, postDeathAttack.getAction());
             assertEquals(0, combatHealth(second, secondTarget));
             assertEquals(0, combatHealth(third, secondTarget));
             assertEquals(0, combatHealth(fixture.host, secondTarget));
@@ -487,6 +1236,21 @@ public class DirectConnectIntegrationTest {
 
             client.submitCombatAction(1L, CombatAction.SPELL,
                     aimX / aimLength, aimY / aimLength, aimZ / aimLength);
+
+            CombatRequest request = awaitNativeCombatRequest(fixture.host);
+            assertEquals(new ParticipantId("campaign-slot-2"), request.getParticipantId());
+            assertEquals(CombatAction.SPELL, request.getAction());
+            assertEquals(aimX / aimLength, request.getAimX(), 0.0001f);
+            assertEquals(aimY / aimLength, request.getAimY(), 0.0001f);
+            assertEquals(aimZ / aimLength, request.getAimZ(), 0.0001f);
+            fixture.host.synchronizeNativeMonster(19, 24, before.getMonsterX(),
+                    before.getMonsterY(), before.getMonsterZ());
+            fixture.host.publishNativePresentation(
+                    AuthoritativeCombatEncounter.participantTargetId(request.getParticipantId()),
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID, CombatAction.SPELL,
+                    CombatPresentationPhase.DAMAGE, source.getX(), source.getY(),
+                    source.getZ() + 0.35f, before.getMonsterX(), before.getMonsterY(),
+                    before.getMonsterZ(), true);
 
             awaitCombatPresentations(client, 1);
             CombatPresentationEvent presentation =
@@ -696,7 +1460,11 @@ public class DirectConnectIntegrationTest {
                     new ParticipantId("campaign-slot-2"));
             awaitCombatSnapshot(third);
             submitDirectedAtMonster(second, 1L, CombatAction.MELEE);
-            awaitCombatHealth(third, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 20);
+            CombatRequest initialAttack = awaitNativeCombatRequest(fixture.host);
+            assertEquals(new ParticipantId("campaign-slot-2"), initialAttack.getParticipantId());
+            fixture.host.recordNativeMonsterAttacker(
+                    AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
+                    initialAttack.getParticipantId());
             awaitMonsterTarget(fixture.host, secondTarget);
 
             second.close();
@@ -720,7 +1488,10 @@ public class DirectConnectIntegrationTest {
             assertEquals(2L, returning.getNextCombatRequestId());
             submitDirectedAtMonster(returning, returning.getNextCombatRequestId(),
                     CombatAction.PROJECTILE);
-            awaitCombatHealth(third, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 17);
+            CombatRequest returningAttack = awaitNativeCombatRequest(fixture.host);
+            assertEquals(new ParticipantId("campaign-slot-2"),
+                    returningAttack.getParticipantId());
+            assertEquals(CombatAction.PROJECTILE, returningAttack.getAction());
         }
         finally {
             second.close();
@@ -751,15 +1522,10 @@ public class DirectConnectIntegrationTest {
 
             client.submitCombatAction(1L, CombatAction.SELF_DAMAGE, clientTarget);
             awaitCombatHealth(client, clientTarget, 6);
-            for(long requestId = 1L; requestId <= 5L; requestId++) {
-                submitDirectedAtMonster(fixture.host, requestId, CombatAction.SPELL);
-                awaitCombatHealth(fixture.host,
-                        AuthoritativeCombatEncounter.SHARED_MONSTER_ID,
-                        Math.max(0, 24 - (int)requestId * CombatAction.SPELL.getAmount()));
-                if(requestId < 5L) {
-                    awaitCombatCadence(fixture.host, CombatAction.SPELL);
-                }
-            }
+            CombatSnapshot current = fixture.host.getCombatSnapshot();
+            fixture.host.synchronizeNativeMonster(0, 24, current.getMonsterX(),
+                    current.getMonsterY(), current.getMonsterZ());
+            awaitCombatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID, 0);
 
             client.close();
             returning = client(fixture.host.getBoundPort(), '2', "Friend",
@@ -771,6 +1537,60 @@ public class DirectConnectIntegrationTest {
             assertEquals(0, combatHealth(returning,
                     AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
             assertEquals(6, combatHealth(returning, clientTarget));
+        }
+        finally {
+            client.close();
+            if(returning != null) returning.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void reconnectReadyRestoresActiveNativeProjectile() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("dynamic-reconnect-floor");
+        HostFixture fixture = host(compatibility, 2, "dynamic-reconnect");
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+        DirectConnectClient returning = null;
+        try {
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+
+            com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile liveProjectile =
+                    new com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile();
+            liveProjectile.x = 4f; liveProjectile.y = 5f; liveProjectile.z = 0.75f;
+            liveProjectile.spriteAtlas = "reconnect-blue"; liveProjectile.tex = 9;
+            fixture.host.synchronizeNativeDynamicState(
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState.capture(
+                            88L, 0L, liveProjectile));
+            assertTrue(awaitNativeDynamic(client, 88L, true).active);
+            long tokenDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(tokens.load("dynamic-reconnect") == null
+                    && System.currentTimeMillis() < tokenDeadline) Thread.sleep(10L);
+            assertNotNull(tokens.load("dynamic-reconnect"));
+
+            client.close();
+            long reconnectDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(fixture.host.getReconnectGrace(2) == null
+                    && System.currentTimeMillis() < reconnectDeadline) Thread.sleep(10L);
+            assertNotNull(fixture.host.getReconnectGrace(2));
+            returning = client(fixture.host.getBoundPort(), '2', "Friend",
+                    AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+            long readyDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(returning.getStatus().getPhase() != DirectConnectPhase.READY
+                    && System.currentTimeMillis() < readyDeadline) Thread.sleep(10L);
+            assertEquals("Client: " + returning.getStatus().getMessage() + "; Host: "
+                            + fixture.host.getStatus().getPhase() + " / "
+                            + fixture.host.getStatus().getMessage(), DirectConnectPhase.READY,
+                    returning.getStatus().getPhase());
+
+            com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState restored =
+                    awaitNativeDynamic(returning, 88L, true);
+            assertEquals("reconnect-blue", restored.apply(null).spriteAtlas);
+            assertEquals(4f, restored.apply(null).x, 0f);
         }
         finally {
             client.close();
@@ -825,6 +1645,7 @@ public class DirectConnectIntegrationTest {
             fixture.host.startSession();
             awaitPhase(client, DirectConnectPhase.READY);
             client.close();
+            awaitPartyState(fixture.host, 2, PartyMemberState.RECONNECTING);
             assertTrue(fixture.host.getReconnectGrace(2) != null);
 
             reconnecting = new Socket();
@@ -1135,6 +1956,21 @@ public class DirectConnectIntegrationTest {
             Thread.sleep(10L);
         }
         fail("Timed out waiting for authoritative combat state.");
+    }
+
+    private CombatRequest awaitNativeCombatRequest(DirectConnectHost host)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            List<CombatRequest> requests = host.drainNativeCombatRequests();
+            if(!requests.isEmpty()) {
+                assertEquals("Only submitted native action expected", 1, requests.size());
+                return requests.get(0);
+            }
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for Host-native combat request.");
+        return null;
     }
 
     private void submitDirectedAtMonster(DirectConnectPeer peer, long requestId,

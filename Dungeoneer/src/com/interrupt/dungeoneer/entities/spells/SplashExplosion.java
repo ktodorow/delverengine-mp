@@ -27,6 +27,8 @@ public class SplashExplosion extends Spell {
     public String explodeSound = "explode.mp3,explode_02.mp3,explode_03.mp3,explode_04.mp3";
 
 	private Entity owner = null;
+    private transient String multiplayerDamageSource;
+    public void setMultiplayerDamageSource(String source) { multiplayerDamageSource = source; }
 	
 	public SplashExplosion() { }
 	
@@ -43,6 +45,7 @@ public class SplashExplosion extends Spell {
 	
 	public void doCast(Vector3 pos, Vector3 direction) {
 		Level level = Game.GetLevel();
+        if(level.nativeExplosionListener != null && !level.nativeExplosionListener.isSimulationAuthority()) return;
 		
 		Color color = Weapon.getEnchantmentColor(this.damageType);
 		
@@ -74,7 +77,8 @@ public class SplashExplosion extends Spell {
 		explosion.x = pos.x;
 		explosion.y = pos.y;
 		explosion.z = pos.z - 0.45f;
-		explosion.owner = owner;
+		explosion.setOwner(owner);
+        explosion.multiplayerDamageSource = multiplayerDamageSource;
 		explosion.makeDustRing = true;
 		
 		explosion.impulseDistance = radius * 4f;

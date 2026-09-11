@@ -36,6 +36,38 @@ public class Food extends Item {
 	}
 
 	public void Eat(Player player) {
+        if(player.requestItemConsume(this)) return;
+        applyNativeEffect(player);
+        presentEat(player);
+    }
+
+    public void applyNativeEffect(com.interrupt.dungeoneer.entities.Actor player) {
+		if(foodMod != 0) {
+			if (foodType == FoodType.food) {
+				player.hp += 1;
+				if (player.hp > player.getMaxHp()) player.hp = player.getMaxHp();
+
+				if(foodMod > 0)
+					player.addStatusEffect(new RestoreHealthEffect((int) (1800 * Math.abs(foodMod)), 160, 1));
+				else
+					player.addStatusEffect(new PoisonEffect((int) (800 * Math.abs(foodMod)), 160, 1, false));
+
+			} else if (foodType == FoodType.booze) {
+				player.hp += 1;
+				if (player.hp > player.getMaxHp()) player.hp = player.getMaxHp();
+
+				if(foodMod > 0)
+					player.addStatusEffect(new RestoreHealthEffect((int) (3600 * Math.abs(foodMod)), 160, 1));
+				else
+					player.addStatusEffect(new PoisonEffect((int) (800 * Math.abs(foodMod)), 160, 1, false));
+
+				player.addStatusEffect(new DrunkEffect((int) (3600 * foodMod * 0.75f)));
+			}
+		}
+
+    }
+
+    public void presentEat(Player player) {
 		player.history.ateFood(this);
 
 		if(consumeSound == null || consumeSound.equals("")) {
@@ -49,33 +81,13 @@ public class Food extends Item {
 			Audio.playSound(consumeSound, 0.5f);
 		}
 
-		if(foodMod != 0) {
-			if (foodType == FoodType.food) {
-				Game.ShowMessage(StringManager.get("items.Food.eatFoodText"), 1, 1f);
-				player.hp += 1;
-				if (player.hp > player.getMaxHp()) player.hp = player.getMaxHp();
-
-				if(foodMod > 0)
-					player.addStatusEffect(new RestoreHealthEffect((int) (1800 * Math.abs(foodMod)), 160, 1));
-				else
-					player.addStatusEffect(new PoisonEffect((int) (800 * Math.abs(foodMod)), 160, 1, false));
-
-			} else if (foodType == FoodType.booze) {
-				Game.ShowMessage(StringManager.get("items.Food.drinkBoozeText"), 1, 1f);
-				player.hp += 1;
-				if (player.hp > player.getMaxHp()) player.hp = player.getMaxHp();
-
-				if(foodMod > 0)
-					player.addStatusEffect(new RestoreHealthEffect((int) (3600 * Math.abs(foodMod)), 160, 1));
-				else
-					player.addStatusEffect(new PoisonEffect((int) (800 * Math.abs(foodMod)), 160, 1, false));
-
-				player.addStatusEffect(new DrunkEffect((int) (3600 * foodMod * 0.75f)));
-			}
-		}
+        if(foodMod != 0) {
+            if(foodType == FoodType.food) Game.ShowMessage(StringManager.get("items.Food.eatFoodText"), 1, 1f);
+            else if(foodType == FoodType.booze) Game.ShowMessage(StringManager.get("items.Food.drinkBoozeText"), 1, 1f);
+        }
 
 		int location = player.inventory.indexOf(this, true);
-		player.inventory.set(location, null);
+		if(location >= 0) player.inventory.set(location, null);
 		Game.RefreshUI();
 	}
 

@@ -105,9 +105,37 @@ public class StatusEffect {
 		return null;
 	}
 
+    private transient long multiplayerInstanceId;
+    public transient float multiplayerElapsed;
+    private transient long multiplayerPulseCount;
+    private static final java.util.concurrent.atomic.AtomicLong nextMultiplayerInstanceId =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    public long getMultiplayerInstanceId() {
+        if(multiplayerInstanceId == 0) multiplayerInstanceId = nextMultiplayerInstanceId.incrementAndGet();
+        return multiplayerInstanceId;
+    }
+
+    public long getMultiplayerPulseCount() { return multiplayerPulseCount; }
+
+    protected void noteMultiplayerPulse() {
+        if(multiplayerPulseCount < Long.MAX_VALUE) multiplayerPulseCount++;
+    }
+
+    /** Explicit visual-only hooks; defaults cannot run gameplay callbacks. */
+    public void beginPresentation(Actor owner) { }
+    /** One-shot visual start, excluded from current-state reconstruction. */
+    public void playStartPresentation(Actor owner) { }
+    /** One accepted periodic effect pulse, excluded from current-state reconstruction. */
+    public void playPulsePresentation(Actor owner) { }
+    public void tickPresentation(Actor owner, float hostElapsed) { }
+    public void endPresentation(Actor owner) { }
+    public void updatePresentationAttachment(Actor owner) { }
+
 	public StatusEffect() { }
 	
 	public void tick(Actor owner, float delta) {
+        if(active) multiplayerElapsed += Math.max(0, delta);
 		if (this.timer > 0) {
 			this.timer -= 1 * delta;
 		}
@@ -119,6 +147,8 @@ public class StatusEffect {
 			this.doTick(owner, delta);
 		}
 	}
+
+    public void setPresentationFieldOfViewMod(float value) { fieldOfViewMod = value; }
 
 	// Override this to animate the field of view modifier
 	public float getFieldOfViewMod() {

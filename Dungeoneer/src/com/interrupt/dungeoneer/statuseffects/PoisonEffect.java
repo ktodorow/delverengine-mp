@@ -33,6 +33,18 @@ public class PoisonEffect extends StatusEffect {
 		this.canKill = canKill;
 	}
 	
+    @Override
+    public void playStartPresentation(Actor owner) { doPoisonEffect(owner); }
+
+    @Override
+    public void tickPresentation(Actor owner, float hostElapsed) {
+        particleTimer += hostElapsed;
+        if(particleTimer > particleInterval) {
+            particleTimer = 0;
+            createPoisonParticle(owner, Game.rand.nextFloat() * 0.25f + 0.25f);
+        }
+    }
+
 	@Override
 	public void doTick(Actor owner, float delta) { 
 		dtimer += delta;
@@ -48,11 +60,16 @@ public class PoisonEffect extends StatusEffect {
 			if(owner.hp - damage <= 0 && !canKill ) return;
 			
 			owner.takeDamage(damage, DamageType.PHYSICAL, null);
-			this.doPoisonEffect(owner);
-			
-			Audio.playPositionedSound("mg_pass_poison.mp3", new Vector3(owner.x,owner.y,owner.z), 0.5f, 6f);
+			noteMultiplayerPulse();
+			playPulsePresentation(owner);
 		}
 	}
+
+    @Override
+    public void playPulsePresentation(Actor owner) {
+        doPoisonEffect(owner);
+        Audio.playPositionedSound("mg_pass_poison.mp3", new Vector3(owner.x,owner.y,owner.z), 0.5f, 6f);
+    }
 
 	@Override
 	public void onStatusBegin(Actor owner) {

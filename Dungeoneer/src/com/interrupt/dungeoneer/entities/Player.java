@@ -54,11 +54,18 @@ public class Player extends Actor {
 		default void onWeaponAttack(Weapon weapon, Vector3 direction, float attackPower) {
 			onWeaponAttack(weapon, direction);
 		}
+
+		/** Client keeps first-person feedback while Host creates shared world outcomes. */
+		default boolean deferWeaponWorldAttack() { return false; }
 	}
 
 	public interface HealthAuthorityListener {
 		boolean onHealthIntent(Player player, int amount, DamageType damageType,
 				Entity instigator);
+
+		default boolean onPhysicsImpulseIntent(Player player, Vector3 impulse) {
+			return false;
+		}
 	}
 
 	private transient WeaponAttackListener weaponAttackListener;
@@ -82,6 +89,10 @@ public class Player extends Actor {
 		}
 	}
 
+	public boolean deferWeaponWorldAttack() {
+		return weaponAttackListener != null && weaponAttackListener.deferWeaponWorldAttack();
+	}
+
 	public void setHealthAuthorityListener(HealthAuthorityListener listener) {
 		healthAuthorityListener = listener;
 	}
@@ -94,6 +105,13 @@ public class Player extends Actor {
 			Entity instigator) {
 		return healthAuthorityListener != null
 				&& healthAuthorityListener.onHealthIntent(this, amount, damageType, instigator);
+	}
+
+	@Override
+	public void applyPhysicsImpulse(Vector3 impulse) {
+		if(healthAuthorityListener != null
+				&& healthAuthorityListener.onPhysicsImpulseIntent(this, impulse.cpy())) return;
+		super.applyPhysicsImpulse(impulse);
 	}
 
 	/** Player gold amount. */
@@ -734,14 +752,7 @@ public class Player extends Actor {
             isOnLadder = false;
         }
 
-        // don't get sick
-		if(drunkMod > 0) {
-			if(drunkMod > 6) drunkMod = 6;
-			drunkMod -= delta * 0.02;
-		}
-		else {
-			drunkMod = 0;
-		}
+        if(hasStatusEffectAuthority()) tickDrunkRecovery(delta);
 	}
 
 	private void runPushCheck(Level level, float delta, CollisionAxis collisionAxis) {
@@ -787,6 +798,21 @@ public class Player extends Actor {
         float musicLerp = Math.max(hp == 0 ? 0 : (float) hp / (float) maxHp, 0f);
         if(isDead) musicLerp = 0f;
         Audio.setMusicTargetVolume(musicLerp);
+    }
+
+    public static float nativeFlightMove(float forwardMove, float strafeMove, float lookAxis,
+            float strafeAxis, float flySpeed, float delta) {
+        return lookAxis * forwardMove * flySpeed + strafeMove * strafeAxis * flySpeed * delta;
+    }
+
+    public static float nativeFlightFriction(float velocity, float delta) {
+        return velocity - ((velocity - velocity * 0.8f) * 0.4f) * delta;
+    }
+
+    /** Original flight acceleration/friction, shared by fixed-step Host movement. */
+    public static float nativeFlightVertical(float velocity, float lookY, float forward, float flySpeed, float delta) {
+        velocity += lookY * 0.008f * forward * flySpeed;
+        return velocity - ((velocity - velocity * 0.8f) * 0.4f) * delta;
     }
 
     public void die() {
@@ -1184,19 +1210,14 @@ public class Player extends Actor {
             float flySpeed = stats.SPD * 0.1f;
 
             if(!isOnFloor && !isOnEntity) {
-                xMod = GameManager.renderer.camera.direction.x * zm * flySpeed;
-                yMod = GameManager.renderer.camera.direction.z * zm * flySpeed;
-
-                xMod += (float) (xm * Math.cos(rot)) * flySpeed * delta;
-                yMod += (float) (-xm * Math.sin(rot)) * flySpeed * delta;
+                xMod = nativeFlightMove(zm, xm, GameManager.renderer.camera.direction.x, (float)Math.cos(rot), flySpeed, delta);
+                yMod = nativeFlightMove(zm, xm, GameManager.renderer.camera.direction.z, (float)-Math.sin(rot), flySpeed, delta);
             }
 
-            za += (GameManager.renderer.camera.direction.y) * 0.008f * walkVelVector.y * flySpeed;
+            za = nativeFlightVertical(za, GameManager.renderer.camera.direction.y, walkVelVector.y, flySpeed, delta);
 
-            float flightFriction = 0.4f;
-            za -= ((za - (za * 0.8f)) * flightFriction) * delta;
-            xa -= ((xa - (xa * 0.8f)) * flightFriction) * delta;
-            ya -= ((ya - (ya * 0.8f)) * flightFriction) * delta;
+            xa = nativeFlightFriction(xa, delta);
+            ya = nativeFlightFriction(ya, delta);
         }
 
         if(isOnLadder) {
@@ -1830,6 +1851,12 @@ public class Player extends Actor {
 
     public interface ItemAuthorityListener {
         boolean pickup(Item item);
+        default boolean consume(Item item) { return false; }
+        default boolean consume(Item item, Vector3 direction) { return consume(item); }
+        default boolean controlsAttackAmmo() { return false; }
+        default com.interrupt.dungeoneer.entities.projectiles.Missile takeAttackAmmo() {
+            return null;
+        }
         default boolean pickupInto(Item item, Integer inventorySlot, String equipmentSlot) {
             return pickup(item);
         }
@@ -1841,6 +1868,22 @@ public class Player extends Actor {
 
     public void setItemAuthorityListener(ItemAuthorityListener listener) {
         itemAuthorityListener = listener;
+    }
+
+    public boolean requestItemConsume(Item item) {
+        return itemAuthorityListener != null && itemAuthorityListener.consume(item);
+    }
+
+    public boolean requestItemConsume(Item item, Vector3 direction) {
+        return itemAuthorityListener != null && itemAuthorityListener.consume(item, direction);
+    }
+
+    public boolean hasAuthoritativeAttackAmmo() {
+        return itemAuthorityListener != null && itemAuthorityListener.controlsAttackAmmo();
+    }
+
+    public com.interrupt.dungeoneer.entities.projectiles.Missile takeAuthoritativeAttackAmmo() {
+        return itemAuthorityListener == null ? null : itemAuthorityListener.takeAttackAmmo();
     }
 
     public boolean requestItemPickup(Item item) {
@@ -1920,6 +1963,7 @@ public class Player extends Actor {
 		itm.ya = projy * (throwPower * 0.3f);
 		itm.za = throwPower * 0.05f;
 		itm.ignorePlayerCollision = true;
+        itm.multiplayerDamageSource = multiplayerDamageSource;
 
 		level.SpawnEntity(itm);
 
@@ -1950,6 +1994,7 @@ public class Player extends Actor {
 		itm.ya -= y_projy * xOffset;
 
 		itm.ignorePlayerCollision = true;
+        itm.multiplayerDamageSource = multiplayerDamageSource;
 	}
 
 	public void dropItem(Item itm, Level level, float throwPower) {
@@ -1967,6 +2012,7 @@ public class Player extends Actor {
 		itm.ya = projy * (throwPower * 0.3f);
 		itm.za = throwPower * 0.05f;
 		itm.ignorePlayerCollision = true;
+        itm.multiplayerDamageSource = multiplayerDamageSource;
 		itm.spawnChance = 1f;
 
 		level.SpawnEntity(itm);
@@ -2726,6 +2772,7 @@ public class Player extends Actor {
 
 	@Override
 	public void addStatusEffect(StatusEffect newEffect) {
+        if(!hasStatusEffectAuthority()) return;
 		if(newEffect != null) {
 			newEffect.forPlayer(this);
 		}

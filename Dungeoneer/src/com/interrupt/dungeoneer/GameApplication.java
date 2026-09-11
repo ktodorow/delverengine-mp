@@ -257,6 +257,7 @@ public class GameApplication extends Game {
         mainScreen.setNetworkCombatController(directConnectCombatController);
         DirectConnectItemController items = new DirectConnectItemController(directConnectPeer);
         directConnectCombatController.setWeaponResolver(items);
+        items.setConsumableConsumer(directConnectCombatController::consumeNativeItem);
         mainScreen.setNetworkItemController(items);
         completedScreen.dispose();
     }

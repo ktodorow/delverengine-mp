@@ -31,6 +31,7 @@ public class Bomb extends Entity {
 	
 	@Override
 	public void tick(Level level, float delta) {
+		if(nativePresentationReplica) return;
 		super.tick(level, delta);
 		
 		if(timerStart < 0) timerStart = countdownTimer;
@@ -59,6 +60,8 @@ public class Bomb extends Entity {
 	}
 	
 	public void explode(Level level) {
+        if(level.nativeExplosionListener != null && !level.nativeExplosionListener.isSimulationAuthority()) return;
+        bombSpell.setMultiplayerDamageSource(multiplayerDamageSource);
 		bombSpell.damageType = explosionDamageType;
 		bombSpell.damage = (int)explosionDamage;
 		bombSpell.explodeSound = "potions/sfx_explode.mp3";

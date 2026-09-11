@@ -1655,6 +1655,8 @@ public class Monster extends Actor implements Directional {
 			za = 0f;
 		}
 		else {
+            clearNetworkEffects();
+            networkStatusPresentation = null;
 			if(multiplayerCorpse != null) multiplayerCorpse.setNetworkReplica(false);
 			isSolid = networkOriginalSolid;
 			networkStateInitialized = false;
@@ -1663,6 +1665,91 @@ public class Monster extends Actor implements Directional {
 			networkGibbed = false;
 		}
 	}
+
+    private transient SpriteAnimation lastNativeAnimation;
+    private transient com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState networkAnimation;
+    private transient long networkAnimationSequence;
+    private transient boolean networkDeathRecovery;
+
+    public void noteNativeAnimation(SpriteAnimation animation) { lastNativeAnimation = animation; }
+
+    private SpriteAnimation animationFor(com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind kind) {
+        switch(kind) {
+            case WALK: return walkAnimation;
+            case HURT: return hurtAnimation;
+            case CAST: return castAnimation;
+            case ATTACK: return attackAnimation;
+            case RANGED: return rangedAttackAnimation;
+            case DODGE: return dodgeAnimation;
+            case DEATH: return dieAnimation;
+            default: return null;
+        }
+    }
+
+    public com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState captureNativeAnimation() {
+        if(multiplayerCorpse != null) return multiplayerCorpse.captureNativeAnimation();
+        for(com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind kind :
+                com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind.values()) {
+            if(lastNativeAnimation != null && lastNativeAnimation == animationFor(kind))
+                return com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.capture(kind, lastNativeAnimation, tex);
+        }
+        return com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.capture(
+                com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind.NONE, null, tex);
+    }
+
+    private void applyNetworkAnimation(com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot state) {
+        if(state.sequence <= networkAnimationSequence || state.animation == null) return;
+        networkAnimationSequence = state.sequence;
+        com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState next = state.animation;
+        if(next.kind == com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind.DEATH) {
+            networkAnimation = next;
+            if(multiplayerCorpse != null) multiplayerCorpse.applyNetworkAnimation(next);
+            return;
+        }
+        SpriteAnimation animation = animationFor(next.kind);
+        if(animation != null) animation.applyPresentationCursor(next.time, next.playing, next.looping, this, false);
+        else tex = next.texture;
+        networkAnimation = next;
+    }
+
+    private transient com.interrupt.dungeoneer.multiplayer.combat.NativeStatusPresentation networkStatusPresentation;
+
+    public void applyNetworkEffects(com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot state) {
+        if(!networkReplica) return;
+        applyNetworkAnimation(state);
+        if(networkDead || hp <= 0) return;
+        if(networkStatusPresentation == null) networkStatusPresentation =
+                new com.interrupt.dungeoneer.multiplayer.combat.NativeStatusPresentation();
+        networkStatusPresentation.apply(this, state);
+        networkStatusPresentation.updateAttachments(this);
+    }
+
+    public void playNetworkStatusStart(com.interrupt.dungeoneer.multiplayer.combat.NativeStatusCue cue) {
+        if(!networkReplica || networkDead || hp <= 0) return;
+        if(networkStatusPresentation != null && networkStatusPresentation.contains(cue.instanceId))
+            playNetworkStatusStart(cue.instanceId);
+        else cue.play(this);
+    }
+
+    public void playNetworkStatusStart(long instanceId) {
+        if(networkReplica && !networkDead && hp > 0 && networkStatusPresentation != null)
+            networkStatusPresentation.playStart(this, instanceId);
+    }
+
+    private transient long networkEffectGeneration;
+    public void beginNetworkEffectGeneration(long generation) {
+        if(generation <= networkEffectGeneration) return;
+        clearNetworkEffects();
+        networkStatusPresentation = null;
+        networkEffectGeneration = generation;
+        networkAnimation = null; networkAnimationSequence = 0;
+    }
+
+    private void clearNetworkEffects() {
+        if(networkStatusPresentation != null) networkStatusPresentation.clear(this);
+    }
+
+    @Override public boolean hasStatusEffectAuthority() { return !networkReplica; }
 
 	public boolean isNetworkReplica() {
 		return networkReplica;
@@ -1676,11 +1763,12 @@ public class Monster extends Actor implements Directional {
 	public void applyNetworkState(int health, int maximumHealth,
 			float targetX, float targetY, float targetZ, boolean gibbed) {
 		if(!networkReplica) return;
-		networkGibbed = gibbed;
+		if(!networkStateInitialized) networkDeathRecovery = health <= 0;
+        networkGibbed = gibbed;
 		maxHp = Math.max(1, maximumHealth);
 		if(!networkDead) {
 			hp = Math.max(0, Math.min(health, maxHp));
-			if(hp <= 0) networkDead = true;
+			if(hp <= 0) { networkDead = true; clearNetworkEffects(); }
 		}
 		else hp = 0;
 		networkX = targetX;
@@ -1695,7 +1783,7 @@ public class Monster extends Actor implements Directional {
 		}
 		if(networkGibbed && multiplayerCorpse != null) {
 			multiplayerDeathGibbed = true;
-			multiplayerCorpse.applyNetworkGib();
+			multiplayerCorpse.applyNetworkGib(networkDeathRecovery);
 		}
 	}
 
@@ -1760,22 +1848,23 @@ public class Monster extends Actor implements Directional {
 				networkDeathPresented = true;
 				multiplayerDeathProcessed = true;
 				multiplayerDeathGibbed = networkGibbed || dieAnimation == null;
-				dieEffect(level);
+				if(!networkDeathRecovery) dieEffect(level);
 				if(dieAnimation != null) {
 					Corpse corpse = new Corpse(this);
 					corpse.persists = false;
 					corpse.setNetworkReplica(true);
 					corpse.applyNetworkState(networkX, networkY, networkZ);
 					multiplayerCorpse = corpse;
+                    if(networkAnimation != null) corpse.applyNetworkAnimation(networkAnimation);
 					level.entities.add(corpse);
 				}
-				Audio.playPositionedSound(
+				if(!networkDeathRecovery) Audio.playPositionedSound(
 						"sfx_death_enemy_01.mp3,sfx_death_enemy_02.mp3,sfx_death_enemy_03.mp3,sfx_death_enemy_04.mp3",
 						new Vector3(x, y, z), soundVolume, 1f, 12f);
 			}
 			if(networkGibbed && multiplayerCorpse != null) {
 				multiplayerDeathGibbed = true;
-				multiplayerCorpse.applyNetworkGib();
+				multiplayerCorpse.applyNetworkGib(networkDeathRecovery);
 			}
 			isActive = false;
 			return;
@@ -1790,7 +1879,16 @@ public class Monster extends Actor implements Directional {
 		y += (networkY - y) * interpolation;
 		z += (networkZ - z) * interpolation;
 		boolean moving = Math.abs(x - oldX) + Math.abs(y - oldY) > 0.0001f;
+        if(networkStatusPresentation != null) networkStatusPresentation.updateAttachments(this);
 
+        if(networkAnimation != null) {
+            // Position may interpolate; animation time advances only with accepted Host cursor.
+            SpriteAnimation animation = animationFor(networkAnimation.kind);
+            if(animation != null) animation.applyPresentationCursor(networkAnimation.time,
+                    networkAnimation.playing, networkAnimation.looping, this, false);
+            tickAttached(level, delta);
+            return;
+        }
 		if(moving && walkAnimation != null && !walkAnimation.playing) walkAnimation.loop();
 		if(hurtAnimation != null && hurtAnimation.playing) animateNetwork(hurtAnimation, delta);
 		else if(castAnimation != null && castAnimation.playing) animateNetwork(castAnimation, delta);
@@ -1803,14 +1901,7 @@ public class Monster extends Actor implements Directional {
 	}
 
 	private void animateNetwork(SpriteAnimation animation, float delta) {
-		HashMap<String, Array<AnimationAction>> actions = animation.actions;
-		try {
-			animation.actions = null;
-			animation.animate(delta, this);
-		}
-		finally {
-			animation.actions = actions;
-		}
+        animation.animatePresentation(delta, this);
 	}
 
 	@Override

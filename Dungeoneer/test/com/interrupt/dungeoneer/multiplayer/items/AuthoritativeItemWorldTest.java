@@ -167,6 +167,26 @@ public class AuthoritativeItemWorldTest {
     }
 
     @Test
+    public void nativeAmmoSpendIsOwnedAtomicAndLeavesFinalTombstone() {
+        PhysicalItemState arrows = world.spawn("ice-arrows", alpha.getParticipantId(),
+                1, 1, 0, new ItemProperties(2, 3, "frost", "", 2));
+
+        assertFalse(world.spendNativeUnit(beta.getParticipantId(), arrows.entityId));
+        assertTrue(world.spendNativeUnit(alpha.getParticipantId(), arrows.entityId));
+        PhysicalItemState remaining = world.get(arrows.entityId);
+        assertEquals(1, remaining.properties.quantity);
+        assertEquals("frost", remaining.properties.suffix);
+        assertEquals(alpha.getParticipantId(), remaining.owner);
+        assertFalse(remaining.consumed);
+
+        assertTrue(world.spendNativeUnit(alpha.getParticipantId(), arrows.entityId));
+        PhysicalItemState spent = world.get(arrows.entityId);
+        assertEquals(0, spent.properties.quantity);
+        assertNull(spent.owner); assertTrue(spent.consumed);
+        assertFalse(world.spendNativeUnit(alpha.getParticipantId(), arrows.entityId));
+    }
+
+    @Test
     public void consumedIdentityCannotReturnThroughPickupDropOrReplay() {
         PhysicalItemState item = world.spawn("potion", alpha.getParticipantId(), 1, 1, 0);
         assertEquals(NOT_OWNER, request(beta, 1, ItemAction.CONSUME, item.entityId));

@@ -28,6 +28,11 @@ public class SlowEffect extends StatusEffect {
 		if (speedMod > 1) speedMod = 1;
 	}
 
+    @Override
+    public void tickPresentation(Actor owner, float hostElapsed) {
+        doTick(owner, hostElapsed);
+    }
+
 	@Override
 	public void doTick(Actor owner, float delta) {
 		this.particleTimer += delta;

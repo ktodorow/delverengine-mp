@@ -88,6 +88,12 @@ public class Projectile extends Entity {
 	{
 		// center projectiles within the collision box
 		yOffset = -0.5f + collision.z / 2f;
+
+		if(nativePresentationReplica) {
+			onTick(delta);
+			tickAttached(level, delta);
+			return;
+		}
 		
 		if(xa == 0 && ya == 0) return;
 		
@@ -255,10 +261,17 @@ public class Projectile extends Entity {
 	public void hitEffect()
 	{
 		if(!isActive) return;
-		
+		playImpactPresentation(Game.GetLevel());
+	}
+
+	/** Reuses native impact visuals on a non-simulating network replica. */
+	public void playNetworkImpactPresentation(Level level, boolean entityHit,
+			boolean secondaryExplosion) {
+		if(nativePresentationReplica && level != null) playImpactPresentation(level);
+	}
+
+	protected void playImpactPresentation(Level level) {
 		if(makeHitParticles) {
-			Level level = Game.GetLevel();
-			
 			Random r = new Random();
 			int particleCount = 6;
 			particleCount *= Options.instance.gfxQuality;
@@ -270,6 +283,34 @@ public class Projectile extends Entity {
 		}
 		
 		makeHitDecal();
+	}
+
+	protected void playElementalImpactRing(float hitX, float hitY) {
+		Particle ring = new Particle(x, y, z, 0, 0, 0, 0, color, true);
+		((DrawableSprite)ring.drawable).billboard = false;
+		((DrawableSprite)ring.drawable).dir.set(hitX, za, hitY).nor();
+		ring.xa = 0;
+		ring.ya = 0;
+		ring.za = 0;
+		ring.artType = ArtType.particle;
+		ring.tex = 16;
+		ring.x = x;
+		ring.y = y;
+		ring.z = z;
+		ring.lifetime = 20;
+		ring.startScale = 0.1f;
+		ring.fullbrite = true;
+		ring.endScale = 8f;
+		ring.scale = 0f;
+		ring.floating = true;
+		ring.yOffset = yOffset;
+		ring.checkCollision = false;
+		ring.color.set(color);
+		ring.isActive = true;
+		ring.initialized = false;
+		ring.isDynamic = true;
+		ring.haloMode = HaloMode.CORONA_ONLY;
+		Game.instance.level.non_collidable_entities.add(ring);
 	}
 	
 	public void makeHitDecal() {

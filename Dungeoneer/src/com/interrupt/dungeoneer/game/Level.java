@@ -52,6 +52,15 @@ import java.util.HashMap;
 import java.util.Random;
 
 public class Level {
+    public transient java.util.function.BiConsumer<Entity, com.interrupt.dungeoneer.gfx.animation.AnimationAction> nativeAnimationListener;
+
+    /** Render-thread native explosion authority. Never persisted with campaign content. */
+	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionListener nativeExplosionListener;
+	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicListener nativeDynamicListener;
+	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentationListener nativeSpellPresentationListener;
+	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentationListener nativeMeleePresentationListener;
+	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentationListener nativeRangedPresentationListener;
+
 
     public enum DungeonTheme {
     	TEST,

@@ -50,6 +50,15 @@ public class Beam extends Spell {
 	
 	@Override
 	public void playCastSound(Actor owner) {
-		Audio.playPositionedSound("mg_light_shoot_01.mp3,mg_light_shoot_02.mp3,mg_light_shoot_03.mp3,mg_light_shoot_04.mp3", new Vector3(owner.x, owner.y, owner.z), 0.75f, 13f);
+		Audio.playPositionedSound(getCastSoundAsset(), new Vector3(owner.x, owner.y, owner.z),
+				getCastSoundVolume(), getCastSoundRange());
 	}
+
+	@Override public String getCastSoundAsset() {
+		return "mg_light_shoot_01.mp3,mg_light_shoot_02.mp3,mg_light_shoot_03.mp3,mg_light_shoot_04.mp3";
+	}
+
+	@Override public float getCastSoundVolume() { return 0.75f; }
+
+	@Override public float getCastSoundRange() { return 13f; }
 }

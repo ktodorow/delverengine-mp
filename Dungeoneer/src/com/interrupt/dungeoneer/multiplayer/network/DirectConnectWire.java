@@ -1,7 +1,21 @@
 package com.interrupt.dungeoneer.multiplayer.network;
+import com.interrupt.dungeoneer.multiplayer.items.ItemActionResult;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionPresentation;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationCue;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicCue;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation;
+
+import com.interrupt.dungeoneer.multiplayer.items.DoorFeedback;
+
+import com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.NativeStatusEffectState;
 
 import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
 import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
+import com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot;
 import com.interrupt.dungeoneer.multiplayer.items.ItemProperties;
 import com.interrupt.dungeoneer.multiplayer.items.ItemRequest;
 import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
@@ -79,6 +93,18 @@ final class DirectConnectWire {
     private static final int ITEM_STATE = 30;
     private static final int DOOR_STATE = 31;
     private static final int PARTY_KEYS = 32;
+    private static final int MONSTER_EFFECTS = 33;
+    private static final int DOOR_FEEDBACK = 34;
+    private static final int NATIVE_EXPLOSION = 35;
+    private static final int NATIVE_WORLD_GENERATION = 36;
+    private static final int ITEM_ACTION_RESULT = 37;
+    private static final int NATIVE_ANIMATION_CUE = 38;
+    private static final int NATIVE_DYNAMIC_STATE = 39;
+    private static final int NATIVE_DYNAMIC_CUE = 40;
+    private static final int NATIVE_SPELL_PRESENTATION = 41;
+    private static final int NATIVE_MELEE_PRESENTATION = 42;
+    private static final int NATIVE_RANGED_PRESENTATION = 43;
+    private static final int BREAKABLE_STATE = 44;
 
     private DirectConnectWire() { }
 
@@ -306,6 +332,7 @@ final class DirectConnectWire {
                 output.writeFloat(input.getStrafe());
                 output.writeFloat(input.getRotation());
                 output.writeBoolean(input.isJump());
+                output.writeFloat(input.getLookY());
             }
         }
         else if(message instanceof MovementSnapshotMessage) {
@@ -347,6 +374,27 @@ final class DirectConnectWire {
             output.writeFloat(state.x); output.writeFloat(state.y); output.writeFloat(state.z);
             output.writeFloat(state.rotation); output.writeFloat(state.animation);
         }
+        else if(message instanceof BreakableStateMessage) {
+            BreakableStateMessage messageState = (BreakableStateMessage)message;
+            BreakableSnapshot state = messageState.state;
+            output.writeByte(BREAKABLE_STATE);
+            writeString(output, messageState.sessionId,
+                    DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(state.entityId);
+            output.writeLong(state.revision);
+            output.writeInt(state.hp);
+            output.writeBoolean(state.active);
+            output.writeBoolean(state.solid);
+            output.writeFloat(state.x);
+            output.writeFloat(state.y);
+            output.writeFloat(state.z);
+            output.writeFloat(state.velocityX);
+            output.writeFloat(state.velocityY);
+            output.writeFloat(state.velocityZ);
+            output.writeFloat(state.rotationX);
+            output.writeFloat(state.rotationY);
+            output.writeFloat(state.rotationZ);
+        }
         else if(message instanceof ItemRequestMessage) {
             ItemRequestMessage request = (ItemRequestMessage)message;
             output.writeByte(ITEM_REQUEST);
@@ -357,6 +405,129 @@ final class DirectConnectWire {
             output.writeLong(request.entityId);
             output.writeByte(request.condition);
             output.writeInt(request.quantity);
+            output.writeBoolean(request.hasAim);
+            output.writeFloat(request.aimX);
+            output.writeFloat(request.aimY);
+            output.writeFloat(request.aimZ);
+        }
+        else if(message instanceof NativeWorldGenerationMessage) {
+            NativeWorldGenerationMessage world = (NativeWorldGenerationMessage)message;
+            output.writeByte(NATIVE_WORLD_GENERATION);
+            writeString(output, world.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(world.generation);
+        }
+        else if(message instanceof NativeAnimationCueMessage) {
+            NativeAnimationCueMessage frameCue = (NativeAnimationCueMessage)message;
+            output.writeByte(NATIVE_ANIMATION_CUE);
+            writeString(output, frameCue.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(frameCue.generation);
+            output.writeLong(frameCue.sequence);
+            byte[] payload = frameCue.presentation.encode();
+            output.writeShort(payload.length); output.writeBytes(payload);
+        }
+        else if(message instanceof NativeExplosionMessage) {
+            NativeExplosionMessage explosion = (NativeExplosionMessage)message;
+            output.writeByte(NATIVE_EXPLOSION);
+            writeString(output, explosion.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(explosion.generation);
+            output.writeLong(explosion.sequence);
+            byte[] payload = explosion.presentation.bytes();
+            output.writeShort(payload.length); output.writeBytes(payload);
+        }
+        else if(message instanceof NativeDynamicStateMessage) {
+            NativeDynamicStateMessage dynamic = (NativeDynamicStateMessage)message;
+            output.writeByte(NATIVE_DYNAMIC_STATE);
+            writeString(output, dynamic.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(dynamic.generation);
+            output.writeLong(dynamic.sequence);
+            byte[] payload = dynamic.state.bytes();
+            output.writeShort(payload.length); output.writeBytes(payload);
+        }
+        else if(message instanceof NativeDynamicCueMessage) {
+            NativeDynamicCueMessage cue = (NativeDynamicCueMessage)message;
+            output.writeByte(NATIVE_DYNAMIC_CUE);
+            writeString(output, cue.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(cue.generation); output.writeLong(cue.sequence);
+            byte[] payload = cue.cue.bytes();
+            output.writeShort(payload.length); output.writeBytes(payload);
+        }
+        else if(message instanceof NativeSpellPresentationMessage) {
+            NativeSpellPresentationMessage spell = (NativeSpellPresentationMessage)message;
+            output.writeByte(NATIVE_SPELL_PRESENTATION);
+            writeString(output, spell.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(spell.generation); output.writeLong(spell.sequence);
+            byte[] payload = spell.presentation.bytes();
+            output.writeShort(payload.length); output.writeBytes(payload);
+        }
+        else if(message instanceof NativeMeleePresentationMessage) {
+            NativeMeleePresentationMessage melee = (NativeMeleePresentationMessage)message;
+            output.writeByte(NATIVE_MELEE_PRESENTATION);
+            writeString(output, melee.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(melee.generation); output.writeLong(melee.sequence);
+            byte[] payload = melee.presentation.bytes();
+            output.writeShort(payload.length); output.writeBytes(payload);
+        }
+        else if(message instanceof NativeRangedPresentationMessage) {
+            NativeRangedPresentationMessage ranged = (NativeRangedPresentationMessage)message;
+            output.writeByte(NATIVE_RANGED_PRESENTATION);
+            writeString(output, ranged.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(ranged.generation); output.writeLong(ranged.sequence);
+            byte[] payload = ranged.presentation.bytes();
+            output.writeShort(payload.length); output.writeBytes(payload);
+        }
+        else if(message instanceof ItemActionResultMessage) {
+            ItemActionResultMessage result = (ItemActionResultMessage)message;
+            output.writeByte(ITEM_ACTION_RESULT);
+            writeString(output, result.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(result.result.requestId); output.writeLong(result.result.entityId);
+            output.writeBoolean(result.result.accepted);
+        }
+        else if(message instanceof DoorFeedbackMessage) {
+            DoorFeedbackMessage feedback = (DoorFeedbackMessage)message;
+            output.writeByte(DOOR_FEEDBACK);
+            writeString(output, feedback.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeByte(feedback.feedback.ordinal());
+        }
+        else if(message instanceof MonsterEffectsMessage) {
+            MonsterEffectsMessage effects = (MonsterEffectsMessage)message;
+            output.writeByte(MONSTER_EFFECTS);
+            writeString(output, effects.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(effects.generation);
+            output.writeBoolean(effects.live);
+            ActorEffectsSnapshot state = effects.state;
+            writeString(output, state.monsterId, 64, "monster identity");
+            output.writeLong(state.sequence);
+            output.writeBoolean(state.invisible);
+            output.writeFloat(state.drunk);
+            output.writeFloat(state.actorTimeScale);
+            output.writeFloat(state.worldTimeScale);
+            output.writeBoolean(state.floating);
+            output.writeFloat(state.flightSpeed);
+            output.writeBoolean(state.animation != null);
+            if(state.animation != null) {
+                output.writeByte(state.animation.kind.ordinal());
+                output.writeLong(state.animation.instanceId);
+                output.writeFloat(state.animation.time);
+                output.writeBoolean(state.animation.playing);
+                output.writeBoolean(state.animation.looping);
+                output.writeInt(state.animation.texture);
+            }
+            output.writeByte(state.effects.size());
+            for(NativeStatusEffectState effect : state.effects) {
+                output.writeLong(effect.instanceId);
+                output.writeByte(effect.kind.ordinal());
+                output.writeFloat(effect.remaining);
+                output.writeFloat(effect.speed);
+                output.writeFloat(effect.elapsed);
+                output.writeLong(effect.pulses);
+                output.writeFloat(effect.fieldOfView);
+                writeString(output, effect.shader, 32, "status shader");
+                output.writeBoolean(effect.particles);
+            }
         }
         else if(message instanceof PartyKeysMessage) {
             PartyKeysMessage keys = (PartyKeysMessage)message;
@@ -590,18 +761,244 @@ final class DirectConnectWire {
                     throw new ProtocolException("Invalid door state.", invalid);
                 }
                 break;
+            case BREAKABLE_STATE:
+                String breakableSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 58, "breakable state");
+                try {
+                    message = new BreakableStateMessage(breakableSession,
+                            new BreakableSnapshot(input.readLong(), input.readLong(),
+                                    input.readInt(), input.readBoolean(), input.readBoolean(),
+                                    input.readFloat(), input.readFloat(), input.readFloat(),
+                                    input.readFloat(), input.readFloat(), input.readFloat(),
+                                    input.readFloat(), input.readFloat(), input.readFloat()));
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid breakable state.", invalid);
+                }
+                break;
             case ITEM_REQUEST:
                 String itemRequestSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
-                requireReadable(input, 22, "physical item request");
+                requireReadable(input, 35, "physical item request");
                 try {
                     message = new ItemRequestMessage(itemRequestSession, input.readLong(),
                             ItemAction.fromWireId(input.readUnsignedByte()), input.readLong(),
-                            input.readUnsignedByte(), input.readInt());
+                            input.readUnsignedByte(), input.readInt(), input.readBoolean(),
+                            input.readFloat(), input.readFloat(), input.readFloat());
                 }
                 catch(IllegalArgumentException invalid) {
                     throw new ProtocolException("Invalid physical item request.", invalid);
                 }
+                break;
+            case NATIVE_WORLD_GENERATION:
+                String worldSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 8, "native world generation");
+                long worldGeneration = input.readLong();
+                if(worldGeneration <= 0) throw new ProtocolException("Invalid native world generation");
+                message = new NativeWorldGenerationMessage(worldSession, worldGeneration);
+                break;
+            case NATIVE_ANIMATION_CUE:
+                String frameCueSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 18, "native frameCue header");
+                long frameCueGeneration = input.readLong();
+                long frameCueSequence = input.readLong();
+                int frameCueLength = input.readUnsignedShort();
+                if(frameCueGeneration <= 0 || frameCueSequence <= 0 || frameCueLength > NativeAnimationCue.MAX_BYTES)
+                    throw new ProtocolException("Invalid native frameCue header");
+                requireReadable(input, frameCueLength, "native frameCue parameters");
+                byte[] frameCueBytes = new byte[frameCueLength]; input.readBytes(frameCueBytes);
+                try {
+                    message = new NativeAnimationCueMessage(frameCueSession, frameCueSequence,
+                            NativeAnimationCue.decode(frameCueBytes), frameCueGeneration);
+                }
+                catch(java.io.IOException invalid) { throw new ProtocolException("Invalid native frameCue", invalid); }
+                break;
+            case NATIVE_EXPLOSION:
+                String explosionSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 18, "native explosion header");
+                long explosionGeneration = input.readLong();
+                long explosionSequence = input.readLong();
+                int explosionLength = input.readUnsignedShort();
+                if(explosionGeneration <= 0 || explosionSequence <= 0 || explosionLength > NativeExplosionPresentation.MAX_BYTES)
+                    throw new ProtocolException("Invalid native explosion header");
+                requireReadable(input, explosionLength, "native explosion parameters");
+                byte[] explosionBytes = new byte[explosionLength]; input.readBytes(explosionBytes);
+                try {
+                    message = new NativeExplosionMessage(explosionSession, explosionSequence,
+                            NativeExplosionPresentation.decode(explosionBytes), explosionGeneration);
+                }
+                catch(java.io.IOException invalid) { throw new ProtocolException("Invalid native explosion", invalid); }
+                break;
+            case NATIVE_DYNAMIC_STATE:
+                String dynamicSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 18, "native dynamic header");
+                long dynamicGeneration = input.readLong();
+                long dynamicSequence = input.readLong();
+                int dynamicLength = input.readUnsignedShort();
+                if(dynamicGeneration <= 0 || dynamicSequence <= 0
+                        || dynamicLength > NativeDynamicState.MAX_BYTES)
+                    throw new ProtocolException("Invalid native dynamic header");
+                requireReadable(input, dynamicLength, "native dynamic state");
+                byte[] dynamicBytes = new byte[dynamicLength]; input.readBytes(dynamicBytes);
+                try {
+                    message = new NativeDynamicStateMessage(dynamicSession, dynamicSequence,
+                            NativeDynamicState.decode(dynamicBytes), dynamicGeneration);
+                }
+                catch(java.io.IOException invalid) {
+                    throw new ProtocolException("Invalid native dynamic state", invalid);
+                }
+                break;
+            case NATIVE_DYNAMIC_CUE:
+                String dynamicCueSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 18, "native dynamic cue header");
+                long dynamicCueGeneration = input.readLong();
+                long dynamicCueSequence = input.readLong();
+                int dynamicCueLength = input.readUnsignedShort();
+                if(dynamicCueGeneration <= 0 || dynamicCueSequence <= 0
+                        || dynamicCueLength > NativeDynamicCue.MAX_BYTES)
+                    throw new ProtocolException("Invalid native dynamic cue header");
+                requireReadable(input, dynamicCueLength, "native dynamic cue");
+                byte[] dynamicCueBytes = new byte[dynamicCueLength];
+                input.readBytes(dynamicCueBytes);
+                try {
+                    message = new NativeDynamicCueMessage(dynamicCueSession,
+                            dynamicCueSequence, NativeDynamicCue.decode(dynamicCueBytes),
+                            dynamicCueGeneration);
+                }
+                catch(java.io.IOException invalid) {
+                    throw new ProtocolException("Invalid native dynamic cue", invalid);
+                }
+                break;
+            case NATIVE_SPELL_PRESENTATION:
+                String spellSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 18, "native spell presentation header");
+                long spellGeneration = input.readLong();
+                long spellSequence = input.readLong();
+                int spellLength = input.readUnsignedShort();
+                if(spellGeneration <= 0 || spellSequence <= 0
+                        || spellLength > NativeSpellPresentation.MAX_BYTES) {
+                    throw new ProtocolException("Invalid native spell presentation header");
+                }
+                requireReadable(input, spellLength, "native spell presentation");
+                byte[] spellBytes = new byte[spellLength]; input.readBytes(spellBytes);
+                try {
+                    message = new NativeSpellPresentationMessage(spellSession, spellSequence,
+                            NativeSpellPresentation.decode(spellBytes), spellGeneration);
+                }
+                catch(java.io.IOException invalid) {
+                    throw new ProtocolException("Invalid native spell presentation", invalid);
+                }
+                break;
+            case NATIVE_MELEE_PRESENTATION:
+                String meleeSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 18, "native melee presentation header");
+                long meleeGeneration = input.readLong();
+                long meleeSequence = input.readLong();
+                int meleeLength = input.readUnsignedShort();
+                if(meleeGeneration <= 0 || meleeSequence <= 0
+                        || meleeLength > NativeMeleePresentation.MAX_BYTES) {
+                    throw new ProtocolException("Invalid native melee presentation header");
+                }
+                requireReadable(input, meleeLength, "native melee presentation");
+                byte[] meleeBytes = new byte[meleeLength]; input.readBytes(meleeBytes);
+                try {
+                    message = new NativeMeleePresentationMessage(meleeSession, meleeSequence,
+                            NativeMeleePresentation.decode(meleeBytes), meleeGeneration);
+                }
+                catch(java.io.IOException invalid) {
+                    throw new ProtocolException("Invalid native melee presentation", invalid);
+                }
+                break;
+            case NATIVE_RANGED_PRESENTATION:
+                String rangedSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 18, "native ranged presentation header");
+                long rangedGeneration = input.readLong();
+                long rangedSequence = input.readLong();
+                int rangedLength = input.readUnsignedShort();
+                if(rangedGeneration <= 0 || rangedSequence <= 0
+                        || rangedLength > NativeRangedPresentation.MAX_BYTES) {
+                    throw new ProtocolException("Invalid native ranged presentation header");
+                }
+                requireReadable(input, rangedLength, "native ranged presentation");
+                byte[] rangedBytes = new byte[rangedLength]; input.readBytes(rangedBytes);
+                try {
+                    message = new NativeRangedPresentationMessage(rangedSession, rangedSequence,
+                            NativeRangedPresentation.decode(rangedBytes), rangedGeneration);
+                }
+                catch(java.io.IOException invalid) {
+                    throw new ProtocolException("Invalid native ranged presentation", invalid);
+                }
+                break;
+            case DOOR_FEEDBACK:
+                String doorFeedbackSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 1, "door feedback");
+                int doorFeedbackKind = input.readUnsignedByte();
+                if(doorFeedbackKind >= DoorFeedback.values().length) throw new ProtocolException("Invalid door feedback.");
+                message = new DoorFeedbackMessage(doorFeedbackSession, DoorFeedback.values()[doorFeedbackKind]);
+                break;
+            case ITEM_ACTION_RESULT:
+                String resultSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 17, "item action result");
+                try { message = new ItemActionResultMessage(resultSession,
+                        new ItemActionResult(input.readLong(), input.readLong(), input.readBoolean())); }
+                catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid item action result.", invalid); }
+                break;
+            case MONSTER_EFFECTS:
+                String effectSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 9, "effect delivery mode");
+                long effectGeneration = input.readLong();
+                if(effectGeneration <= 0) throw new ProtocolException("Invalid effect generation");
+                boolean effectLive = input.readBoolean();
+                String effectMonster = readString(input, 64, "monster identity");
+                requireReadable(input, 28, "monster effect sequence and count");
+                long effectSequence = input.readLong();
+                boolean effectInvisible = input.readBoolean();
+                float effectDrunk = input.readFloat();
+                float actorTimeScale = input.readFloat();
+                float worldTimeScale = input.readFloat();
+                boolean floating = input.readBoolean();
+                float flightSpeed = input.readFloat();
+                com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState animation = null;
+                if(input.readBoolean()) {
+                    requireReadable(input, 19, "native animation cursor");
+                    int kind = input.readUnsignedByte();
+                    if(kind >= com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind.values().length)
+                        throw new ProtocolException("Unknown native animation kind.");
+                    try {
+                        animation = new com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState(
+                                com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind.values()[kind],
+                                input.readLong(), input.readFloat(), input.readBoolean(), input.readBoolean(), input.readInt());
+                    } catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid native animation.", invalid); }
+                }
+                int effectCount = input.readUnsignedByte();
+                if(effectCount > ActorEffectsSnapshot.MAX_EFFECTS) throw new ProtocolException("Too many native effects.");
+                List<NativeStatusEffectState> effectStates = new ArrayList<NativeStatusEffectState>();
+                try {
+                    for(int e = 0; e < effectCount; e++) {
+                        requireReadable(input, 33, "native effect state");
+                        long effectId = input.readLong();
+                        int effectKind = input.readUnsignedByte();
+                        if(effectKind >= NativeStatusEffectState.Kind.values().length) throw new ProtocolException("Unknown native effect kind.");
+                        float remaining = input.readFloat();
+                        float speed = input.readFloat();
+                        float elapsed = input.readFloat();
+                        long pulses = input.readLong();
+                        float fieldOfView = input.readFloat();
+                        String shader = readString(input, 32, "status shader");
+                        requireReadable(input, 1, "status particles");
+                        effectStates.add(new NativeStatusEffectState(effectId,
+                                NativeStatusEffectState.Kind.values()[effectKind], remaining, speed,
+                                shader, input.readBoolean(), elapsed, fieldOfView, pulses));
+                    }
+                    message = new MonsterEffectsMessage(effectSession,
+                            new ActorEffectsSnapshot(effectMonster, effectSequence, effectInvisible, effectStates, effectDrunk, actorTimeScale, worldTimeScale, floating, flightSpeed, animation), effectLive, effectGeneration);
+                }
+                catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid native effects.", invalid); }
                 break;
             case PARTY_KEYS:
                 String keySession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
@@ -844,15 +1241,16 @@ final class DirectConnectWire {
                 }
                 List<MovementInputFrame> inputFrames = new ArrayList<MovementInputFrame>();
                 for(int i = 0; i < inputCount; i++) {
-                    requireReadable(input, 21, "Movement input frame");
+                    requireReadable(input, 25, "Movement input frame");
                     long inputTick = input.readLong();
                     float forward = input.readFloat();
                     float strafe = input.readFloat();
                     float rotation = input.readFloat();
                     boolean jump = input.readBoolean();
+                    float lookY = input.readFloat();
                     try {
                         inputFrames.add(new MovementInputFrame(inputTick, forward,
-                                strafe, rotation, jump));
+                                strafe, rotation, jump, lookY));
                     }
                     catch(IllegalArgumentException ex) {
                         throw new ProtocolException("Malformed movement input: "
@@ -1645,6 +2043,155 @@ final class DirectConnectWire {
         }
     }
 
+    static final class NativeWorldGenerationMessage implements Message {
+        final String sessionId;
+        final long generation;
+        NativeWorldGenerationMessage(String sessionId, long generation) {
+            this.sessionId = sessionId; this.generation = generation;
+        }
+    }
+
+    static final class NativeAnimationCueMessage implements Message {
+        final String sessionId;
+        final long sequence;
+        final NativeAnimationCue presentation;
+        final long generation;
+        NativeAnimationCueMessage(String sessionId, long sequence, NativeAnimationCue presentation) {
+            this(sessionId, sequence, presentation, 1);
+        }
+        NativeAnimationCueMessage(String sessionId, long sequence, NativeAnimationCue presentation, long generation) {
+            this.generation = generation;
+            this.sessionId = sessionId; this.sequence = sequence; this.presentation = presentation;
+        }
+    }
+
+    static final class NativeDynamicStateMessage implements Message {
+        final String sessionId;
+        final long sequence;
+        final NativeDynamicState state;
+        final long generation;
+
+        NativeDynamicStateMessage(String sessionId, long sequence,
+                NativeDynamicState state, long generation) {
+            if(state == null || generation <= 0 || sequence <= 0)
+                throw new IllegalArgumentException("Invalid native dynamic message.");
+            this.sessionId = sessionId;
+            this.sequence = sequence;
+            this.state = state;
+            this.generation = generation;
+        }
+    }
+
+    static final class NativeDynamicCueMessage implements Message {
+        final String sessionId;
+        final long sequence;
+        final NativeDynamicCue cue;
+        final long generation;
+
+        NativeDynamicCueMessage(String sessionId, long sequence,
+                NativeDynamicCue cue, long generation) {
+            if(cue == null || generation <= 0 || sequence <= 0)
+                throw new IllegalArgumentException("Invalid native dynamic cue message.");
+            this.sessionId = sessionId; this.sequence = sequence;
+            this.cue = cue; this.generation = generation;
+        }
+    }
+
+    static final class NativeSpellPresentationMessage implements Message {
+        final String sessionId;
+        final long sequence;
+        final NativeSpellPresentation presentation;
+        final long generation;
+
+        NativeSpellPresentationMessage(String sessionId, long sequence,
+                NativeSpellPresentation presentation, long generation) {
+            if(presentation == null || generation <= 0 || sequence <= 0) {
+                throw new IllegalArgumentException("Invalid native spell presentation message.");
+            }
+            this.sessionId = sessionId; this.sequence = sequence;
+            this.presentation = presentation; this.generation = generation;
+        }
+    }
+
+    static final class NativeMeleePresentationMessage implements Message {
+        final String sessionId;
+        final long sequence;
+        final NativeMeleePresentation presentation;
+        final long generation;
+
+        NativeMeleePresentationMessage(String sessionId, long sequence,
+                NativeMeleePresentation presentation, long generation) {
+            if(presentation == null || generation <= 0 || sequence <= 0) {
+                throw new IllegalArgumentException("Invalid native melee presentation message.");
+            }
+            this.sessionId = sessionId; this.sequence = sequence;
+            this.presentation = presentation; this.generation = generation;
+        }
+    }
+
+    static final class NativeRangedPresentationMessage implements Message {
+        final String sessionId;
+        final long sequence;
+        final NativeRangedPresentation presentation;
+        final long generation;
+
+        NativeRangedPresentationMessage(String sessionId, long sequence,
+                NativeRangedPresentation presentation, long generation) {
+            if(presentation == null || generation <= 0 || sequence <= 0) {
+                throw new IllegalArgumentException("Invalid native ranged presentation message.");
+            }
+            this.sessionId = sessionId; this.sequence = sequence;
+            this.presentation = presentation; this.generation = generation;
+        }
+    }
+
+    static final class NativeExplosionMessage implements Message {
+        final String sessionId;
+        final long sequence;
+        final NativeExplosionPresentation presentation;
+        final long generation;
+        NativeExplosionMessage(String sessionId, long sequence, NativeExplosionPresentation presentation) {
+            this(sessionId, sequence, presentation, 1);
+        }
+        NativeExplosionMessage(String sessionId, long sequence, NativeExplosionPresentation presentation, long generation) {
+            this.generation = generation;
+            this.sessionId = sessionId; this.sequence = sequence; this.presentation = presentation;
+        }
+    }
+
+    static final class DoorFeedbackMessage implements Message {
+        final String sessionId;
+        final DoorFeedback feedback;
+        DoorFeedbackMessage(String sessionId, DoorFeedback feedback) {
+            this.sessionId = sessionId; this.feedback = java.util.Objects.requireNonNull(feedback);
+        }
+    }
+
+    static final class ItemActionResultMessage implements Message {
+        final String sessionId;
+        final ItemActionResult result;
+        ItemActionResultMessage(String sessionId, ItemActionResult result) {
+            this.sessionId = sessionId; this.result = result;
+        }
+    }
+
+    static final class MonsterEffectsMessage implements Message {
+        final String sessionId;
+        final ActorEffectsSnapshot state;
+        final boolean live;
+        final long generation;
+        MonsterEffectsMessage(String sessionId, ActorEffectsSnapshot state) { this(sessionId, state, true); }
+        MonsterEffectsMessage(String sessionId, ActorEffectsSnapshot state, boolean live) {
+            this(sessionId, state, live, 1);
+        }
+        MonsterEffectsMessage(String sessionId, ActorEffectsSnapshot state, boolean live, long generation) {
+            this.generation = generation;
+            this.live = live;
+            if(sessionId == null || state == null) throw new IllegalArgumentException("Missing native effect state.");
+            this.sessionId = sessionId; this.state = state;
+        }
+    }
+
     static final class PartyKeysMessage implements Message {
         final String sessionId;
         final long revision;
@@ -1665,11 +2212,25 @@ final class DirectConnectWire {
         }
     }
 
+    static final class BreakableStateMessage implements Message {
+        final String sessionId;
+        final BreakableSnapshot state;
+
+        BreakableStateMessage(String sessionId, BreakableSnapshot state) {
+            if(state == null) throw new IllegalArgumentException(
+                    "Breakable state is required.");
+            this.sessionId = sessionId;
+            this.state = state;
+        }
+    }
+
     static final class ItemRequestMessage implements Message {
         final String sessionId;
         final long requestId, entityId;
         final ItemAction action;
         final int condition, quantity;
+        final boolean hasAim;
+        final float aimX, aimY, aimZ;
 
         ItemRequestMessage(String sessionId, long requestId, ItemAction action, long entityId) {
             this(sessionId, requestId, action, entityId, 0, 0);
@@ -1677,11 +2238,21 @@ final class DirectConnectWire {
 
         ItemRequestMessage(String sessionId, long requestId, ItemAction action, long entityId,
                 int condition, int quantity) {
+            this(sessionId, requestId, action, entityId, condition, quantity,
+                    false, 0f, 0f, 0f);
+        }
+
+        ItemRequestMessage(String sessionId, long requestId, ItemAction action, long entityId,
+                int condition, int quantity, boolean hasAim, float aimX, float aimY, float aimZ) {
             // Validate without trusting a Participant identity supplied by the sender.
             new ItemRequest(new ParticipantId("wire-validation"), requestId, action, entityId,
-                    condition, quantity);
+                    condition, quantity, hasAim, aimX, aimY, aimZ);
             this.condition = condition;
             this.quantity = quantity;
+            this.hasAim = hasAim;
+            this.aimX = aimX;
+            this.aimY = aimY;
+            this.aimZ = aimZ;
             this.sessionId = sessionId;
             this.requestId = requestId;
             this.action = action;

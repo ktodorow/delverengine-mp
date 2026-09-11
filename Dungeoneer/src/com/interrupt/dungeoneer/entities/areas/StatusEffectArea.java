@@ -50,6 +50,7 @@ public class StatusEffectArea extends Area {
     }
 
     private void applyStatusEffect(Actor a) {
+        if(!a.hasStatusEffectAuthority()) return;
 
         if(a.statusEffects != null && a.statusEffects.size > 0) {
             for(int i = 0; i < a.statusEffects.size; i++) {

@@ -56,6 +56,42 @@ public class HeadlessHostSessionHarnessTest {
     }
 
     @Test
+    public void publishesSimulationCallbacksAfterReleasingSessionMonitor() {
+        final AuthoritativeHostSession[] session = new AuthoritativeHostSession[1];
+        final boolean[] eventPublished = { false };
+        AuthoritativeHostSimulation simulation = new AuthoritativeHostSimulation() {
+            @Override public void applyCommand(long hostTick, HostSessionCommand command,
+                    HostSessionOutput output) { }
+            @Override public void tick(long hostTick, float fixedDeltaSeconds,
+                    HostSessionOutput output) {
+                output.event(new HostSessionEvent() { });
+            }
+            @Override public HostSessionSnapshot snapshot(long hostTick) {
+                return new HostSessionSnapshot() { };
+            }
+        };
+        HostSessionTransport transport = new HostSessionTransport() {
+            @Override public void publishSnapshot(long hostTick, HostSessionSnapshot snapshot) { }
+            @Override public void publishEvent(long hostTick, HostSessionEvent event) {
+                assertFalse(Thread.holdsLock(session[0]));
+                eventPublished[0] = true;
+            }
+            @Override public void publishDisconnect(long hostTick,
+                    HostDisconnectOutcome outcome) { }
+            @Override public void publishTransition(long hostTick,
+                    HostTransitionOutcome outcome) { }
+        };
+        session[0] = new AuthoritativeHostSession(simulation, transport,
+                new HostSessionStorage() {
+                    @Override public void persist(long hostTick, HostPersistedState state) { }
+                });
+
+        session[0].advanceOneTick();
+
+        assertTrue(eventPublished[0]);
+    }
+
+    @Test
     public void exposesSnapshotsEventsDisconnectsTransitionsAndPersistedOutputs() {
         OpenSourceTestHostSimulation simulation =
                 new OpenSourceTestHostSimulation(loadOpenSourceTestFloor());

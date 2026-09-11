@@ -114,6 +114,7 @@ public class FusedBomb extends Item {
 
     @Override
     public void tick(Level level, float delta) {
+        if (nativePresentationReplica) return;
         super.tick(level, delta);
 
         if (isWet) {
@@ -179,10 +180,12 @@ public class FusedBomb extends Item {
     }
 
     public void explode(Level level) {
+        if(level.nativeExplosionListener != null && !level.nativeExplosionListener.isSimulationAuthority()) return;
         isActive = false;
         isSolid = false;
 
         if (explosion != null) {
+            explosion.multiplayerDamageSource = multiplayerDamageSource;
             explosion.initExplosion(x, y, z + yOffset, explosionImpulse, explosionRadius);
             explosion.color = explosionColor;
             explosion.color.a = 1f;
@@ -196,6 +199,7 @@ public class FusedBomb extends Item {
                 // Grab a random spawn element to create
                 int idx = Game.rand.nextInt(spawns.size);
                 Entity e = EntityManager.instance.Copy(spawns.get(idx));
+                e.multiplayerDamageSource = multiplayerDamageSource;
 
                 // Preserve momentum of thrown bomb and add in random velocity
                 e.xa = xa * spawnMomentumTransfer + spawnVelocity.x + Game.rand.nextFloat() * spawnRandomVelocity.x - spawnRandomVelocity.x * 0.5f;
@@ -213,7 +217,26 @@ public class FusedBomb extends Item {
         }
     }
 
+    public boolean isWet() {
+        return isWet;
+    }
+
+    public void setNetworkWet(boolean wet) {
+        isWet = wet;
+    }
+
     public void fizzle(Level level) {
+        if(level != null && level.nativeDynamicListener != null)
+            level.nativeDynamicListener.onFusedBombFizzle(this);
+        playFizzlePresentation(level);
+    }
+
+    public void playNetworkFizzle(Level level) {
+        if(nativePresentationReplica) playFizzlePresentation(level);
+    }
+
+    private void playFizzlePresentation(Level level) {
+        if(level == null) return;
         // make a bunch of small particles
         int pCount = 3;
         pCount *= Options.instance.gfxQuality;
@@ -248,6 +271,8 @@ public class FusedBomb extends Item {
     @Override
     public void hit(float projx, float projy, int damage, float knockback, Weapon.DamageType damageType, Entity instigator) {
         if (isActive) {
+            if(multiplayerDamageSource == null && instigator != null)
+                multiplayerDamageSource = instigator.multiplayerDamageSource;
             super.hit(projx, projy, damage, knockback, damageType, instigator);
             onDamage(damage, damageType);
         }

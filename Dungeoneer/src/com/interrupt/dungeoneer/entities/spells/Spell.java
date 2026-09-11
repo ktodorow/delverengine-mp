@@ -62,7 +62,7 @@ public class Spell {
 		if(owner.mp > owner.maxMp) owner.mp = owner.maxMp;
 		
 		doCast(owner, direction, new Vector3(owner.x, owner.y, owner.z));
-		playCastSound(owner);
+		playCastPresentation(owner, new Vector3(owner.x, owner.y, owner.z));
 	}
 	
 	// zapping from a wand or scroll costs no spell points
@@ -73,7 +73,11 @@ public class Spell {
 	// zap with a position AND direction
     public void zap(Actor owner, Vector3 direction, Vector3 position) {
         doCast(owner, direction, position);
+		playZapPresentation(owner, position);
+	}
 
+	/** Native cast feedback without spell gameplay; safe after Host acceptance on consumer. */
+	public void playZapPresentation(Actor owner, Vector3 position) {
 		if(doCastVfx) {
 			if(castVfx == null) {
 				doCastEffect(position, Game.GetLevel(), owner);
@@ -89,8 +93,23 @@ public class Spell {
 			}
 		}
 
-        playCastSound(owner);
+		notifySpellPresentation(owner, position, true);
+		playCastSound(owner);
     }
+
+	/** Native direct-cast sound without spell gameplay. */
+	public void playCastPresentation(Actor owner, Vector3 position) {
+		notifySpellPresentation(owner, position, false);
+		playCastSound(owner);
+	}
+
+	private void notifySpellPresentation(Actor owner, Vector3 position, boolean zap) {
+		Level level = Game.instance == null ? null : Game.GetLevel();
+		if(level != null && level.nativeSpellPresentationListener != null) {
+			level.nativeSpellPresentationListener.onSpellPresentation(owner, this,
+					position.cpy(), zap);
+		}
+	}
 	
 	// Override this for specific spell effects
 	public void doCast(Entity owner, Vector3 direction, Vector3 position) { }
@@ -111,6 +130,12 @@ public class Spell {
 			Audio.playPositionedSound(castSound, new Vector3(owner.x, owner.y, owner.z), castSoundVolume, 12);
 		}
 	}
+
+	public String getCastSoundAsset() { return castSound; }
+
+	public float getCastSoundVolume() { return castSoundVolume; }
+
+	public float getCastSoundRange() { return 12f; }
 	
 	public int doAttackRoll()
 	{	

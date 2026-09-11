@@ -63,6 +63,10 @@ public class Missile extends Item implements Directional {
         return !stuck && (Math.abs(xa) > 0.00001f || Math.abs(ya) > 0.00001f || Math.abs(za) > 0.00001f);
     }
 
+    public boolean isStuck() { return stuck; }
+
+    public void setNetworkStuck(boolean value) { stuck = value; }
+
     /** Stack type. */
     public String stackType = "ARROW";
 
@@ -341,6 +345,13 @@ public class Missile extends Item implements Directional {
     public void tick(Level level, float delta) {
         yOffset = -0.45f;
 
+        if (nativePresentationReplica) {
+            setDirection();
+            tickPresentationEffects(level, delta, false);
+            tickAttached(level, delta);
+            return;
+        }
+
         if (bounceTimer > 0) bounceTimer -= delta;
 
         // setup some position vectors for line checks
@@ -398,6 +409,11 @@ public class Missile extends Item implements Directional {
             this.stuck = false;
         }
 
+        tickPresentationEffects(level, delta, true);
+        tickAttached(level, delta);
+    }
+
+    private void tickPresentationEffects(Level level, float delta, boolean allowQueuedImpact) {
         // wiggle!
         float shake = 0f;
         if (shakeTimer > 0) {
@@ -420,7 +436,7 @@ public class Missile extends Item implements Directional {
             this.fullbrite = false;
         }
 
-        if (this.showHitEffect) {
+        if (allowQueuedImpact && this.showHitEffect) {
             this.doHitEffect(x, y, z - 0.5f, level);
             this.showHitEffect = false;
         }
@@ -445,7 +461,7 @@ public class Missile extends Item implements Directional {
                 p.scale = 0.5f;
                 p.checkCollision = false;
                 p.playAnimation(18, 23, p.lifetime);
-                Game.GetLevel().SpawnNonCollidingEntity(p);
+                level.SpawnNonCollidingEntity(p);
             }
         }
 
@@ -469,8 +485,6 @@ public class Missile extends Item implements Directional {
                 }
             }
         }
-
-        tickAttached(level, delta);
     }
 
     public void bounceOffOf(Entity hit) {
@@ -766,6 +780,12 @@ public class Missile extends Item implements Directional {
         shakeTimer = 1f;
 
         //makeHitDecal(xLoc + 0.5f, yLoc + 0.5f, zLoc + 0.18f, new Vector3(Game.camera.direction.x, Game.camera.direction.z, Game.camera.direction.y));
+    }
+
+    /** Reuses native arrow/bullet impact particles without collision or damage. */
+    public void playNetworkImpactPresentation(Level level) {
+        if(nativePresentationReplica && level != null)
+            doHitEffect(x, y, z - 0.5f, level);
     }
 
     public void attach(Entity e) {

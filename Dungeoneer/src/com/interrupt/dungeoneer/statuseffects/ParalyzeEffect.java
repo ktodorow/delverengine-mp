@@ -17,21 +17,65 @@ public class ParalyzeEffect extends StatusEffect {
         this(500);
     }
 
-    public ParalyzeEffect(int time) {
+    public ParalyzeEffect(boolean createParticle) {
+        this(500, createParticle);
+    }
+
+    public ParalyzeEffect(int time) { this(time, true); }
+
+    private ParalyzeEffect(int time, boolean createParticle) {
         this.name = StringManager.get("statuseffects.ParalyzeEffect.defaultNameText");
         this.speedMod = 0.0f;
         this.timer = time;
         this.statusEffectType = StatusEffectType.PARALYZE;
 
+        if(createParticle) createParticle();
+    }
+
+    private void createParticle() {
         this.effectParticle = CachePools.getParticle();
         this.effectParticle.floating = true;
-        this.effectParticle.lifetime = time;
+        this.effectParticle.lifetime = timer;
         this.effectParticle.fullbrite = true;
         this.effectParticle.startScale = 1.0f;
         this.effectParticle.endScale = 1.0f;
         this.effectParticle.checkCollision = false;
         this.effectParticle.playAnimation(72, 79, 20.0f, true);
         Game.GetLevel().SpawnNonCollidingEntity(this.effectParticle);
+    }
+
+    @Override
+    public void beginPresentation(Actor owner) {
+        if(showParticleEffect) {
+            createParticle();
+            // Host removal owns this pooled attachment's lifetime, including delayed traffic.
+            effectParticle.lifetime = Float.MAX_VALUE;
+        }
+    }
+
+    @Override
+    public void playStartPresentation(Actor owner) {
+        if(showParticleEffect) createImpactParticles(owner);
+    }
+
+    @Override
+    public void tickPresentation(Actor owner, float hostElapsed) {
+        if(effectParticle == null) return;
+        doTick(owner, hostElapsed);
+    }
+
+    @Override
+    public void updatePresentationAttachment(Actor owner) {
+        if(effectParticle != null) doTick(owner, 0);
+    }
+
+    @Override
+    public void endPresentation(Actor owner) {
+        if(effectParticle != null) {
+            // Level owns pooled particle disposal; never return an active level entry twice.
+            effectParticle.isActive = false;
+            effectParticle = null;
+        }
     }
 
     @Override
@@ -50,9 +94,13 @@ public class ParalyzeEffect extends StatusEffect {
     public void onStatusBegin(Actor owner) {
         this.wasOwnerFloating = owner.floating;
         owner.floating = false;
+        createImpactParticles(owner);
+    }
 
+    private void createImpactParticles(Actor owner) {
+        if(!showParticleEffect) return;
         int impactParticleCount = Game.rand.nextInt(3) + 2;
-        Vector3 cameraRight = Game.camera.direction.crs(new Vector3(0,1,0)).nor();
+        Vector3 cameraRight = Game.camera.direction.cpy().crs(new Vector3(0,1,0)).nor();
 
         if (!this.showParticleEffect) {
             return;

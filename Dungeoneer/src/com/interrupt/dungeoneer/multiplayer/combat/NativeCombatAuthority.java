@@ -6,6 +6,38 @@ import java.util.List;
 
 /** Render-thread bridge from original Delver combat into Host encounter authority. */
 public interface NativeCombatAuthority {
+    default boolean canApplyNativeParticipantEffect(ParticipantId participant) { return false; }
+
+    /** Positive amount damages; negative amount heals, after original Actor rules ran once. */
+    default void applyNativeParticipantDamage(String sourceId, ParticipantId participant,
+            int amount, float x, float y, float z) { }
+
+    default void applyNativeParticipantImpulse(ParticipantId participant,
+            float x, float y, float z) { }
+
+    default void setNativeParticipantPosition(ParticipantId participant,
+            float x, float y, float z) { }
+
+    default void failNativePresentation(String reason) { }
+
+    default void beginNativeWorld() { }
+
+    default void publishNativeAnimationCue(NativeAnimationCue cue) { }
+
+    default void publishNativeExplosion(NativeExplosionPresentation presentation) { }
+
+    default void synchronizeNativeDynamicState(NativeDynamicState state) { }
+
+    default void publishNativeDynamicCue(NativeDynamicCue cue) { }
+
+    default void publishNativeSpellPresentation(NativeSpellPresentation presentation) { }
+
+    default void publishNativeMeleePresentation(NativeMeleePresentation presentation) { }
+
+    default void publishNativeRangedPresentation(NativeRangedPresentation presentation) { }
+
+    default void synchronizeNativeActorEffects(ActorEffectsSnapshot state) { }
+
     void bindNativeMonster(int health, int maximumHealth, float x, float y, float z);
 
     default void bindNativeMonster(String monsterId, int health, int maximumHealth,

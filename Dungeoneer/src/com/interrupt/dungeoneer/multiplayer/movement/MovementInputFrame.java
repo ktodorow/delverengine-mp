@@ -8,10 +8,18 @@ public final class MovementInputFrame {
     private final float forward;
     private final float strafe;
     private final float rotation;
+    private final float lookY;
     private final boolean jump;
 
     public MovementInputFrame(long inputTick, float forward, float strafe, float rotation,
             boolean jump) {
+        this(inputTick, forward, strafe, rotation, jump, 0f);
+    }
+
+    public MovementInputFrame(long inputTick, float forward, float strafe, float rotation,
+            boolean jump, float lookY) {
+        requireAxis(lookY, "vertical look");
+        this.lookY = lookY;
         if(inputTick <= 0L) throw new IllegalArgumentException("Movement input tick must be positive.");
         requireAxis(forward, "forward");
         requireAxis(strafe, "strafe");
@@ -42,6 +50,8 @@ public final class MovementInputFrame {
         return rotation;
     }
 
+    public float getLookY() { return lookY; }
+
     public boolean isJump() {
         return jump;
     }
@@ -68,6 +78,7 @@ public final class MovementInputFrame {
                 && Float.compare(forward, that.forward) == 0
                 && Float.compare(strafe, that.strafe) == 0
                 && Float.compare(rotation, that.rotation) == 0
+                && Float.compare(lookY, that.lookY) == 0
                 && jump == that.jump;
     }
 
@@ -77,6 +88,7 @@ public final class MovementInputFrame {
         result = 31 * result + Float.floatToIntBits(forward);
         result = 31 * result + Float.floatToIntBits(strafe);
         result = 31 * result + Float.floatToIntBits(rotation);
+        result = 31 * result + Float.floatToIntBits(lookY);
         return 31 * result + (jump ? 1 : 0);
     }
 }

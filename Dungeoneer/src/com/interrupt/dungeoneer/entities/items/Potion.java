@@ -30,40 +30,42 @@ public class Potion extends Item {
 	}
 
 	public void Drink(Player player) {
-		Random r = new Random();
+        if(player.requestItemConsume(this)) return;
+        applyNativeEffect(player);
+        presentDrink(player);
+    }
 
-		player.history.drankPotion(this);
-		Audio.playSound("cons_drink.mp3", 0.5f);
+    /** Original potion rules, executed only for the accepted Host-owned item. */
+    public void applyNativeEffect(Actor player) {
+        Random r = new Random();
+        if(potionType == PotionType.health) {
+            player.hp += r.nextInt(5) + 4;
+            if(player.hp > player.getMaxHp()) player.hp = player.getMaxHp();
+        }
+        else if(potionType == PotionType.maxhealth) {
+            player.hp = player.getMaxHp();
+            player.clearStatusEffects();
+        }
+        else if(potionType == PotionType.restore) {
+            player.hp += 1;
+            if(player.hp > player.getMaxHp()) player.hp = player.getMaxHp();
+        }
+        StatusEffect e = getStatusEffect();
+        if(e != null) player.addStatusEffect(e);
+    }
 
-
-		String displayText = "";
-
-		if(potionType == PotionType.health) {
-			displayText = StringManager.get("items.Potion.healDisplayText");
-			player.hp += r.nextInt(5) + 4;
-			if(player.hp > player.getMaxHp()) player.hp = player.getMaxHp();
-		}
-		else if(potionType == PotionType.poison) {
-			displayText = StringManager.get("items.Potion.poisonDisplayText");
-		}
-		else if(potionType == PotionType.maxhealth) {
-			displayText = StringManager.get("items.Potion.maxHealDisplayText");
-			player.hp = player.getMaxHp();
-			player.clearStatusEffects();
-		}
-		else if(potionType == PotionType.restore) {
-			player.hp += 1;
-			if(player.hp > player.getMaxHp()) player.hp = player.getMaxHp();
-		}
-
-		StatusEffect e = getStatusEffect();
-		if(e != null) {
-			player.addStatusEffect(e);
-		}
+    /** Inventory feedback and knowledge belong only to the consuming Participant. */
+    public void presentDrink(Player player) {
+        player.history.drankPotion(this);
+        Audio.playSound("cons_drink.mp3", 0.5f);
+        String displayText = "";
+        if(potionType == PotionType.health) displayText = StringManager.get("items.Potion.healDisplayText");
+        else if(potionType == PotionType.poison) displayText = StringManager.get("items.Potion.poisonDisplayText");
+        else if(potionType == PotionType.maxhealth) displayText = StringManager.get("items.Potion.maxHealDisplayText");
 
 		// remove from the inventory
 		int location = player.inventory.indexOf(this, true);
-		player.inventory.set(location, null);
+		if(location >= 0) player.inventory.set(location, null);
 		Game.RefreshUI();
 
 		// maybe add to discovered list
@@ -215,6 +217,7 @@ public class Potion extends Item {
 			// uhoh!
 			Bomb bomb = new Bomb();
 			bomb.matchEntity(this);
+            bomb.multiplayerDamageSource = multiplayerDamageSource;
 			bomb.explosionDamageType = getExplosionDamageType();
 			bomb.explosionColor = new Color(getExplosionColor());
 			bomb.explosionDamage = getExplosionDamageAmount();

@@ -15,6 +15,21 @@ import com.interrupt.dungeoneer.gfx.drawables.DrawableSprite;
 import com.interrupt.dungeoneer.interfaces.Directional;
 
 public class SpriteAnimation {
+    private static final java.util.concurrent.atomic.AtomicLong playbackIds = new java.util.concurrent.atomic.AtomicLong();
+    private transient long playbackId;
+    public long getPlaybackId() { return playbackId; }
+    public float getPlaybackTime() { return time; }
+
+    /** Seek accepted phase. Recovery never runs historic frame actions. */
+    public void applyPresentationCursor(float acceptedTime, boolean acceptedPlaying,
+            boolean acceptedLooping, Entity owner, boolean playCrossedFrames) {
+        time = acceptedTime;
+        looping = acceptedLooping;
+        animate(0, owner, true, playCrossedFrames);
+        playing = acceptedPlaying;
+        done = !acceptedPlaying;
+    }
+
 	/** Starting frame sprite index. */
 	public int start;
 
@@ -62,6 +77,7 @@ public class SpriteAnimation {
 	}
 	
 	public void play() {
+        playbackId = playbackIds.incrementAndGet();
 		currentTex = start - 1;
 		time = 0;
 		looping = false;
@@ -69,6 +85,7 @@ public class SpriteAnimation {
 	}
 	
 	public void loop() {
+        playbackId = playbackIds.incrementAndGet();
 		currentTex = start - 1;
 		time = 0;
 		looping = true;
@@ -76,7 +93,19 @@ public class SpriteAnimation {
 	}
 	
 	// advance time, do any actions, returns the current animation frame
-	public void animate(float delta, Entity owner) {
+    public void animatePresentation(float delta, Entity owner) {
+        animate(delta, owner, true, Game.instance == null || Game.instance.level == null
+                || Game.instance.level.nativeAnimationListener == null);
+    }
+
+	public void animate(float delta, Entity owner) { animate(delta, owner, false); }
+
+    private void animate(float delta, Entity owner, boolean presentationOnly) {
+        animate(delta, owner, presentationOnly, true);
+    }
+
+    private void animate(float delta, Entity owner, boolean presentationOnly, boolean runActions) {
+        if(!presentationOnly && owner instanceof Monster) ((Monster)owner).noteNativeAnimation(this);
 		
 		time += delta;
 		lastTex = currentTex;
@@ -151,7 +180,7 @@ public class SpriteAnimation {
 		}
 		
 		// do any actions that occurred between the last frame and this one
-		if(actions != null) {
+		if(runActions && actions != null) {
 			for(int i = lastTex + 1; i <= currentTex; i++) {
 				Integer curFrame = i;
 
@@ -162,7 +191,12 @@ public class SpriteAnimation {
 				Array<AnimationAction> actionList = actions.get(key);
 				if(actionList != null) {
 					for(AnimationAction action : actionList) {
-						action.doAction(owner);
+						if(!presentationOnly || action.isPresentationOnly()) {
+                            action.doAction(owner);
+                            if(!presentationOnly && action.isPresentationOnly() && Game.instance != null
+                                    && Game.instance.level != null && Game.instance.level.nativeAnimationListener != null)
+                                Game.instance.level.nativeAnimationListener.accept(owner, action);
+                        }
 					}
 				}
 			}

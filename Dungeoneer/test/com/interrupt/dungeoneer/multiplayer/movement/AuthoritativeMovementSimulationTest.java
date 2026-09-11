@@ -23,6 +23,92 @@ public class AuthoritativeMovementSimulationTest {
         @Override public void persist(HostPersistedState state) { }
     };
 
+    @Test public void onlyAcceptedFlightAllowsVerticalAimAndExpiryRestoresGravity() {
+        AuthoritativeMovementSimulation flying = simulation(1), walking = simulation(1);
+        flying.setNativeFlight(participant(1), true, 0.4f);
+        float start = flying.getState(participant(1)).getZ();
+        for(int tick = 1; tick <= 30; tick++) {
+            MovementInputCommand input = new MovementInputCommand(participant(1),
+                    new MovementInputFrame(tick, 1, 0, 0, false, 1f));
+            flying.applyCommand(tick, input, NO_OUTPUT); walking.applyCommand(tick, input, NO_OUTPUT);
+            flying.tick(tick, FIXED_DELTA, NO_OUTPUT); walking.tick(tick, FIXED_DELTA, NO_OUTPUT);
+        }
+        assertTrue(flying.getState(participant(1)).getZ() > start);
+        assertEquals(start, walking.getState(participant(1)).getZ(), 0);
+        flying.setNativeFlight(participant(1), false, 0.4f);
+        for(int tick = 31; tick <= 120; tick++) {
+            flying.applyCommand(tick, command(1, tick, 0, 0, 0, false), NO_OUTPUT);
+            flying.tick(tick, FIXED_DELTA, NO_OUTPUT);
+        }
+        assertEquals(start, flying.getState(participant(1)).getZ(), 0.00001f);
+    }
+
+    @Test public void acceptedNativeSlowChangesAuthoritativeTravelAndExpiryRestoresSpeed() {
+        AuthoritativeMovementSimulation normal = simulation(1), slowed = simulation(1);
+        slowed.setNativeSpeedModifier(participant(1), 0.5f);
+        float origin = normal.getState(participant(1)).getY();
+        for(int tick = 1; tick <= 30; tick++) {
+            normal.applyCommand(tick, command(1, tick, 1, 0, 0, false), NO_OUTPUT);
+            slowed.applyCommand(tick, command(1, tick, 1, 0, 0, false), NO_OUTPUT);
+            normal.tick(tick, FIXED_DELTA, NO_OUTPUT); slowed.tick(tick, FIXED_DELTA, NO_OUTPUT);
+        }
+        assertEquals((normal.getState(participant(1)).getY() - origin) * 0.5f,
+                slowed.getState(participant(1)).getY() - origin, 0.00001f);
+        slowed.setNativeSpeedModifier(participant(1), 1f);
+        for(int tick = 31; tick <= 60; tick++) {
+            slowed.applyCommand(tick, command(1, tick, 1, 0, 0, false), NO_OUTPUT);
+            slowed.tick(tick, FIXED_DELTA, NO_OUTPUT);
+        }
+        assertEquals(AuthoritativeMovementSimulation.MAX_SPEED,
+                slowed.getState(participant(1)).getVelocityY(), 0.001f);
+    }
+
+    @Test public void hostNativeImpulseMovesParticipantWithoutWaitingForClientInput() {
+        AuthoritativeMovementSimulation simulation = simulation(1);
+        MovementEntityState before = simulation.getState(participant(1));
+
+        simulation.applyNativeImpulse(participant(1), 0.1f, -0.05f, 0.08f);
+        simulation.tick(1L, FIXED_DELTA, NO_OUTPUT);
+
+        MovementEntityState after = simulation.getState(participant(1));
+        assertTrue(after.getX() > before.getX());
+        assertTrue(after.getY() < before.getY());
+        assertTrue(after.getZ() > before.getZ());
+        assertEquals(MovementState.AIRBORNE, after.getMovementState());
+    }
+
+    @Test public void disconnectFreezeDiscardsUnappliedNativeImpulse() {
+        AuthoritativeMovementSimulation simulation = simulation(1);
+        MovementEntityState before = simulation.getState(participant(1));
+
+        simulation.applyNativeImpulse(participant(1), 0.1f, 0.1f, 0.1f);
+        simulation.freezeParticipant(participant(1));
+        simulation.resumeParticipant(participant(1));
+        simulation.tick(1L, FIXED_DELTA, NO_OUTPUT);
+
+        MovementEntityState after = simulation.getState(participant(1));
+        assertEquals(before.getX(), after.getX(), 0f);
+        assertEquals(before.getY(), after.getY(), 0f);
+        assertEquals(before.getZ(), after.getZ(), 0f);
+    }
+
+    @Test public void hostNativeTeleportReplacesMotionAndSurvivesNextTick() {
+        AuthoritativeMovementSimulation simulation = simulation(1);
+        simulation.applyNativeImpulse(participant(1), 0.1f, 0.1f, 0.1f);
+
+        simulation.setNativePosition(participant(1), 4f, 5f, 0.5f);
+        simulation.tick(1L, FIXED_DELTA, NO_OUTPUT);
+
+        MovementEntityState state = simulation.getState(participant(1));
+        assertEquals(4f, state.getX(), 0f);
+        assertEquals(5f, state.getY(), 0f);
+        assertEquals(0.5f, state.getZ(), 0f);
+        assertEquals(0f, state.getVelocityX(), 0f);
+        assertEquals(0f, state.getVelocityY(), 0f);
+        assertEquals(0f, state.getVelocityZ(), 0f);
+        assertEquals(MovementState.IDLE, state.getMovementState());
+    }
+
     @Test
     public void duplicatedAndSkippedInputTicksDoNotDuplicateAuthoritativeMovement() {
         AuthoritativeMovementSimulation once = simulation(1);
