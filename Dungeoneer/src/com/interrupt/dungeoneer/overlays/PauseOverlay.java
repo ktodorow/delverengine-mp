@@ -81,7 +81,9 @@ public class PauseOverlay extends WindowOverlay {
 			@Override
 			public void clicked(InputEvent event, float x, float y) {
 				OverlayManager.instance.clear();
-				GameApplication.ShowMainMenuScreen();
+				// The main menu would strand a live session; closing the game ends it cleanly.
+				if(GameApplication.isDirectConnectSession()) com.badlogic.gdx.Gdx.app.exit();
+				else GameApplication.ShowMainMenuScreen();
 			}
 		});
 

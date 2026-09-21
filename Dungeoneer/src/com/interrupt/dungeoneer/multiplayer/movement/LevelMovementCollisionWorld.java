@@ -6,15 +6,57 @@ import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.generator.GenInfo.Markers;
 import com.interrupt.dungeoneer.tiles.Tile;
 
-/** Authoritative tile collision extracted from a Host-owned Level instance. */
+/**
+ * Authoritative collision for a Host-owned Level: its tiles plus solid native objects copied from
+ * the live floor, which block Participants, carry them on their tops, and let them step up.
+ */
 public final class LevelMovementCollisionWorld implements MovementCollisionWorld {
     private static final float RADIUS = 0.2f;
     private static final float HEIGHT = 0.65f;
     private static final float STEP_HEIGHT = 0.35f;
+    /** Host-local copies of floor objects; bounds a runaway copy, not network input. */
+    public static final int MAX_OBSTACLES = 16384;
     private static final float[] SPAWN_X_OFFSETS = { 0f, 0.4f, -0.4f, 0f };
     private static final float[] SPAWN_Y_OFFSETS = { 0f, 0f, 0f, 0.4f };
 
-    private volatile java.util.List<MovementObstacle> worldObstacles = java.util.Collections.emptyList();
+    /** Immutable obstacle set with a per-tile grid, swapped whole by the render thread. */
+    private static final class ObstacleIndex {
+        final java.util.List<MovementObstacle> sight;
+        final java.util.List<MovementObstacle>[] grid;
+        final int width, height;
+
+        @SuppressWarnings("unchecked")
+        ObstacleIndex(java.util.List<MovementObstacle> obstacles, int width, int height) {
+            this.width = width;
+            this.height = height;
+            grid = new java.util.List[width * height];
+            java.util.List<MovementObstacle> sightBlocking = new java.util.ArrayList<MovementObstacle>();
+            for(MovementObstacle obstacle : obstacles) {
+                if(obstacle.blocksSight) sightBlocking.add(obstacle);
+                int fromX = clampTile(obstacle.minX, width), toX = clampTile(obstacle.maxX, width);
+                int fromY = clampTile(obstacle.minY, height), toY = clampTile(obstacle.maxY, height);
+                for(int tileY = fromY; tileY <= toY; tileY++) {
+                    for(int tileX = fromX; tileX <= toX; tileX++) {
+                        int cell = tileX + tileY * width;
+                        if(grid[cell] == null) grid[cell] = new java.util.ArrayList<MovementObstacle>(2);
+                        grid[cell].add(obstacle);
+                    }
+                }
+            }
+            sight = java.util.Collections.unmodifiableList(sightBlocking);
+        }
+
+        java.util.List<MovementObstacle> at(int tileX, int tileY) {
+            if(tileX < 0 || tileY < 0 || tileX >= width || tileY >= height) return null;
+            return grid[tileX + tileY * width];
+        }
+
+        private static int clampTile(float value, int size) {
+            return Math.max(0, Math.min(size - 1, (int)Math.floor(value)));
+        }
+    }
+
+    private volatile ObstacleIndex obstacles;
     private final Level level;
     private final Vector3 collision = new Vector3(RADIUS, RADIUS, HEIGHT);
     private final float baseSpawnX;
@@ -27,11 +69,12 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
             throw new IllegalArgumentException("Host movement Level dimensions must be positive.");
         }
         this.level = level;
-        int startX = level.playerStartX == null ? level.width / 2 : level.playerStartX;
-        int startY = level.playerStartY == null ? level.height / 2 : level.playerStartY;
+        obstacles = new ObstacleIndex(java.util.Collections.<MovementObstacle>emptyList(),
+                level.width, level.height);
+        Integer startX = level.playerStartX, startY = level.playerStartY;
         Integer startRotation = level.playerStartRot;
-        if((level.playerStartX == null || level.playerStartY == null)
-                && level.editorMarkers != null) {
+        EditorMarker arrival = null;
+        if((startX == null || startY == null) && level.editorMarkers != null) {
             for(EditorMarker marker : level.editorMarkers) {
                 if(marker.type == Markers.playerStart) {
                     startX = marker.x;
@@ -39,12 +82,29 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
                     startRotation = marker.rot;
                     break;
                 }
+                if(marker.type == Markers.stairUp && arrival == null) arrival = marker;
             }
         }
-        baseSpawnX = clamp(startX + 0.5f, RADIUS, level.width - RADIUS);
-        baseSpawnY = clamp(startY + 0.5f, RADIUS, level.height - RADIUS);
-        baseRotation = startRotation == null ? 0f
-                : (float)Math.toRadians(-(startRotation + 180f));
+        float spawnX, spawnY, rotation;
+        if(startX != null && startY != null) {
+            spawnX = startX + 0.5f;
+            spawnY = startY + 0.5f;
+            rotation = startRotation == null ? 0f : (float)Math.toRadians(-(startRotation + 180f));
+        }
+        else if(arrival != null) {
+            // Native Game.changeLevel: an arriving Player stands on the up stairs, facing away.
+            spawnX = arrival.x + 0.5f;
+            spawnY = arrival.y + 0.55f;
+            rotation = (float)Math.PI;
+        }
+        else {
+            spawnX = level.width / 2 + 0.5f;
+            spawnY = level.height / 2 + 0.5f;
+            rotation = 0f;
+        }
+        baseSpawnX = clamp(spawnX, RADIUS, level.width - RADIUS);
+        baseSpawnY = clamp(spawnY, RADIUS, level.height - RADIUS);
+        baseRotation = rotation;
     }
 
     @Override
@@ -71,18 +131,27 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
         if(!finite(x) || !finite(y) || !finite(z)
                 || x < RADIUS || x > level.width - RADIUS
                 || y < RADIUS || y > level.height - RADIUS) return false;
-        for(MovementObstacle obstacle : worldObstacles) {
-            if(obstacle.overlaps(x, y, z, RADIUS, HEIGHT)) return false;
+        ObstacleIndex index = obstacles;
+        for(int tileY = (int)Math.floor(y - RADIUS); tileY <= (int)Math.floor(y + RADIUS); tileY++) {
+            for(int tileX = (int)Math.floor(x - RADIUS); tileX <= (int)Math.floor(x + RADIUS); tileX++) {
+                java.util.List<MovementObstacle> cell = index.at(tileX, tileY);
+                if(cell == null) continue;
+                for(MovementObstacle obstacle : cell) {
+                    // A low native object is climbed onto; getFloorZ then lifts the Participant.
+                    if(obstacle.overlaps(x, y, z, RADIUS, HEIGHT)
+                            && !obstacle.canStepOnto(z, STEP_HEIGHT)) return false;
+                }
+            }
         }
         return level.isFree(x, y, z, collision, STEP_HEIGHT, false, null);
     }
 
     public void setWorldObstacles(java.util.List<MovementObstacle> obstacles) {
-        if(obstacles == null || obstacles.size() > 4096) {
-            throw new IllegalArgumentException("Door obstacle count is outside bounds.");
+        if(obstacles == null || obstacles.size() > MAX_OBSTACLES) {
+            throw new IllegalArgumentException("World obstacle count is outside bounds.");
         }
-        worldObstacles = java.util.Collections.unmodifiableList(
-                new java.util.ArrayList<MovementObstacle>(obstacles));
+        this.obstacles = new ObstacleIndex(new java.util.ArrayList<MovementObstacle>(obstacles),
+                level.width, level.height);
     }
 
     public void setDoorObstacles(java.util.List<MovementObstacle> obstacles) {
@@ -96,13 +165,26 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
                 || y < RADIUS || y > level.height - RADIUS) return currentZ;
         Tile tile = level.getTile((int)Math.floor(x), (int)Math.floor(y));
         if(tile == null) return currentZ;
-        return level.maxFloorHeight(x, y, currentZ, RADIUS) + 0.5f;
+        float floor = level.maxFloorHeight(x, y, currentZ, RADIUS) + 0.5f;
+        // Native Player stands on the highest solid object below its feet or within one step.
+        ObstacleIndex index = obstacles;
+        for(int tileY = (int)Math.floor(y - RADIUS); tileY <= (int)Math.floor(y + RADIUS); tileY++) {
+            for(int tileX = (int)Math.floor(x - RADIUS); tileX <= (int)Math.floor(x + RADIUS); tileX++) {
+                java.util.List<MovementObstacle> cell = index.at(tileX, tileY);
+                if(cell == null) continue;
+                for(MovementObstacle obstacle : cell) {
+                    if(obstacle.standable && obstacle.maxZ > floor && obstacle.under(x, y, RADIUS)
+                            && obstacle.maxZ - currentZ < STEP_HEIGHT) floor = obstacle.maxZ;
+                }
+            }
+        }
+        return floor;
     }
 
     @Override
     public boolean hasLineOfSight(float fromX, float fromY, float toX, float toY) {
         if(!finite(fromX) || !finite(fromY) || !finite(toX) || !finite(toY)) return false;
-        for(MovementObstacle obstacle : worldObstacles) {
+        for(MovementObstacle obstacle : obstacles.sight) {
             if(obstacle.blocksSegment(fromX, fromY, toX, toY)) return false;
         }
         return level.canSee(fromX, fromY, toX, toY);

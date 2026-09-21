@@ -139,6 +139,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     private long breakableRevision;
     private Game game;
     private Level objectLevel;
+    private final com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles movementObstacles =
+            new com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles();
     private long objectGeneration = -1L;
     private ParticipantId localId;
     private long nextRequest;
@@ -254,15 +256,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 }
             }
             host.publishPhysicalItems();
-            List<MovementObstacle> obstacles =
-                    new ArrayList<MovementObstacle>();
             for(Map.Entry<Long, Entity> entry : objects.entrySet()) {
                 Entity entity = entry.getValue();
-                if(entity.isActive && entity.isSolid
-                        && (entity instanceof Door || entity instanceof Breakable)) {
-                    obstacles.add(new MovementObstacle(entity.x, entity.y, entity.z,
-                            entity.collision.x, entity.collision.y, entity.collision.z));
-                }
                 if(entity instanceof Door) {
                     DoorSnapshot state = ((Door)entity).snapshot(
                             entry.getKey(), doorRevision + 1);
@@ -285,7 +280,9 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                     host.publishBreakable(state);
                 }
             }
-            host.setWorldObstacles(obstacles);
+            // Walkways, columns, lifts, doors and crates the native Player collides with.
+            List<MovementObstacle> obstacles = movementObstacles.changed(game.level);
+            if(obstacles != null) host.setWorldObstacles(obstacles);
         }
     }
 

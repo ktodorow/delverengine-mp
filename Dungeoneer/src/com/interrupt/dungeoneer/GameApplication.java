@@ -352,6 +352,14 @@ public class GameApplication extends Game {
         return directConnectPeer;
     }
 
+    /**
+     * Direct Connect floors start through DelvEdit's play-test Game(Level), but they are a live
+     * session: editor-only controls such as "Esc stops the play-test" must not apply.
+     */
+    public static boolean isDirectConnectSession() {
+        return instance != null && instance.directConnectPeer != null;
+    }
+
     private void createGameplay(com.interrupt.dungeoneer.game.Game.StartMode startMode,
             boolean launchImmediately) {
 		instance = this;

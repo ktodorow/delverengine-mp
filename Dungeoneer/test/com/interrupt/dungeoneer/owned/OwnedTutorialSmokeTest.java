@@ -13,14 +13,8 @@ import com.interrupt.dungeoneer.entities.Item;
 import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.entities.ItemSpawner;
 import com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController;
-import com.interrupt.dungeoneer.multiplayer.movement.AuthoritativeMovementSimulation;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
-import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
-import com.interrupt.dungeoneer.multiplayer.movement.MovementInputCommand;
-import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
-import com.interrupt.dungeoneer.multiplayer.movement.MovementSpawn;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
-import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
@@ -84,40 +78,6 @@ public class OwnedTutorialSmokeTest {
         assertTrue("Tutorial width must be positive", tutorial.width > 0);
         assertTrue("Tutorial height must be positive", tutorial.height > 0);
         assertNotNull("Tutorial tiles were not materialized", tutorial.tiles);
-    }
-
-    @Test
-    public void authoritativeMovementTraversesShopInterstitialTowardNearestShop() throws Exception {
-        String ownedCopyPath = System.getenv("OWNED_GAME_COPY_TEST");
-        Assume.assumeTrue("Set OWNED_GAME_COPY_TEST to run retail integration test.",
-                ownedCopyPath != null && !ownedCopyPath.trim().isEmpty());
-        OwnedGameCopyMount.mount(KnownV108OwnedGameCopies.validator().validate(new File(ownedCopyPath)));
-        Level level = KryoSerializer.loadLevel(OwnedGameCopyMount.resolve("levels/shop-interstitial.bin"));
-        assertNotNull(level);
-        LevelMovementCollisionWorld world = new LevelMovementCollisionWorld(level);
-        ParticipantId participant = new ParticipantId("campaign-slot-2");
-        MovementEntityDescriptor descriptor = new MovementEntityDescriptor(1L,
-                new NetworkEntityId(2L), participant, 2, "Client", "humanoid-2");
-        AuthoritativeMovementSimulation simulation = new AuthoritativeMovementSimulation(
-                world, Collections.singletonList(descriptor));
-        MovementSpawn spawn = world.getSpawn(2);
-
-        for(int tick = 1; tick <= 90; tick++) {
-            simulation.applyCommand(tick, new MovementInputCommand(participant,
-                    new MovementInputFrame(tick, 0f, -1f, 0f, false)), null);
-            simulation.tick(tick, 1f / 60f, null);
-        }
-
-        MovementEntityState state = simulation.getState(participant);
-        assertTrue("Authoritative player never moved west from shop-floor spawn",
-                state.getX() < spawn.getX() - 1f);
-        assertTrue("Authoritative player cannot approach nearest shop",
-                distanceSquared(state.getX(), state.getY(), 13.772079f, 16.183084f) < 1.21f);
-    }
-
-    private static float distanceSquared(float ax, float ay, float bx, float by) {
-        float dx = ax - bx, dy = ay - by;
-        return dx * dx + dy * dy;
     }
 
     @Test

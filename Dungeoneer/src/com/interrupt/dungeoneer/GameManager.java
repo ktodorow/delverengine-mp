@@ -66,6 +66,11 @@ public class GameManager {
 		Options.instance.uiSize = 0.8f;
 	}
 
+	/** DelvEdit play-tests stop on Esc; a Direct Connect session opens the ordinary pause menu. */
+	static boolean escapeEndsEditorPlaytest() {
+		return Game.inEditor && !GameApplication.isDirectConnectSession();
+	}
+
 	private float time_since_last_tick = 0f;
 	public void tick(float delta) {
 		try {
@@ -86,7 +91,7 @@ public class GameManager {
 					OverlayManager.instance.push(new PauseOverlay());
 				} else if (Gdx.input.isKeyPressed(Input.Keys.ESCAPE) || this.myGameApp.input.gamepadManager.controllerState.buttonEvents.contains(Actions.Action.PAUSE, true)) {
 
-					if (Game.inEditor) {
+					if (escapeEndsEditorPlaytest()) {
 						GameApplication.editorRunning = false;
 						running = false;
 						GameManager.getGame().level.preSaveCleanup();
@@ -108,6 +113,8 @@ public class GameManager {
 
 						if (!Game.ignoreEscape) {
 							OverlayManager.instance.push(new PauseOverlay());
+							// A Direct Connect world keeps ticking under the menu; the held key must not close it.
+							Game.ignoreEscape = true;
 						}
 					}
 				} else if (!Gdx.input.isKeyPressed(Input.Keys.ESCAPE) && Game.ignoreEscape)

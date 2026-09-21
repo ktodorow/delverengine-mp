@@ -13,6 +13,16 @@ import com.interrupt.dungeoneer.game.Options;
 import com.interrupt.dungeoneer.game.Progression;
 import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.gfx.TextureAtlas;
+import com.interrupt.dungeoneer.multiplayer.movement.AuthoritativeMovementSimulation;
+import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementInputCommand;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSpawn;
+import com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles;
+import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.owned.KnownV108OwnedGameCopies;
 import com.interrupt.dungeoneer.owned.OwnedGameCopyMount;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
@@ -29,6 +39,7 @@ import org.junit.Test;
 import org.objenesis.ObjenesisStd;
 
 import java.io.File;
+import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
@@ -126,7 +137,52 @@ public class OwnedSharedFloorBuildTest {
                 host.getCount(SharedFloorFingerprint.Category.WORLD_OBJECTS) > 0);
     }
 
+    @Test public void participantsCrossShopWalkwaysFromArrivalStairsWithoutFalling() {
+        Level live = buildLevel(0x5EEDL, 3, 1f, 5L);
+        // Host movement keeps its own tile copy, as GameApplication loads it at Host start.
+        LevelMovementCollisionWorld world = new LevelMovementCollisionWorld(
+                KryoSerializer.loadLevel(OwnedGameCopyMount.resolve("levels/shop-interstitial.bin")));
+        world.setWorldObstacles(new NativeMovementObstacles().changed(live));
+        ParticipantId participant = new ParticipantId("campaign-slot-1");
+        AuthoritativeMovementSimulation simulation = new AuthoritativeMovementSimulation(world,
+                Collections.singletonList(new MovementEntityDescriptor(1L, new NetworkEntityId(1L),
+                        participant, 1, "Host", "humanoid-1")));
+        MovementSpawn spawn = world.getSpawn(1);
+        assertEquals("Arrival on the up stairs", 15.5f, spawn.getX(), 0.01f);
+        assertEquals(25.55f, spawn.getY(), 0.01f);
+
+        // South walkway between the entrance pillars, around the island well, north walkway to the door.
+        float[][] route = { { 15.5f, 17.2f }, { 14.6f, 16.4f }, { 14.6f, 14.6f },
+                { 15.5f, 13.9f }, { 15.5f, 8.3f } };
+        int waypoint = 0;
+        float lowest = Float.MAX_VALUE;
+        for(int tick = 1; tick <= 1200 && waypoint < route.length; tick++) {
+            MovementEntityState state = simulation.getState(participant);
+            float dx = route[waypoint][0] - state.getX(), dy = route[waypoint][1] - state.getY();
+            if(dx * dx + dy * dy < 0.15f * 0.15f) { waypoint++; continue; }
+            // Host movement: velocity x = forward * sin(rotation), y = forward * cos(rotation).
+            simulation.applyCommand(tick, new MovementInputCommand(participant,
+                    new MovementInputFrame(tick, 1f, 0f, (float)Math.atan2(dx, dy), false)), null);
+            simulation.tick(tick, 1f / 60f, null);
+            lowest = Math.min(lowest, simulation.getState(participant).getZ());
+        }
+
+        MovementEntityState state = simulation.getState(participant);
+        assertTrue("Participant fell into the shop pit; lowest height " + lowest, lowest > -0.5f);
+        assertTrue("Participant stopped at (" + state.getX() + ", " + state.getY()
+                + ") before reaching route point " + waypoint, waypoint >= route.length - 1);
+        assertTrue("Participant must reach the north walkway by the door; reached y "
+                + state.getY(), state.getY() < 9f);
+    }
+
     private SharedFloorFingerprint build(Long seed, int detail, float quality, long history) {
+        Level level = buildLevel(seed, detail, quality, history);
+        return lastBuild == null ? SharedFloorFingerprint.capture(level) : lastBuild.getFingerprint();
+    }
+
+    private SharedFloorBuild lastBuild;
+
+    private Level buildLevel(Long seed, int detail, float quality, long history) {
         Options.instance.graphicsDetailLevel = detail;
         Options.instance.gfxQuality = quality;
         Game.rand.setSeed(history);
@@ -141,9 +197,9 @@ public class OwnedSharedFloorBuildTest {
                 OwnedGameCopyMount.resolve("data/" + Game.gameData.playerDataFile));
         game.progression = new Progression();
         Game.instance = game;
-        SharedFloorBuild build = seed == null ? null : new SharedFloorBuild(seed);
-        level.sharedFloorBuild = build;
+        lastBuild = seed == null ? null : new SharedFloorBuild(seed);
+        level.sharedFloorBuild = lastBuild;
         level.loadFromEditor();
-        return build == null ? SharedFloorFingerprint.capture(level) : build.getFingerprint();
+        return level;
     }
 }
