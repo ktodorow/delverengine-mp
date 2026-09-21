@@ -5,8 +5,11 @@ import com.interrupt.dungeoneer.entities.items.Armor;
 import com.interrupt.dungeoneer.entities.items.Potion;
 import com.interrupt.dungeoneer.entities.items.Scroll;
 import com.interrupt.dungeoneer.entities.spells.Spell;
+import com.interrupt.dungeoneer.entities.triggers.TriggeredShop;
 import com.badlogic.gdx.math.Vector3;
 import com.interrupt.dungeoneer.game.*;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
+import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.ui.*;
@@ -24,6 +27,7 @@ public class NativeOwnershipRegressionTest {
     private final List<Object[]> requestArguments = new ArrayList<>();
     private final List<ItemActionResult> results = new ArrayList<>();
     private final List<BreakableSnapshot> breakables = new ArrayList<>();
+    private final List<String> compatibilityFailures = new ArrayList<>();
     private long nativeGeneration = 1L;
     private com.badlogic.gdx.Application previousApp;
     private Integer hoveredSlot = 0;
@@ -65,6 +69,9 @@ public class NativeOwnershipRegressionTest {
             }
             if(method.getName().equals("submitItemAction")) {
                 requests.add((ItemAction)args[1]); requestArguments.add(args); return null;
+            }
+            if(method.getName().equals("failNativePresentation")) {
+                compatibilityFailures.add((String)args[0]); return null;
             }
             if(method.getReturnType() == List.class) return Collections.emptyList();
             if(method.getReturnType() == boolean.class) return false;
@@ -209,6 +216,30 @@ public class NativeOwnershipRegressionTest {
         assertEquals(3, states.get(0).properties.quantity);
     }
 
+    @Test public void missingHostItemTemplateFailsCompatibilityWithoutCrashingRenderLoop() {
+        states.add(new PhysicalItemState(42L, 1L, "missing-template", owner,
+                1f, 1f, 0f));
+
+        controller.prepare(game);
+
+        assertEquals(Collections.singletonList(
+                "Host item template is unavailable in local content: missing-template"),
+                compatibilityFailures);
+    }
+
+    @Test public void missingHostItemModificationFailsCompatibilityWithoutCrashingRenderLoop()
+            throws Exception {
+        Armor template = new Armor();
+        this.<Map<String, Item>>field("templates").put("armor-template", template);
+        states.add(new PhysicalItemState(43L, 1L, "armor-template", owner,
+                1f, 1f, 0f, new ItemProperties(2, 1, "missing-enchantment", "", 1)));
+
+        controller.prepare(game);
+
+        assertEquals(Collections.singletonList(
+                "Unknown Host item modification: missing-enchantment"), compatibilityFailures);
+    }
+
     @Test public void consumedMissileTombstoneDoesNotDeactivateItsInFlightReplica()
             throws Exception {
         com.interrupt.dungeoneer.entities.projectiles.Missile arrow =
@@ -265,14 +296,91 @@ public class NativeOwnershipRegressionTest {
         next.entities.add(nextCrate);
         game.level = next;
         nativeGeneration++;
-        breakables.set(0, new BreakableSnapshot(1000000L, 1L, 6, true, true,
+
+        controller.prepare(game);
+
+        // Shared identity follows level content, so each peer names this object the same way.
+        long rebound = controller.worldObjectIdentity(nextCrate);
+        assertTrue(rebound > 0L);
+        assertSame(nextCrate, this.<Map<Long, Entity>>field("objects").get(rebound));
+        breakables.set(0, new BreakableSnapshot(rebound, 1L, 6, true, true,
                 3f, 1f, 0.5f, 0f, 0f, 0f, 0f, 0f, 0f));
 
         controller.prepare(game);
 
         assertEquals(6, nextCrate.hp);
         assertEquals(3f, nextCrate.x, 0f);
-        assertSame(nextCrate, this.<Map<Long, Entity>>field("objects").get(1000000L));
+    }
+
+    @Test public void distinctSamePositionShopsBothSubmitUseToHost() {
+        TriggeredShop first = new TriggeredShop();
+        first.id = "shop-a";
+        first.x = 2f;
+        first.y = 2f;
+        TriggeredShop second = new TriggeredShop();
+        second.id = "shop-b";
+        second.x = 2f;
+        second.y = 2f;
+        game.level.entities.add(first);
+        game.level.entities.add(second);
+
+        NetworkEntityId localEntity = new NetworkEntityId(11L);
+        MovementEntityDescriptor descriptor = new MovementEntityDescriptor(
+                1, localEntity, owner, 3, "Host", "humanoid-1");
+        List<Object[]> submitted = new ArrayList<Object[]>();
+        DirectConnectPeer peer = (DirectConnectPeer)Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{DirectConnectPeer.class},
+                (proxy, method, args) -> {
+                    if(method.getName().equals("getLocalMovementEntityId")) return localEntity;
+                    if(method.getName().equals("getMovementEntities")) {
+                        return Collections.singletonList(descriptor);
+                    }
+                    if(method.getName().equals("getPhysicalItems")
+                            || method.getName().equals("getMovementSnapshots")
+                            || method.getName().equals("drainItemActionResults")
+                            || method.getName().equals("drainDoorFeedback")
+                            || method.getName().equals("getDoorSnapshots")
+                            || method.getName().equals("getBreakableSnapshots")) {
+                        return Collections.emptyList();
+                    }
+                    if(method.getName().equals("getNativeWorldGeneration")) return 1L;
+                    if(method.getName().equals("getNextItemRequestId")) return 1L;
+                    if(method.getName().equals("submitItemAction")) {
+                        submitted.add(args);
+                        return null;
+                    }
+                    if(method.getReturnType() == boolean.class) return false;
+                    if(method.getReturnType() == int.class) return 0;
+                    if(method.getReturnType() == long.class) return 0L;
+                    return null;
+                });
+        DirectConnectItemController production = new DirectConnectItemController(peer);
+
+        production.prepare(game);
+
+        assertTrue(production.worldObjectIdentity(first) > 0L);
+        assertTrue(production.worldObjectIdentity(second) > 0L);
+        assertNotEquals(production.worldObjectIdentity(first),
+                production.worldObjectIdentity(second));
+        assertTrue(production.use(second, 0f, 0f));
+        assertEquals(1, submitted.size());
+        assertEquals(ItemAction.USE_OBJECT, submitted.get(0)[1]);
+    }
+
+    @Test public void generatedGroupPrefixDoesNotChangeSharedWorldIdentity() throws Exception {
+        TriggeredShop hostShop = new TriggeredShop();
+        hostShop.id = "01234567-89ab-cdef-0123-456789abcdef_shop";
+        hostShop.x = 2f;
+        hostShop.y = 3f;
+        hostShop.z = 0.5f;
+        TriggeredShop clientShop = new TriggeredShop();
+        clientShop.id = "fedcba98-7654-3210-fedc-ba9876543210_shop";
+        clientShop.x = hostShop.x;
+        clientShop.y = hostShop.y;
+        clientShop.z = hostShop.z;
+        assertEquals("Group.init assigns a different UUID prefix on each peer",
+                com.interrupt.dungeoneer.multiplayer.floor.SharedFloorIdentity.placementKey(hostShop),
+                com.interrupt.dungeoneer.multiplayer.floor.SharedFloorIdentity.placementKey(clientShop));
     }
 
     @Test public void nativeArmorEquipDoesNotReportConsumptionOrResurrectInBackpack() throws Exception {

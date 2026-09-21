@@ -77,4 +77,17 @@ public class BagUpgrade extends Item {
 
         Audio.playSound("inventory/open_inventory.mp3", 0.9f);
     }
+
+    /** Multiplayer buyer feedback; Host Campaign Slot progression adds the slot itself. */
+    public void presentUpgrade() {
+        String upgradeStr = StringManager.get(bagUpgradeType == BagUpgradeType.HOTBAR
+                ? "message.beltupgrade" : "message.bagupgrade");
+        if (persistentUpgrade) {
+            Game.ShowMessage(StringManager.get("message.soulbound") + "\n" + upgradeStr, 5f);
+        }
+        else {
+            Game.ShowMessage(upgradeStr, 3f);
+        }
+        Audio.playSound("inventory/open_inventory.mp3", 0.9f);
+    }
 }

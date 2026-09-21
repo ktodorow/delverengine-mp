@@ -28,6 +28,10 @@ public final class AuthoritativeItemWorld {
         default boolean consumeItem(ItemRequest request, ParticipantContext participant) {
             return consumeItem(request.entityId, participant);
         }
+        /** Divides one accepted gold pile. False leaves the pile in the world. */
+        default boolean acquireGold(ParticipantContext participant, int amount) { return false; }
+        /** PURCHASE and CHOOSE_STAT after duplicate and activity checks. */
+        default boolean economyAction(ItemRequest request, ParticipantContext participant) { return false; }
     }
 
     private final Map<Long, PhysicalItemState> items =
@@ -38,6 +42,7 @@ public final class AuthoritativeItemWorld {
             new LinkedHashMap<ParticipantId, Integer>();
     private final Map<Long, String> equipmentSlots = new LinkedHashMap<Long, String>();
     private final java.util.Set<Long> keys = new java.util.HashSet<Long>();
+    private final java.util.Set<Long> gold = new java.util.HashSet<Long>();
     private int partyKeys;
     private long keyRevision;
     private long nextEntityId = 1L;
@@ -93,6 +98,10 @@ public final class AuthoritativeItemWorld {
             return boundary.useObject(request.entityId, participant)
                     ? Outcome.ACCEPTED : Outcome.OBJECT_REJECTED;
         }
+        if(request.action == ItemAction.PURCHASE || request.action == ItemAction.CHOOSE_STAT) {
+            return boundary.economyAction(request, participant)
+                    ? Outcome.ACCEPTED : Outcome.OBJECT_REJECTED;
+        }
         PhysicalItemState item = items.get(request.entityId);
         if(item == null || item.consumed) return Outcome.UNKNOWN_ENTITY;
         if(request.action == ItemAction.PICKUP) {
@@ -110,6 +119,13 @@ public final class AuthoritativeItemWorld {
                 items.put(item.entityId, new PhysicalItemState(item.entityId, ++revision,
                         item.templateId, null, item.x, item.y, item.z, item.properties, true));
                 partyKeys++; keyRevision++;
+                return Outcome.ACCEPTED;
+            }
+            if(gold.contains(item.entityId)) {
+                // Gold never enters a backpack: Host divides the pile, then tombstones it once.
+                if(!boundary.acquireGold(participant, item.properties.quantity)) return Outcome.OBJECT_REJECTED;
+                items.put(item.entityId, new PhysicalItemState(item.entityId, ++revision,
+                        item.templateId, null, item.x, item.y, item.z, item.properties, true));
                 return Outcome.ACCEPTED;
             }
             if(backpackCount(actor) >= capacities.get(actor)) return Outcome.INVENTORY_FULL;
@@ -171,6 +187,22 @@ public final class AuthoritativeItemWorld {
     public synchronized void registerKey(long id) {
         if(!items.containsKey(id)) throw new IllegalArgumentException("Unknown key.");
         keys.add(id);
+    }
+
+    /** Native Host catalogue marks gold piles; pickup divides instead of owning them. */
+    public synchronized void registerGold(long id) {
+        if(!items.containsKey(id)) throw new IllegalArgumentException("Unknown gold.");
+        gold.add(id);
+    }
+
+    public synchronized boolean hasBackpackSpace(ParticipantId owner) {
+        Integer capacity = owner == null ? null : capacities.get(owner);
+        return capacity != null && backpackCount(owner) < capacity;
+    }
+
+    public synchronized int getCapacity(ParticipantId owner) {
+        Integer capacity = owner == null ? null : capacities.get(owner);
+        return capacity == null ? 0 : capacity;
     }
 
     public synchronized void initializePartyKeys(int count) {

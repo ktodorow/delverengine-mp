@@ -1,4 +1,5 @@
 package com.interrupt.dungeoneer.multiplayer.network;
+import com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint;
 import com.interrupt.dungeoneer.multiplayer.items.ItemActionResult;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionPresentation;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicState;
@@ -128,7 +129,8 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Participant Host authority for explicit lobby approval and persistent Campaign Slots. */
-public final class DirectConnectHost implements DirectConnectPeer, NativeCombatAuthority {
+public final class DirectConnectHost implements DirectConnectPeer, NativeCombatAuthority,
+        com.interrupt.dungeoneer.multiplayer.economy.EconomyHost {
     private static final int SNAPSHOT_INTERVAL_TICKS =
             AuthoritativeHostSession.TICKS_PER_SECOND / 20;
     public static final long RECONNECT_GRACE_TICKS =
@@ -143,6 +145,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private final EventLoopGroup acceptGroup = new NioEventLoopGroup(1);
     private final EventLoopGroup networkGroup = new NioEventLoopGroup(2);
     private final SecureRandom random = new SecureRandom();
+    /** One seed per Host session: every peer builds the announced floor from it. */
+    private final long sharedFloorSeed = nextNonZeroLong(random);
+    private SharedFloorFingerprint hostFloorFingerprint;
     private final long reconnectGraceTicks;
     private final AtomicBoolean closing = new AtomicBoolean(false);
     private final CombatPresentationJournal combatPresentations =
@@ -182,6 +187,13 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private volatile PartyCommunicationState partyCommunication =
             PartyCommunicationState.initial();
     private final AuthoritativeItemWorld itemWorld = new AuthoritativeItemWorld();
+    private final com.interrupt.dungeoneer.multiplayer.economy.AuthoritativeEconomy economy =
+            new com.interrupt.dungeoneer.multiplayer.economy.AuthoritativeEconomy();
+    private final Map<ParticipantId, Long> publishedProgressRevisions = new LinkedHashMap<ParticipantId, Long>();
+    private final Map<String, Long> publishedShopRevisions = new LinkedHashMap<String, Long>();
+    private long publishedShopGeneration = -1L;
+    private final java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> shopOpenings =
+            new java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening>();
     private final List<ItemRequest> pendingItemRequests = new ArrayList<ItemRequest>();
     private final Map<Long, Long> publishedItemRevisions = new LinkedHashMap<Long, Long>();
     private final Map<String, ActorEffectsSnapshot> monsterEffects = new LinkedHashMap<String, ActorEffectsSnapshot>();
@@ -504,19 +516,61 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         if(launcherIdentity == null) return false;
         RemoteConnection connection = findConnectionValue(launcherIdentity);
         if(connection == null) return false;
+        removeConnection(connection,
+                "Host removed connection. Campaign Slot and progression remain safe.",
+                "Host kicked a Participant; persistent Campaign Slot was preserved.");
+        return true;
+    }
+
+    private void removeConnection(RemoteConnection connection, String participantReason,
+            String hostMessage) {
         connection.kicked = true;
         if(sessionStarted && connection.movementDescriptor != null) {
             returnParticipantToCampaignSlot(connection.movementDescriptor,
                     "Host removed " + connection.movementDescriptor.getNickname() + " from Active Floor.");
         }
-        connection.channel.writeAndFlush(new ServerDisconnect(
-                "Host removed connection. Campaign Slot and progression remain safe."))
+        connection.channel.writeAndFlush(new ServerDisconnect(boundedReason(participantReason)))
                 .addListener(ChannelFutureListener.CLOSE);
         status = status(sessionStarted ? DirectConnectPhase.READY : DirectConnectPhase.LISTENING,
-                "Host kicked a Participant; persistent Campaign Slot was preserved.",
-                connection.launcherIdentity.getFingerprint(),
+                boundedReason(hostMessage), connection.launcherIdentity.getFingerprint(),
                 sessionStarted ? sharedFloorId() : null);
-        return true;
+    }
+
+    @Override public long getSharedFloorSeed() { return sharedFloorSeed; }
+
+    /** Host's own floor build; verifies clients that reported before Host finished building. */
+    @Override public synchronized void recordSharedFloorFingerprint(SharedFloorFingerprint fingerprint) {
+        if(fingerprint == null || hostFloorFingerprint != null) return;
+        hostFloorFingerprint = fingerprint;
+        for(RemoteConnection connection : new ArrayList<RemoteConnection>(connections.values())) {
+            verifySharedFloor(connection);
+        }
+    }
+
+    private synchronized void sharedFloorReported(ChannelHandlerContext context,
+            DirectConnectWire.SharedFloorFingerprintMessage message) {
+        RemoteConnection connection = activeConnection(context, message.sessionId, "Shared floor report");
+        if(connection == null || connection.reconnectGrace != null) return;
+        connection.floorFingerprint = message.fingerprint;
+        verifySharedFloor(connection);
+    }
+
+    /** A client whose native floor differs would see and hit objects Host does not have. */
+    private void verifySharedFloor(RemoteConnection connection) {
+        SharedFloorFingerprint local = connection.floorFingerprint;
+        if(hostFloorFingerprint == null || local == null || connection.kicked
+                || connection.movementDescriptor == null) return;
+        if(hostFloorFingerprint.equals(local)) return;
+        String differences = hostFloorFingerprint.describeDifferences(local);
+        String nickname = connection.movementDescriptor.getNickname();
+        if(com.badlogic.gdx.Gdx.app != null) com.badlogic.gdx.Gdx.app.error("DelverMultiplayer",
+                "Shared floor of " + nickname
+                + " differs from Host (Host/client): " + differences);
+        removeConnection(connection,
+                "Shared floor build differs from Host (Host/you: " + differences
+                        + "). Session stopped so worlds cannot diverge; Campaign Slot is safe.",
+                "Removed " + nickname + ": shared floor build differs (Host/client: "
+                        + differences + ").");
     }
 
     public synchronized List<PendingSlotClaim> getPendingClaims() {
@@ -606,7 +660,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 connection.channel.writeAndFlush(new SessionReady(sessionId, participantCount,
                         combatEncounter.getNextRequestId(
                                 connection.movementDescriptor.getParticipantId()),
-                        sharedFloorId()));
+                        sharedFloorId(), sharedFloorSeed));
             }
         }
         startMovementTicks();
@@ -730,12 +784,18 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             DirectConnectWire.ItemRequestMessage message) {
         RemoteConnection connection = activeConnection(context, message.sessionId, "Item action");
         if(connection == null || connection.reconnectGrace != null) return;
+        if(message.worldGeneration != nativeWorldGeneration) {
+            publishItemActionResult(connection.movementDescriptor.getParticipantId(),
+                    new ItemActionResult(message.requestId, message.entityId, false));
+            return;
+        }
         if(isSessionPaused()) {
             publishItemActionResult(connection.movementDescriptor.getParticipantId(),
                     new ItemActionResult(message.requestId, message.entityId, false)); return;
         }
         enqueueItemRequest(new ItemRequest(connection.movementDescriptor.getParticipantId(),
-                message.requestId, message.action, message.entityId, message.condition, message.quantity,
+                message.requestId, message.worldGeneration, message.action, message.entityId,
+                message.condition, message.quantity,
                 message.hasAim, message.aimX, message.aimY, message.aimZ));
     }
 
@@ -783,8 +843,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         if(isSessionPaused()) {
             publishItemActionResult(descriptor.getParticipantId(), new ItemActionResult(requestId, entityId, false)); return;
         }
-        enqueueItemRequest(new ItemRequest(descriptor.getParticipantId(), requestId, action,
-                entityId, condition, quantity, hasAim, aimX, aimY, aimZ));
+        enqueueItemRequest(new ItemRequest(descriptor.getParticipantId(), requestId,
+                nativeWorldGeneration, action, entityId, condition, quantity,
+                hasAim, aimX, aimY, aimZ));
     }
 
     @Override
@@ -898,6 +959,70 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     @Override public synchronized void setNativeParticipantPosition(ParticipantId participant,
             float x, float y, float z) {
         if(movementSimulation != null) movementSimulation.setNativePosition(participant, x, y, z);
+    }
+
+    @Override public void setNativeParticipantMaximumHealth(ParticipantId participant,
+            int maximumHealth, boolean restoreFull) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter != null) encounter.setParticipantMaximumHealth(currentHostTick(), participant,
+                maximumHealth, restoreFull, nativeCombatOutput);
+    }
+
+    public com.interrupt.dungeoneer.multiplayer.economy.AuthoritativeEconomy getEconomy() { return economy; }
+
+    @Override public List<com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress> getParticipantProgress() {
+        return economy.progressSnapshot();
+    }
+
+    @Override public List<com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState> getShopEntries() {
+        return economy.shopSnapshot();
+    }
+
+    /** Render thread publishes changed personal progress and shop entries once per revision. */
+    public synchronized void publishEconomy() {
+        for(com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress : economy.progressSnapshot()) {
+            Long previous = publishedProgressRevisions.get(progress.participantId);
+            if(previous != null && previous == progress.revision) continue;
+            publishedProgressRevisions.put(progress.participantId, progress.revision);
+            broadcast(new DirectConnectWire.ParticipantProgressMessage(sessionId, progress));
+        }
+        if(publishedShopGeneration != economy.getGeneration()) {
+            publishedShopGeneration = economy.getGeneration();
+            publishedShopRevisions.clear();
+        }
+        for(com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState entry : economy.shopSnapshot()) {
+            String key = entry.shopId + ":" + entry.entryId;
+            Long previous = publishedShopRevisions.get(key);
+            if(previous != null && previous == entry.revision) continue;
+            publishedShopRevisions.put(key, entry.revision);
+            broadcast(new DirectConnectWire.ShopEntryStateMessage(sessionId, entry));
+        }
+    }
+
+    /** Dialogue and shop overlay are activator-scoped; other Participants receive no opening. */
+    public synchronized void publishShopOpening(ParticipantId participant,
+            com.interrupt.dungeoneer.multiplayer.economy.ShopOpening opening) {
+        MovementEntityDescriptor local = hostMovementDescriptor();
+        if(local != null && local.getParticipantId().equals(participant)) {
+            if(shopOpenings.size() >= 16) shopOpenings.removeFirst();
+            shopOpenings.addLast(opening);
+            return;
+        }
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.movementDescriptor != null && connection.reconnectGrace == null
+                    && connection.channel.isActive()
+                    && connection.movementDescriptor.getParticipantId().equals(participant)) {
+                connection.channel.writeAndFlush(new DirectConnectWire.ShopOpeningMessage(sessionId, opening));
+                return;
+            }
+        }
+    }
+
+    @Override public synchronized List<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> drainShopOpenings() {
+        List<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> result =
+                new ArrayList<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening>(shopOpenings);
+        shopOpenings.clear();
+        return result;
     }
 
     private void publishNativeDynamicState(NativeDynamicState state, long tick) {
@@ -1370,6 +1495,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         connection.channel.write(new DirectConnectWire.PartyKeysMessage(sessionId,
                 itemWorld.getKeyRevision(), itemWorld.getPartyKeys()));
+        for(com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress : economy.progressSnapshot()) {
+            connection.channel.write(new DirectConnectWire.ParticipantProgressMessage(sessionId, progress));
+        }
+        for(com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState entry : economy.shopSnapshot()) {
+            connection.channel.write(new DirectConnectWire.ShopEntryStateMessage(sessionId, entry));
+        }
         for(DoorSnapshot door : doorSnapshots.values()) {
             connection.channel.write(new DirectConnectWire.DoorStateMessage(sessionId, door));
         }
@@ -1383,7 +1514,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         connection.channel.writeAndFlush(new SessionReady(sessionId,
                 getConnectedParticipantCount(), encounter == null ? 1L
                         : encounter.getNextRequestId(grace.descriptor.getParticipantId()),
-                itemWorld.nextRequestId(grace.descriptor.getParticipantId()), sharedFloorId()));
+                itemWorld.nextRequestId(grace.descriptor.getParticipantId()), sharedFloorId(),
+                sharedFloorSeed));
         status = status(DirectConnectPhase.READY,
                 grace.descriptor.getNickname() + " reclaimed Campaign Slot "
                         + grace.slot.getNumber() + " during reconnect grace.",
@@ -1911,16 +2043,26 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         return new DirectConnectStatus(phase, message, sessionId, participantId, floorId);
     }
 
+    private volatile String ownedFloorId;
+
+    /** Development floor override chosen before play; clients load it from their own copy. */
+    public void useOwnedFloor(String floorId) {
+        if(compatibility.usesOpenSourceTestContent() || !GameApplication.isOwnedLevelFloor(floorId)) {
+            throw new IllegalArgumentException("Owned floor requires Owned Game Copy content and a levels/*.bin path.");
+        }
+        if(sessionStarted) throw new IllegalStateException("Shared floor must be chosen before play starts.");
+        ownedFloorId = floorId;
+    }
+
     private String sharedFloorId() {
-        return compatibility.usesOpenSourceTestContent()
-                ? GameApplication.OPEN_SOURCE_TEST_LEVEL
-                : GameApplication.OWNED_TUTORIAL_FLOOR;
+        if(compatibility.usesOpenSourceTestContent()) return GameApplication.OPEN_SOURCE_TEST_LEVEL;
+        return ownedFloorId == null ? GameApplication.OWNED_TUTORIAL_FLOOR : ownedFloorId;
     }
 
     private String sharedFloorName() {
-        return compatibility.usesOpenSourceTestContent()
-                ? "shared open-source test floor"
-                : "shared Owned Game Copy tutorial";
+        if(compatibility.usesOpenSourceTestContent()) return "shared open-source test floor";
+        return ownedFloorId == null ? "shared Owned Game Copy tutorial"
+                : "shared Owned Game Copy floor " + ownedFloorId;
     }
 
     private static boolean sameAddress(InetSocketAddress tcpAddress,
@@ -2022,6 +2164,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         private MovementEntityDescriptor movementDescriptor;
         private GraceParticipant reconnectGrace;
         private boolean kicked;
+        private SharedFloorFingerprint floorFingerprint;
 
         private RemoteConnection(Channel channel, InetSocketAddress tcpAddress,
                 LauncherIdentity launcherIdentity) {
@@ -2094,6 +2237,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             else if(message instanceof CombatActionRequestMessage && helloAccepted && sessionStarted) {
                 combatAction(context, (CombatActionRequestMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.SharedFloorFingerprintMessage
+                    && helloAccepted && sessionStarted) {
+                sharedFloorReported(context, (DirectConnectWire.SharedFloorFingerprintMessage)message);
             }
             else if(message instanceof ClientDisconnect && helloAccepted) {
                 clientDisconnected(context, ((ClientDisconnect)message).reason);

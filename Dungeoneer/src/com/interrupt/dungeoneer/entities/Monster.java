@@ -1228,7 +1228,7 @@ public class Monster extends Actor implements Directional {
 		this.clearStatusEffects();
 
 		Game.instance.player.history.addMonsterKill(this);
-		if (this.givesExp) {
+		if (this.givesExp && !Game.instance.player.requestExperienceAward(this, 3 + this.level)) {
 			Game.instance.player.addExperience(3 + this.level);
 		}
 

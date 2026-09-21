@@ -1,4 +1,6 @@
 package com.interrupt.dungeoneer.multiplayer.network;
+
+import com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint;
 import com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeStatusEffectState;
 
@@ -111,10 +113,48 @@ public class DirectConnectWireTest {
         assertEquals(repeat('b'), accepted.reconnectToken);
 
         DirectConnectWire.SessionReady ready = (DirectConnectWire.SessionReady)roundTrip(
-                new DirectConnectWire.SessionReady("session", 3, 42L, "floor"));
+                new DirectConnectWire.SessionReady("session", 3, 42L, "floor", -7L));
         assertEquals(3, ready.participantCount);
         assertEquals(42L, ready.nextCombatRequestId);
         assertEquals("floor", ready.floorId);
+        assertEquals(-7L, ready.floorSeed);
+    }
+
+    @Test
+    public void sessionReadyWithoutSharedFloorSeedIsRejected() throws Exception {
+        ByteBuf encoded = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.SessionReady("session", 2, 1L, "floor", 9L));
+        encoded.setLong(encoded.writerIndex() - 8, 0L);
+        assertProtocolFailure(encoded, "Shared floor seed is missing");
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void sessionReadyRequiresSharedFloorSeed() {
+        new DirectConnectWire.SessionReady("session", 2, 1L, "floor", 0L);
+    }
+
+    @Test
+    public void sharedFloorFingerprintRoundTripsEveryCategory() throws Exception {
+        SharedFloorFingerprint fingerprint = new SharedFloorFingerprint(
+                new int[] { 57, 3, 0, 120, 812 },
+                new long[] { Long.MIN_VALUE, -1L, 0L, 42L, Long.MAX_VALUE });
+
+        DirectConnectWire.SharedFloorFingerprintMessage decoded =
+                (DirectConnectWire.SharedFloorFingerprintMessage)roundTrip(
+                        new DirectConnectWire.SharedFloorFingerprintMessage("session", fingerprint));
+
+        assertEquals("session", decoded.sessionId);
+        assertEquals(fingerprint, decoded.fingerprint);
+    }
+
+    @Test
+    public void sharedFloorFingerprintRejectsCountOutsideBounds() throws Exception {
+        ByteBuf encoded = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.SharedFloorFingerprintMessage("session",
+                        new SharedFloorFingerprint(new int[5], new long[5])));
+        // magic, type, then two-byte length and seven-byte session identity
+        encoded.setInt(4 + 1 + 2 + 7, -1);
+        assertProtocolFailure(encoded, "Invalid shared floor fingerprint");
     }
 
     @Test

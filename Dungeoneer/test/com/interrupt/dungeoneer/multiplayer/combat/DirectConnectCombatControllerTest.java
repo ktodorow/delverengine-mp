@@ -415,6 +415,54 @@ public class DirectConnectCombatControllerTest {
         }
     }
 
+    @Test
+    public void swordHitOnSharedShopkeeperReplaysNativeHitAndOnlyUnknownObjectsFail() {
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        java.util.HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> previousStrings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        com.interrupt.managers.StringManager.localizedStrings =
+                new java.util.HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
+        StubPeer peer = new StubPeer();
+        final int[] swordSwings = { 0 }, swordEntityHits = { 0 }, swordWorldHits = { 0 };
+        Sword sword = new TestPresentationSword(swordSwings, swordEntityHits, swordWorldHits);
+        // Shop floors place the shopkeeper as a solid TriggeredShop, a shared world object.
+        com.interrupt.dungeoneer.entities.triggers.TriggeredShop shopkeeper =
+                new com.interrupt.dungeoneer.entities.triggers.TriggeredShop();
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        controller.setWeaponResolver(new StubWeaponResolver(null, sword, null, shopkeeper));
+        try {
+            com.interrupt.dungeoneer.game.Game game = new org.objenesis.ObjenesisStd()
+                    .newInstance(com.interrupt.dungeoneer.game.Game.class);
+            com.interrupt.dungeoneer.game.Game.instance = game;
+            game.player = new Player(); game.level = new Level(4, 4);
+            controller.prepare(game);
+
+            peer.meleePresentations.add(NativeMeleePresentation.capture(
+                    "participant:campaign-slot-2", 12L,
+                    NativeMeleePresentation.Kind.ENTITY_HIT, new Vector3(1f, 2f, 0.5f),
+                    new Vector3(1f, 0f, 0f), 1000000L));
+            controller.update(game);
+
+            assertTrue(peer.presentationFailures.toString(), peer.presentationFailures.isEmpty());
+            assertEquals("Shopkeeper hit plays native Sword hit feedback", 1, swordEntityHits[0]);
+
+            peer.meleePresentations.add(NativeMeleePresentation.capture(
+                    "participant:campaign-slot-2", 12L,
+                    NativeMeleePresentation.Kind.ENTITY_HIT, new Vector3(1f, 2f, 0.5f),
+                    new Vector3(1f, 0f, 0f), 1000001L));
+            controller.update(game);
+
+            assertEquals(1, peer.presentationFailures.size());
+            assertTrue(peer.presentationFailures.get(0),
+                    peer.presentationFailures.get(0).contains("Accepted Sword target 1000001"));
+            assertEquals("Unknown shared object plays nothing", 1, swordEntityHits[0]);
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+            com.interrupt.managers.StringManager.localizedStrings = previousStrings;
+        }
+    }
+
     private CombatPresentationEvent event(long sequence, String sourceId,
             CombatAction action) {
         return new CombatPresentationEvent(sequence, sequence * 3L, sourceId,

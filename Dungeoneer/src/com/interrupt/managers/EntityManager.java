@@ -26,6 +26,9 @@ public class EntityManager {
 
     public EntityManager() { random = new Random(); }
 
+    /** Multiplayer Shared Floor builds replay identical surprise picks on every peer. */
+    public void seedRandom(long seed) { random.setSeed(seed); }
+
 	public Entity getEntityTemplate(String category, String name) {
         OrderedMap<String, Entity> catHash = entities.get(category);
         if(catHash != null) {

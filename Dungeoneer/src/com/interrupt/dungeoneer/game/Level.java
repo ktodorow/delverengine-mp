@@ -25,6 +25,7 @@ import com.interrupt.dungeoneer.entities.items.QuestItem;
 import com.interrupt.dungeoneer.entities.triggers.ButtonDecal;
 import com.interrupt.dungeoneer.entities.triggers.Trigger;
 import com.interrupt.dungeoneer.generator.DungeonGenerator;
+import com.interrupt.dungeoneer.multiplayer.floor.SharedFloorBuild;
 import com.interrupt.dungeoneer.generator.GenInfo;
 import com.interrupt.dungeoneer.generator.GenInfo.Markers;
 import com.interrupt.dungeoneer.generator.GenTheme;
@@ -60,6 +61,9 @@ public class Level {
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentationListener nativeSpellPresentationListener;
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentationListener nativeMeleePresentationListener;
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentationListener nativeRangedPresentationListener;
+
+	/** Multiplayer only: builds this floor identically on every peer. Cleared once loadFromEditor finishes. */
+	public transient SharedFloorBuild sharedFloorBuild;
 
 
     public enum DungeonTheme {
@@ -313,7 +317,23 @@ public class Level {
 		fogStart = 10f;
 		fogEnd = 20f;
 		viewDistance = 20f;
-		
+
+		SharedFloorBuild shared = sharedFloorBuild;
+		if(shared != null) shared.begin();
+		try {
+			buildFromEditor(shared);
+		}
+		finally {
+			if(shared != null) shared.end();
+			sharedFloorBuild = null;
+		}
+
+		// Lighting follows each peer's own graphics settings.
+		updateLights(Source.LEVEL_START);
+		updateStaticSpatialHash();
+	}
+
+	private void buildFromEditor(SharedFloorBuild shared) {
 		Array<Entity> copyEntities = new Array<>(100);
 		Array<Entity> copyNonCollidableEntities = new Array<>(100);
 		Array<Entity> copyStaticEntities = new Array<>(100);
@@ -339,17 +359,19 @@ public class Level {
 
 		loadSurprises(genTheme);
 
+		if(shared != null) shared.enter(SharedFloorBuild.Phase.PREFABS);
 		initPrefabs(Source.LEVEL_START);
 
+		if(shared != null) shared.enter(SharedFloorBuild.Phase.MARKERS);
 		addEntitiesFromMarkers(editorMarkers, new Array<>(), new Boolean[width * height], new Array<>(), genTheme, 0, 0);
+		if(shared != null) shared.enter(SharedFloorBuild.Phase.DECORATION);
 		decorateLevel();
 
+		if(shared != null) shared.enter(SharedFloorBuild.Phase.INITIALIZATION);
 		init(Source.LEVEL_START);
 
 		editorMarkers.clear();
-		
-		updateLights(Source.LEVEL_START);
-		updateStaticSpatialHash();
+		if(shared != null) shared.finish(this);
 	}
 
 	public void generate(Source source) {
@@ -1208,7 +1230,10 @@ public class Level {
 
 		// add entities from markers
 		if(markers != null && markers.size > 0) {
+			int markerIndex = 0;
 			for(EditorMarker marker : markers) {
+				if(sharedFloorBuild != null) sharedFloorBuild.enterEntity(SharedFloorBuild.Phase.MARKERS, 0, markerIndex);
+				markerIndex++;
 				
 				int x = marker.x + xOffset;
 				int y = marker.y + yOffset;
@@ -1420,7 +1445,8 @@ public class Level {
 					if(spawnRates != null && Game.rand.nextFloat() > spawnRates.loot) continue;
 					
 					// loot!
-					Item itm = Game.GetItemManager().GetLevelLoot(Game.instance.player.level);
+					com.interrupt.managers.ItemManager.LootRoll roll = Game.GetItemManager().selectLootRoll();
+					Item itm = Game.GetItemManager().GetLevelLoot(roll.level, roll);
 					
 					if(itm != null) {
 						itm.x = x + 0.5f + offset.x;
@@ -1538,18 +1564,21 @@ public class Level {
 		for(int i = 0; i < entities.size; i++) {
 			Entity e = entities.get(i);
 			if(e instanceof Group) {
+				if(sharedFloorBuild != null) sharedFloorBuild.enterEntity(SharedFloorBuild.Phase.PREFABS, 0, i);
 				e.init(this, source);
 			}
 		}
 		for(int i = 0; i < non_collidable_entities.size; i++) {
 			Entity e = non_collidable_entities.get(i);
 			if(e instanceof Group) {
+				if(sharedFloorBuild != null) sharedFloorBuild.enterEntity(SharedFloorBuild.Phase.PREFABS, 1, i);
 				e.init(this, source);
 			}
 		}
 		for(int i = 0; i < static_entities.size; i++) {
 			Entity e = static_entities.get(i);
 			if(e instanceof Group) {
+				if(sharedFloorBuild != null) sharedFloorBuild.enterEntity(SharedFloorBuild.Phase.PREFABS, 2, i);
 				e.init(this, source);
 			}
 		}
@@ -1601,7 +1630,9 @@ public class Level {
 		if(entityList == null)
 			return;
 
+		int list = entityList == entities ? 0 : entityList == non_collidable_entities ? 1 : 2;
 		for(int i = 0; i < entityList.size; i++) {
+			if(sharedFloorBuild != null) sharedFloorBuild.enterEntity(SharedFloorBuild.Phase.INITIALIZATION, list, i);
 			Entity e = entityList.get(i);
 
 			// Might need to override the sprite atlas

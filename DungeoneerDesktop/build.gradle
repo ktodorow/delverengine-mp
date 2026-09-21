@@ -37,6 +37,7 @@ task runDirectHost(dependsOn: classes, type: JavaExec) {
     standardInput = System.in
     workingDir = project.assetsDir
     args "--direct-host"
+    if(project.hasProperty("directFloor")) args "--direct-floor=" + project.property("directFloor")
     if(project.hasProperty("sessionPort")) args "--session-port=" + project.property("sessionPort")
     if(project.hasProperty("campaignCapacity")) args "--campaign-capacity=" + project.property("campaignCapacity")
     if(project.hasProperty("campaignId")) args "--campaign-id=" + project.property("campaignId")

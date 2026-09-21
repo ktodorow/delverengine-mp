@@ -64,6 +64,9 @@ public class ItemManager {
 	
 	public ItemManager() { random = new Random(); }
 
+	/** Multiplayer Shared Floor builds replay identical loot rolls on every peer. */
+	public void seedRandom(long seed) { random.setSeed(seed); }
+
 	private class ItemManagerEntry {
 		int itemLevel;
 		Item item;
@@ -353,11 +356,46 @@ public class ItemManager {
 		return Copy( Armor.class, armor.get(level.toString()).get(num) );
 	}
 	
+	/** Character stats and level applied to one stat-biased loot roll. */
+	public static final class LootRoll {
+		public final Stats stats;
+		public final int level;
+
+		public LootRoll(Stats stats, int level) {
+			this.stats = stats;
+			this.level = level;
+		}
+	}
+
+	/** Multiplayer Host selects one living Participant per roll; null keeps the local Player. */
+	public interface LootRollSelector {
+		LootRoll selectLootRoll();
+	}
+
+	private transient LootRollSelector lootRollSelector;
+
+	public void setLootRollSelector(LootRollSelector selector) {
+		lootRollSelector = selector;
+	}
+
+	public LootRollSelector getLootRollSelector() {
+		return lootRollSelector;
+	}
+
+	public LootRoll selectLootRoll() {
+		LootRoll roll = lootRollSelector == null ? null : lootRollSelector.selectLootRoll();
+		return roll != null ? roll : new LootRoll(Game.instance.player.stats, Game.instance.player.level);
+	}
+
 	public Item GetLevelLoot(Integer level) {
+		return GetLevelLoot(level, selectLootRoll());
+	}
+
+	public Item GetLevelLoot(Integer level, LootRoll roll) {
 		int num = (int)(random.nextDouble() * 100);
 		Item itm = null;
 
-		Stats s = Game.instance.player.stats;
+		Stats s = roll.stats;
 		float totalPlayerStatPoints = s.ATK + s.DEF + s.DEX + s.END + s.MAG + s.SPD;
 
 		int chanceForMeleeItem = (int)(s.ATK / totalPlayerStatPoints * 100);
@@ -404,6 +442,21 @@ public class ItemManager {
 	}
 	
 	public Item GetMonsterLoot(Integer level, boolean canSpawnGold) {
+		return GetMonsterLoot(level, canSpawnGold, null, false);
+	}
+
+	/** Breakables use the selected Campaign Slot's level only when the stat-biased table is reached. */
+	public Item GetMonsterLootForParticipant(boolean canSpawnGold) {
+		return GetMonsterLoot(Game.instance.player.level, canSpawnGold, null, true);
+	}
+
+	/** Explicit roll hook retained for deterministic native regression checks. */
+	public Item GetMonsterLoot(Integer level, boolean canSpawnGold, LootRoll roll) {
+		return GetMonsterLoot(level, canSpawnGold, roll, false);
+	}
+
+	private Item GetMonsterLoot(Integer level, boolean canSpawnGold, LootRoll roll,
+			boolean useSelectedLevel) {
 
 		// Make unique items more common as levels get higher
 		// TODO: Replace hard coded value 6.0f with how many dungeon levels are present.
@@ -423,7 +476,8 @@ public class ItemManager {
 			}
 		}
 		
-		return GetLevelLoot(level);
+		LootRoll selected = roll == null ? selectLootRoll() : roll;
+		return GetLevelLoot(useSelectedLevel ? selected.level : level, selected);
 	}
 	
 	public static Item Copy(Class<?> type, Item tocopy)

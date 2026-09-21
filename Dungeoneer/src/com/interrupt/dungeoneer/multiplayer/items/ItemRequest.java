@@ -7,6 +7,7 @@ import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 public final class ItemRequest implements HostSessionCommand {
     private final ParticipantId participantId;
     public final long requestId;
+    public final long worldGeneration;
     public final long entityId;
     public final ItemAction action;
     public final int condition, quantity;
@@ -15,16 +16,24 @@ public final class ItemRequest implements HostSessionCommand {
 
     public ItemRequest(ParticipantId participantId, long requestId,
             ItemAction action, long entityId) {
-        this(participantId, requestId, action, entityId, 0, 0);
-    }
-
-    public ItemRequest(ParticipantId participantId, long requestId,
-            ItemAction action, long entityId, int condition, int quantity) {
-        this(participantId, requestId, action, entityId, condition, quantity,
+        this(participantId, requestId, 1L, action, entityId, 0, 0,
                 false, 0f, 0f, 0f);
     }
 
     public ItemRequest(ParticipantId participantId, long requestId,
+            ItemAction action, long entityId, int condition, int quantity) {
+        this(participantId, requestId, 1L, action, entityId, condition, quantity,
+                false, 0f, 0f, 0f);
+    }
+
+    public ItemRequest(ParticipantId participantId, long requestId,
+            ItemAction action, long entityId, int condition, int quantity,
+            boolean hasAim, float aimX, float aimY, float aimZ) {
+        this(participantId, requestId, 1L, action, entityId, condition, quantity,
+                hasAim, aimX, aimY, aimZ);
+    }
+
+    public ItemRequest(ParticipantId participantId, long requestId, long worldGeneration,
             ItemAction action, long entityId, int condition, int quantity,
             boolean hasAim, float aimX, float aimY, float aimZ) {
         if(condition < 0 || condition > 4 || quantity < 0 || quantity > 1000000) {
@@ -44,12 +53,13 @@ public final class ItemRequest implements HostSessionCommand {
         this.aimX = aimX;
         this.aimY = aimY;
         this.aimZ = aimZ;
-        if(participantId == null || action == null || requestId < 1L
+        if(participantId == null || action == null || requestId < 1L || worldGeneration < 1L
                 || requestId == Long.MAX_VALUE || entityId < 1L) {
             throw new IllegalArgumentException("Invalid physical item request.");
         }
         this.participantId = participantId;
         this.requestId = requestId;
+        this.worldGeneration = worldGeneration;
         this.action = action;
         this.entityId = entityId;
     }

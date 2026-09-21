@@ -1,4 +1,6 @@
 package com.interrupt.dungeoneer.multiplayer.network;
+
+import com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint;
 import com.interrupt.dungeoneer.multiplayer.items.ItemActionResult;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionPresentation;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationCue;
@@ -9,6 +11,9 @@ import com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentation;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentation;
 
 import com.interrupt.dungeoneer.multiplayer.items.DoorFeedback;
+import com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress;
+import com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState;
+import com.interrupt.dungeoneer.multiplayer.economy.ShopOpening;
 
 import com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeStatusEffectState;
@@ -105,6 +110,10 @@ final class DirectConnectWire {
     private static final int NATIVE_MELEE_PRESENTATION = 42;
     private static final int NATIVE_RANGED_PRESENTATION = 43;
     private static final int BREAKABLE_STATE = 44;
+    private static final int PARTICIPANT_PROGRESS = 45;
+    private static final int SHOP_ENTRY_STATE = 46;
+    private static final int SHOP_OPENING = 47;
+    private static final int SHARED_FLOOR_FINGERPRINT = 48;
 
     private DirectConnectWire() { }
 
@@ -287,6 +296,8 @@ final class DirectConnectWire {
             output.writeLong(ready.nextItemRequestId);
             writeString(output, ready.floorId, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
                     "floor identity");
+            if(ready.floorSeed == 0L) throw new ProtocolException("Shared floor seed is missing.");
+            output.writeLong(ready.floorSeed);
         }
         else if(message instanceof EntitySpawn) {
             EntitySpawn spawn = (EntitySpawn)message;
@@ -400,6 +411,7 @@ final class DirectConnectWire {
             output.writeByte(ITEM_REQUEST);
             writeString(output, request.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                     "session identity");
+            output.writeLong(request.worldGeneration);
             output.writeLong(request.requestId);
             output.writeByte(request.action.getWireId());
             output.writeLong(request.entityId);
@@ -535,6 +547,71 @@ final class DirectConnectWire {
             writeString(output, keys.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
             output.writeLong(keys.revision);
             output.writeInt(keys.count);
+        }
+        else if(message instanceof ParticipantProgressMessage) {
+            ParticipantProgressMessage delivery = (ParticipantProgressMessage)message;
+            ParticipantProgress progress = delivery.progress;
+            output.writeByte(PARTICIPANT_PROGRESS);
+            writeString(output, delivery.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            writeString(output, progress.participantId.getValue(),
+                    DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES, "progress participant");
+            output.writeLong(progress.revision);
+            output.writeInt(progress.gold);
+            output.writeInt(progress.experience);
+            output.writeInt(progress.level);
+            output.writeInt(progress.attack);
+            output.writeInt(progress.defense);
+            output.writeInt(progress.agility);
+            output.writeInt(progress.speed);
+            output.writeInt(progress.magic);
+            output.writeInt(progress.endurance);
+            output.writeInt(progress.pendingStatChoices);
+            output.writeInt(progress.maximumHealth);
+            output.writeByte(progress.inventorySize);
+            output.writeByte(progress.hotbarSize);
+        }
+        else if(message instanceof ShopEntryStateMessage) {
+            ShopEntryStateMessage delivery = (ShopEntryStateMessage)message;
+            ShopEntryState entry = delivery.entry;
+            output.writeByte(SHOP_ENTRY_STATE);
+            writeString(output, delivery.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(entry.shopId);
+            output.writeLong(entry.generation);
+            output.writeLong(entry.revision);
+            output.writeInt(entry.entryId);
+            writeString(output, entry.templateId, PhysicalItemState.MAX_TEMPLATE_BYTES, "shop template");
+            output.writeByte(entry.properties.condition);
+            output.writeInt(entry.properties.level);
+            output.writeInt(entry.properties.quantity);
+            output.writeByte(entry.properties.potionType);
+            writeString(output, entry.properties.suffix, 128, "shop item suffix");
+            writeString(output, entry.properties.prefix, 128, "shop item prefix");
+            output.writeInt(entry.cost);
+            output.writeBoolean(entry.useOnBuy);
+            output.writeBoolean(entry.sold);
+            writeString(output, entry.achievement == null ? "" : entry.achievement,
+                    ShopEntryState.MAX_ACHIEVEMENT_BYTES, "shop achievement");
+            output.writeBoolean(entry.restrictedTo != null);
+            if(entry.restrictedTo != null) writeString(output, entry.restrictedTo.getValue(),
+                    DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES, "shop offer participant");
+        }
+        else if(message instanceof ShopOpeningMessage) {
+            ShopOpeningMessage delivery = (ShopOpeningMessage)message;
+            output.writeByte(SHOP_OPENING);
+            writeString(output, delivery.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(delivery.opening.shopId);
+            output.writeLong(delivery.opening.generation);
+            writeString(output, delivery.opening.dialogueFile, ShopOpening.MAX_DIALOGUE_FILE_BYTES, "shop dialogue");
+        }
+        else if(message instanceof SharedFloorFingerprintMessage) {
+            SharedFloorFingerprintMessage report = (SharedFloorFingerprintMessage)message;
+            output.writeByte(SHARED_FLOOR_FINGERPRINT);
+            writeString(output, report.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            for(SharedFloorFingerprint.Category category : SharedFloorFingerprint.Category.values()) {
+                output.writeInt(report.fingerprint.getCount(category));
+                output.writeLong(report.fingerprint.getDigest(category));
+            }
         }
         else if(message instanceof ItemStateMessage) {
             ItemStateMessage messageState = (ItemStateMessage)message;
@@ -780,9 +857,11 @@ final class DirectConnectWire {
             case ITEM_REQUEST:
                 String itemRequestSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
-                requireReadable(input, 35, "physical item request");
+                requireReadable(input, 43, "physical item request");
                 try {
+                    long itemRequestGeneration = input.readLong();
                     message = new ItemRequestMessage(itemRequestSession, input.readLong(),
+                            itemRequestGeneration,
                             ItemAction.fromWireId(input.readUnsignedByte()), input.readLong(),
                             input.readUnsignedByte(), input.readInt(), input.readBoolean(),
                             input.readFloat(), input.readFloat(), input.readFloat());
@@ -1006,6 +1085,82 @@ final class DirectConnectWire {
                 try { message = new PartyKeysMessage(keySession, input.readLong(), input.readInt()); }
                 catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid Party Keys.", invalid); }
                 break;
+            case PARTICIPANT_PROGRESS:
+                String progressSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                String progressParticipant = readString(input,
+                        DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES, "progress participant");
+                requireReadable(input, 54, "participant progress");
+                try {
+                    message = new ParticipantProgressMessage(progressSession, new ParticipantProgress(
+                            new ParticipantId(progressParticipant), input.readLong(), input.readInt(),
+                            input.readInt(), input.readInt(), input.readInt(), input.readInt(),
+                            input.readInt(), input.readInt(), input.readInt(), input.readInt(),
+                            input.readInt(), input.readInt(), input.readUnsignedByte(),
+                            input.readUnsignedByte()));
+                }
+                catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid participant progress.", invalid); }
+                break;
+            case SHOP_ENTRY_STATE:
+                String shopSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 28, "shop entry identity");
+                long shopId = input.readLong(), shopGeneration = input.readLong(), shopRevision = input.readLong();
+                int shopEntryId = input.readInt();
+                String shopTemplate = readString(input, PhysicalItemState.MAX_TEMPLATE_BYTES, "shop template");
+                requireReadable(input, 10, "shop item properties");
+                int shopCondition = input.readUnsignedByte(), shopLevel = input.readInt();
+                int shopQuantity = input.readInt();
+                int shopPotionType = input.readByte();
+                String shopSuffix = readString(input, 128, "shop item suffix");
+                String shopPrefix = readString(input, 128, "shop item prefix");
+                requireReadable(input, 6, "shop entry terms");
+                int shopCost = input.readInt();
+                boolean shopUseOnBuy = input.readBoolean(), shopSold = input.readBoolean();
+                String shopAchievement = readString(input, ShopEntryState.MAX_ACHIEVEMENT_BYTES,
+                        "shop achievement");
+                requireReadable(input, 1, "shop offer restriction");
+                String shopRestricted = input.readBoolean() ? readString(input,
+                        DirectConnectProtocol.MAX_PARTICIPANT_ID_BYTES, "shop offer participant") : null;
+                try {
+                    message = new ShopEntryStateMessage(shopSession, new ShopEntryState(shopId,
+                            shopGeneration, shopRevision, shopEntryId, shopTemplate,
+                            new ItemProperties(shopCondition, shopLevel, shopSuffix, shopPrefix,
+                                    shopQuantity, shopPotionType),
+                            shopCost, shopUseOnBuy, shopSold,
+                            shopRestricted == null ? null : new ParticipantId(shopRestricted),
+                            shopAchievement));
+                }
+                catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid shop entry.", invalid); }
+                break;
+            case SHOP_OPENING:
+                String openingSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 16, "shop opening");
+                long openingShop = input.readLong(), openingGeneration = input.readLong();
+                String openingDialogue = readString(input, ShopOpening.MAX_DIALOGUE_FILE_BYTES, "shop dialogue");
+                try {
+                    message = new ShopOpeningMessage(openingSession,
+                            new ShopOpening(openingShop, openingGeneration, openingDialogue));
+                }
+                catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid shop opening.", invalid); }
+                break;
+            case SHARED_FLOOR_FINGERPRINT:
+                String floorSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                        "session identity");
+                SharedFloorFingerprint.Category[] floorCategories = SharedFloorFingerprint.Category.values();
+                requireReadable(input, 12 * floorCategories.length, "shared floor fingerprint");
+                int[] floorCounts = new int[floorCategories.length];
+                long[] floorDigests = new long[floorCategories.length];
+                for(int index = 0; index < floorCategories.length; index++) {
+                    floorCounts[index] = input.readInt();
+                    floorDigests[index] = input.readLong();
+                }
+                try {
+                    message = new SharedFloorFingerprintMessage(floorSession,
+                            new SharedFloorFingerprint(floorCounts, floorDigests));
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid shared floor fingerprint.", invalid);
+                }
+                break;
             case ITEM_STATE:
                 String itemStateSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
@@ -1187,10 +1342,13 @@ final class DirectConnectWire {
                 requireReadable(input, 8, "item request ID floor");
                 long nextItemRequestId = input.readLong();
                 if(nextItemRequestId < 1L) throw new ProtocolException("Invalid item request ID floor.");
+                String readyFloor = readString(input, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
+                        "floor identity");
+                requireReadable(input, 8, "shared floor seed");
+                long readyFloorSeed = input.readLong();
+                if(readyFloorSeed == 0L) throw new ProtocolException("Shared floor seed is missing.");
                 message = new SessionReady(readySession, participantCount,
-                        nextCombatRequestId, nextItemRequestId,
-                        readString(input, DirectConnectProtocol.MAX_FLOOR_ID_BYTES,
-                                "floor identity"));
+                        nextCombatRequestId, nextItemRequestId, readyFloor, readyFloorSeed);
                 break;
             case ENTITY_SPAWN:
                 String spawnSession = readString(input,
@@ -1812,14 +1970,18 @@ final class DirectConnectWire {
         final long nextCombatRequestId;
         final long nextItemRequestId;
         final String floorId;
+        /** Every peer builds the announced floor from this Host seed. */
+        final long floorSeed;
 
         SessionReady(String sessionId, int participantCount, long nextCombatRequestId,
-                String floorId) {
-            this(sessionId, participantCount, nextCombatRequestId, 1L, floorId);
+                String floorId, long floorSeed) {
+            this(sessionId, participantCount, nextCombatRequestId, 1L, floorId, floorSeed);
         }
 
         SessionReady(String sessionId, int participantCount, long nextCombatRequestId,
-                long nextItemRequestId, String floorId) {
+                long nextItemRequestId, String floorId, long floorSeed) {
+            if(floorSeed == 0L) throw new IllegalArgumentException("Shared floor seed is missing.");
+            this.floorSeed = floorSeed;
             if(nextItemRequestId < 1L) throw new IllegalArgumentException("Invalid item request ID floor.");
             this.nextItemRequestId = nextItemRequestId;
             if(nextCombatRequestId < 1L) {
@@ -2192,6 +2354,45 @@ final class DirectConnectWire {
         }
     }
 
+    static final class ParticipantProgressMessage implements Message {
+        final String sessionId;
+        final ParticipantProgress progress;
+        ParticipantProgressMessage(String sessionId, ParticipantProgress progress) {
+            if(sessionId == null || progress == null) throw new IllegalArgumentException("Missing participant progress.");
+            this.sessionId = sessionId; this.progress = progress;
+        }
+    }
+
+    static final class ShopEntryStateMessage implements Message {
+        final String sessionId;
+        final ShopEntryState entry;
+        ShopEntryStateMessage(String sessionId, ShopEntryState entry) {
+            if(sessionId == null || entry == null) throw new IllegalArgumentException("Missing shop entry.");
+            this.sessionId = sessionId; this.entry = entry;
+        }
+    }
+
+    /** Client reports its finished Shared Floor build; Host compares it with its own. */
+    static final class SharedFloorFingerprintMessage implements Message {
+        final String sessionId;
+        final SharedFloorFingerprint fingerprint;
+        SharedFloorFingerprintMessage(String sessionId, SharedFloorFingerprint fingerprint) {
+            if(sessionId == null || fingerprint == null) {
+                throw new IllegalArgumentException("Missing shared floor fingerprint.");
+            }
+            this.sessionId = sessionId; this.fingerprint = fingerprint;
+        }
+    }
+
+    static final class ShopOpeningMessage implements Message {
+        final String sessionId;
+        final ShopOpening opening;
+        ShopOpeningMessage(String sessionId, ShopOpening opening) {
+            if(sessionId == null || opening == null) throw new IllegalArgumentException("Missing shop opening.");
+            this.sessionId = sessionId; this.opening = opening;
+        }
+    }
+
     static final class PartyKeysMessage implements Message {
         final String sessionId;
         final long revision;
@@ -2226,26 +2427,40 @@ final class DirectConnectWire {
 
     static final class ItemRequestMessage implements Message {
         final String sessionId;
-        final long requestId, entityId;
+        final long requestId, worldGeneration, entityId;
         final ItemAction action;
         final int condition, quantity;
         final boolean hasAim;
         final float aimX, aimY, aimZ;
 
         ItemRequestMessage(String sessionId, long requestId, ItemAction action, long entityId) {
-            this(sessionId, requestId, action, entityId, 0, 0);
+            this(sessionId, requestId, 1L, action, entityId, 0, 0);
         }
 
         ItemRequestMessage(String sessionId, long requestId, ItemAction action, long entityId,
                 int condition, int quantity) {
-            this(sessionId, requestId, action, entityId, condition, quantity,
+            this(sessionId, requestId, 1L, action, entityId, condition, quantity,
                     false, 0f, 0f, 0f);
         }
 
         ItemRequestMessage(String sessionId, long requestId, ItemAction action, long entityId,
                 int condition, int quantity, boolean hasAim, float aimX, float aimY, float aimZ) {
+            this(sessionId, requestId, 1L, action, entityId, condition, quantity,
+                    hasAim, aimX, aimY, aimZ);
+        }
+
+        ItemRequestMessage(String sessionId, long requestId, long worldGeneration,
+                ItemAction action, long entityId, int condition, int quantity) {
+            this(sessionId, requestId, worldGeneration, action, entityId, condition, quantity,
+                    false, 0f, 0f, 0f);
+        }
+
+        ItemRequestMessage(String sessionId, long requestId, long worldGeneration,
+                ItemAction action, long entityId, int condition, int quantity,
+                boolean hasAim, float aimX, float aimY, float aimZ) {
             // Validate without trusting a Participant identity supplied by the sender.
-            new ItemRequest(new ParticipantId("wire-validation"), requestId, action, entityId,
+            new ItemRequest(new ParticipantId("wire-validation"), requestId, worldGeneration,
+                    action, entityId,
                     condition, quantity, hasAim, aimX, aimY, aimZ);
             this.condition = condition;
             this.quantity = quantity;
@@ -2255,6 +2470,7 @@ final class DirectConnectWire {
             this.aimZ = aimZ;
             this.sessionId = sessionId;
             this.requestId = requestId;
+            this.worldGeneration = worldGeneration;
             this.action = action;
             this.entityId = entityId;
         }

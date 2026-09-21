@@ -18,6 +18,10 @@ public interface NativeCombatAuthority {
     default void setNativeParticipantPosition(ParticipantId participant,
             float x, float y, float z) { }
 
+    /** Accepted level/stat change from Campaign Slot progression; no presentation event. */
+    default void setNativeParticipantMaximumHealth(ParticipantId participant,
+            int maximumHealth, boolean restoreFull) { }
+
     default void failNativePresentation(String reason) { }
 
     default void beginNativeWorld() { }

@@ -1870,6 +1870,28 @@ public class Player extends Actor {
         itemAuthorityListener = listener;
     }
 
+    /** Campaign Slot progression boundary; native rewards and stat choices become Host intent. */
+    public interface ProgressionAuthorityListener {
+        boolean awardExperience(Entity source, int amount);
+        boolean chooseStat(String attribute);
+    }
+
+    private transient ProgressionAuthorityListener progressionAuthorityListener;
+
+    public void setProgressionAuthorityListener(ProgressionAuthorityListener listener) {
+        progressionAuthorityListener = listener;
+    }
+
+    public boolean requestExperienceAward(Entity source, int amount) {
+        return progressionAuthorityListener != null
+                && progressionAuthorityListener.awardExperience(source, amount);
+    }
+
+    public boolean requestStatChoice(String attribute) {
+        return progressionAuthorityListener != null
+                && progressionAuthorityListener.chooseStat(attribute);
+    }
+
     public boolean requestItemConsume(Item item) {
         return itemAuthorityListener != null && itemAuthorityListener.consume(item);
     }

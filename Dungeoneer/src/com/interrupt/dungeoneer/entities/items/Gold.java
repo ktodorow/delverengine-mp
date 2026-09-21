@@ -58,18 +58,24 @@ public class Gold extends Item {
 		if(isActive && autoPickup) {
 			Player p = Game.instance.player;
 			if(Math.abs(p.x + 0.5f - x) < 0.3f && Math.abs(p.y + 0.5f - y ) < 0.3f) {
+				if(p.requestItemPickup(this)) return;
 				p.gold++;
 				isActive = false;
 			}
 		}
 	}
-	
+
 	protected void pickup(Player player) {
 		if(isActive) {
 			player.gold += goldAmount;
 			isActive = false;
-			Audio.playSound(pickupSound, 0.3f, 1f);
-			makeItemPickupAnimation(player);
+			presentPickup(player);
 		}
+	}
+
+	/** Native pickup feedback only; multiplayer calls it after Host accepted and divided the gold. */
+	public void presentPickup(Player player) {
+		Audio.playSound(pickupSound, 0.3f, 1f);
+		makeItemPickupAnimation(player);
 	}
 }

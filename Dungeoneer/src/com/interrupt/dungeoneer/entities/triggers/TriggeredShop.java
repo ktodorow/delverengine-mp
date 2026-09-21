@@ -10,6 +10,7 @@ import com.interrupt.dungeoneer.entities.items.Elixer;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.Progression;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
 import com.interrupt.dungeoneer.overlays.MessageOverlay;
 import com.interrupt.dungeoneer.overlays.Overlay;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
@@ -70,6 +71,17 @@ public class TriggeredShop extends Trigger {
 		super.init(level, source);
 	}
 	
+	/** Multiplayer boundary: the activator alone sees dialogue; stock and purchases stay with Host. */
+	public interface ShopAuthority {
+		boolean openShop(TriggeredShop shop, ParticipantContext participant, String dialogueFile);
+	}
+
+	private transient ShopAuthority shopAuthority;
+
+	public void setShopAuthority(ShopAuthority authority) {
+		shopAuthority = authority;
+	}
+
 	@Override
 	public void doTriggerEvent(String value) {
 
@@ -78,14 +90,25 @@ public class TriggeredShop extends Trigger {
 			Game.instance.progression.messagesSeen.put(title, messageProgression);
 		}
 
-		if(messageFile != null && !messageFile.equals("")) {
-			final MessageOverlay message = new MessageOverlay(messageFile, Game.instance.player, null, null);
+		if(shopAuthority == null || !shopAuthority.openShop(this, getTriggeringParticipantContext(),
+				messageFile == null ? "" : messageFile)) {
+			presentShop(messageFile, null, null);
+		}
+
+		super.doTriggerEvent(value);
+	}
+
+	/** Native dialogue followed by ShopOverlay. Null stock uses local native generation. */
+	public void presentShop(String dialogueFile, final Array<ShopItem> stock,
+			final ShopOverlay.PurchaseAuthority purchaseAuthority) {
+		if(dialogueFile != null && !dialogueFile.equals("")) {
+			final MessageOverlay message = new MessageOverlay(dialogueFile, Game.instance.player, null, null);
 			message.pausesGame = pausesGame;
 
 			message.afterAction = new Action() {
 				@Override
 				public boolean act(float delta) {
-					showShopOverlay(message);
+					showShopOverlay(message, stock, purchaseAuthority);
 					return true;
 				}
 			};
@@ -93,13 +116,55 @@ public class TriggeredShop extends Trigger {
 			OverlayManager.instance.push(message);
 		}
 		else {
-			showShopOverlay(null);
+			showShopOverlay(null, stock, purchaseAuthority);
 		}
-		
-		super.doTriggerEvent(value);
 	}
 
 	public void showShopOverlay(Overlay previousOverlay) {
+		showShopOverlay(previousOverlay, null, null);
+	}
+
+	private void showShopOverlay(Overlay previousOverlay, Array<ShopItem> stock,
+			ShopOverlay.PurchaseAuthority purchaseAuthority) {
+		Array<ShopItem> shown = stock != null ? stock : generateStock(
+				Game.instance.player.canAddInventorySlot(), Game.instance.player.canAddHotbarSlot(),
+				Game.instance.progression.inventoryUpgrades, Game.instance.progression.hotbarUpgrades);
+
+		if(previousOverlay != null) {
+			ShopOverlay shopOverlay = new ShopOverlay(Game.instance.player, null, null, shown);
+			shopOverlay.pausesGame = pausesGame;
+			shopOverlay.timer = 1000f;
+			shopOverlay.setPurchaseAuthority(purchaseAuthority);
+			OverlayManager.instance.replace(previousOverlay, shopOverlay);
+		}
+		else {
+			ShopOverlay shopOverlay = new ShopOverlay(Game.instance.player, title, description, shown);
+			shopOverlay.pausesGame = pausesGame;
+			shopOverlay.setPurchaseAuthority(purchaseAuthority);
+			OverlayManager.instance.push(shopOverlay);
+		}
+	}
+
+	/** Base v1.08 soulbound persistent-shop offer before upgrade-count pricing. */
+	public static BagUpgrade soulboundUpgrade(BagUpgrade.BagUpgradeType type) {
+		BagUpgrade upgrade = new BagUpgrade(type, true);
+		if(type == BagUpgrade.BagUpgradeType.HOTBAR) {
+			upgrade.name = "Soulbound Belt Expansion";
+			upgrade.cost = 60;
+		}
+		else {
+			upgrade.name = "Soulbound Bag Expansion";
+			upgrade.cost = 30;
+		}
+		return upgrade;
+	}
+
+	/**
+	 * Original v1.08 stock rules. Ordinary stock is generated once; persistent soulbound offers
+	 * are recomputed from the shopper's own slot upgrades on every opening.
+	 */
+	public Array<ShopItem> generateStock(boolean canAddInventorySlot, boolean canAddHotbarSlot,
+			int inventoryUpgrades, int hotbarUpgrades) {
 		if(items == null) {
 			items = new Array<ShopItem>();
 			if(shopType == ShopType.upgrades) {
@@ -151,18 +216,14 @@ public class TriggeredShop extends Trigger {
 			if(items == null) items = new Array<ShopItem>();
 			else items.clear();
 
-			if(Game.instance.player.canAddInventorySlot()) {
-				BagUpgrade inventoryUpgrade = new BagUpgrade(BagUpgrade.BagUpgradeType.INVENTORY, true);
-				inventoryUpgrade.name = "Soulbound Bag Expansion";
-				inventoryUpgrade.cost = 30;
-				inventoryUpgrade.cost += (Game.instance.progression.inventoryUpgrades * Game.instance.progression.inventoryUpgrades) * (int) (inventoryUpgrade.cost * 0.75f);
+			if(canAddInventorySlot) {
+				BagUpgrade inventoryUpgrade = soulboundUpgrade(BagUpgrade.BagUpgradeType.INVENTORY);
+				inventoryUpgrade.cost += (inventoryUpgrades * inventoryUpgrades) * (int) (inventoryUpgrade.cost * 0.75f);
 				items.add(new ShopItem(inventoryUpgrade, true,"SQUID2"));
 			}
-			if(Game.instance.player.canAddHotbarSlot()) {
-				BagUpgrade hotbarUpgrade = new BagUpgrade(BagUpgrade.BagUpgradeType.HOTBAR, true);
-				hotbarUpgrade.name = "Soulbound Belt Expansion";
-				hotbarUpgrade.cost = 60;
-				hotbarUpgrade.cost += (Game.instance.progression.hotbarUpgrades * Game.instance.progression.hotbarUpgrades) * (int) (hotbarUpgrade.cost);
+			if(canAddHotbarSlot) {
+				BagUpgrade hotbarUpgrade = soulboundUpgrade(BagUpgrade.BagUpgradeType.HOTBAR);
+				hotbarUpgrade.cost += (hotbarUpgrades * hotbarUpgrades) * (int) (hotbarUpgrade.cost);
 				items.add(new ShopItem(hotbarUpgrade, true, "SQUID1"));
 			}
 
@@ -181,17 +242,6 @@ public class TriggeredShop extends Trigger {
 			if(item.item == null && item.upgrade == null) toRemove.add(item);
 		}
 		items.removeAll(toRemove, true);
-
-		if(previousOverlay != null) {
-			ShopOverlay shopOverlay = new ShopOverlay(Game.instance.player, null, null, items);
-			shopOverlay.pausesGame = pausesGame;
-			shopOverlay.timer = 1000f;
-			OverlayManager.instance.replace(previousOverlay, shopOverlay);
-		}
-		else {
-			ShopOverlay shopOverlay = new ShopOverlay(Game.instance.player, title, description, items);
-			shopOverlay.pausesGame = pausesGame;
-			OverlayManager.instance.push(shopOverlay);
-		}
+		return items;
 	}
 }

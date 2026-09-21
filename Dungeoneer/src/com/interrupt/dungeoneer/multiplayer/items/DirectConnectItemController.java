@@ -5,16 +5,20 @@ import com.interrupt.dungeoneer.entities.items.Potion;
 import com.interrupt.dungeoneer.entities.items.Food;
 import com.interrupt.dungeoneer.entities.items.Scroll;
 import com.interrupt.dungeoneer.entities.items.Gold;
+import com.interrupt.dungeoneer.entities.items.QuestItem;
 import com.interrupt.dungeoneer.entities.projectiles.Missile;
 import com.badlogic.gdx.math.Vector3;
 import com.badlogic.gdx.utils.Array;
 import com.interrupt.dungeoneer.entities.Entity;
+import com.interrupt.dungeoneer.entities.Group;
 import com.interrupt.dungeoneer.entities.Breakable;
 import com.interrupt.dungeoneer.entities.Door;
 import com.interrupt.dungeoneer.entities.triggers.Trigger;
 import com.interrupt.dungeoneer.entities.triggers.BasicTrigger;
 import com.interrupt.dungeoneer.entities.triggers.ButtonModel;
 import com.interrupt.dungeoneer.entities.Item;
+import com.interrupt.dungeoneer.entities.Monster;
+import com.interrupt.dungeoneer.multiplayer.floor.SharedFloorIdentity;
 import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.entities.items.ItemModification;
 import com.interrupt.dungeoneer.entities.items.ItemStack;
@@ -36,9 +40,13 @@ import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
 import com.interrupt.managers.ItemManager;
+import com.interrupt.managers.EntityManager;
+import com.badlogic.gdx.utils.OrderedMap;
+import com.interrupt.managers.MonsterManager;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -83,6 +91,19 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     public void setConsumableConsumer(ConsumableConsumer consumer) {
         consumableConsumer = consumer;
+    }
+
+    /** Campaign Slot economy decisions that share this bridge's request identities. */
+    public interface EconomyBoundary {
+        boolean acquireGold(ParticipantContext participant, int amount);
+        boolean economyAction(ItemRequest request, ParticipantContext participant);
+        void onItemActionResult(ItemActionResult result);
+    }
+    private EconomyBoundary economyBoundary;
+    private final Map<Long, Long> pendingGoldPickups = new LinkedHashMap<Long, Long>();
+
+    public void setEconomyBoundary(EconomyBoundary boundary) {
+        economyBoundary = boundary;
     }
 
     @Override public boolean consume(Item item) {
@@ -144,13 +165,27 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         if(host != null) {
             discoverWorldItems();
             for(ItemRequest request : host.drainItemRequests()) {
+                if(request.worldGeneration != peer.getNativeWorldGeneration()) {
+                    diagnose("Host refused stale " + request.action + " for world generation "
+                            + request.worldGeneration);
+                    host.publishItemActionResult(request.getParticipantId(), new ItemActionResult(
+                            request.requestId, request.entityId, false));
+                    continue;
+                }
                 ParticipantContext participant = participant(request.getParticipantId());
                 if(participant == null) {
+                    diagnose("no authoritative character state for "
+                            + request.getParticipantId().getValue() + " " + request.action);
                     host.publishItemActionResult(request.getParticipantId(), new ItemActionResult(
                             request.requestId, request.entityId, false)); continue;
                 }
                 AuthoritativeItemWorld.Outcome result = host.getItemWorld().apply(request,
                         participant, boundary);
+                if(result != AuthoritativeItemWorld.Outcome.ACCEPTED) {
+                    diagnose("Host refused " + request.action + " from "
+                            + request.getParticipantId().getValue() + " entity " + request.entityId
+                            + " request " + request.requestId + ": " + result);
+                }
                 host.publishItemActionResult(request.getParticipantId(), new ItemActionResult(
                         request.requestId, request.entityId, result == AuthoritativeItemWorld.Outcome.ACCEPTED));
                 if(result == AuthoritativeItemWorld.Outcome.ACCEPTED
@@ -168,6 +203,14 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 pendingConsumption.remove(result.entityId);
                 pendingConsumptionAim.remove(result.entityId);
             }
+            if(!result.accepted) {
+                diagnose("Host refused request " + result.requestId + " for entity " + result.entityId);
+            }
+            Long goldId = pendingGoldPickups.remove(result.requestId);
+            Item gold = goldId == null ? null : nativeItems.get(goldId);
+            // Only the Host-accepted acquirer hears the native pickup; others see the pile vanish.
+            if(result.accepted && gold instanceof Gold) ((Gold)gold).presentPickup(game.player);
+            if(economyBoundary != null) economyBoundary.onItemActionResult(result);
         }
         for(DoorFeedback feedback : peer.drainDoorFeedback()) {
             Game.ShowMessage(com.interrupt.managers.StringManager.get(feedback.localizationKey), 3, 1f);
@@ -260,7 +303,10 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         remember(new Gold(6));
         remember(new Key());
         remember(new Missile());
+        remember(new QuestItem());
         catalogue(game.itemManager);
+        catalogue(EntityManager.instance);
+        catalogue(game.monsterManager);
         attachWorldObjects();
         objectGeneration = peer.getNativeWorldGeneration();
         List<Item> starters = new ArrayList<Item>();
@@ -303,24 +349,33 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         objectLevel = game.level;
         objects.clear();
         objectIds.clear();
-        List<Entity> interactable = entities();
-        java.util.Collections.sort(interactable, new java.util.Comparator<Entity>() {
-            public int compare(Entity a, Entity b) {
-                int value = a.getClass().getName().compareTo(b.getClass().getName());
-                if(value == 0) value = Float.compare(a.x, b.x);
-                if(value == 0) value = Float.compare(a.y, b.y);
-                if(value == 0) value = Float.compare(a.z, b.z);
-                return value;
+        Map<String, Integer> occurrences = new HashMap<String, Integer>();
+        for(Entity entity : entities()) {
+            if(!(entity instanceof Door || entity instanceof Breakable || entity instanceof Trigger
+                    || entity instanceof BasicTrigger || entity instanceof ButtonModel)) continue;
+            String placement = SharedFloorIdentity.placementKey(entity);
+            Integer occurrence = occurrences.get(placement);
+            occurrences.put(placement, occurrence == null ? 1 : occurrence + 1);
+            long objectId = worldObjectId(placement, occurrence == null ? 0 : occurrence);
+            if(objects.containsKey(objectId)) {
+                diagnose("World object identity hash collision for "
+                        + entity.getClass().getSimpleName() + " at " + entity.x + "," + entity.y);
+                continue;
             }
-        });
-        long objectId = 1000000L;
-        for(Entity entity : interactable) {
-            if(entity instanceof Door || entity instanceof Breakable || entity instanceof Trigger
-                    || entity instanceof BasicTrigger || entity instanceof ButtonModel) {
-                objects.put(objectId, entity);
-                objectIds.put(entity, objectId++);
-            }
+            objects.put(objectId, entity);
+            objectIds.put(entity, objectId);
         }
+    }
+
+    /**
+     * Identity depends only on shared floor content. Peers build that floor identically from the
+     * Host seed, so objects stacked on one spot keep the same encounter order on both sides.
+     */
+    private static long worldObjectId(String placement, int occurrence) {
+        String key = placement + "#" + occurrence;
+        long hash = 1125899906842597L;
+        for(int index = 0; index < key.length(); index++) hash = hash * 31L + key.charAt(index);
+        return 1000000L + Math.abs(hash % 1000000000000L);
     }
 
     private void discoverWorldItems() {
@@ -343,20 +398,128 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     private void register(Item item, ParticipantId owner) {
         String key = remember(item);
-        ItemProperties properties = new ItemProperties(item.itemCondition.ordinal(), item.itemLevel,
+        PhysicalItemState state = host.getItemWorld().spawn(key, owner, item.x, item.y, item.z, properties(item));
+        nativeItems.put(state.entityId, item);
+        itemIds.put(item, state.entityId);
+        if(item instanceof Key) host.getItemWorld().registerKey(state.entityId);
+        if(item instanceof Gold) host.getItemWorld().registerGold(state.entityId);
+        host.getItemWorld().registerEquipment(state.entityId, item.GetEquipLoc(), false);
+    }
+
+    private static ItemProperties properties(Item item) {
+        return new ItemProperties(item.itemCondition.ordinal(), item.itemLevel,
                 item.enchantment == null || item.enchantment.name == null ? "" : item.enchantment.name,
                 item.prefixEnchantment == null || item.prefixEnchantment.name == null
                         ? "" : item.prefixEnchantment.name,
                 item instanceof ItemStack ? ((ItemStack)item).count
                         : item instanceof Wand ? ((Wand)item).charges
-                        : item instanceof Gold
-                                ? ((Gold)item).goldAmount : 1,
+                        // Native autoPickup coins add one gold regardless of goldAmount.
+                        : item instanceof Gold ? (((Gold)item).autoPickup ? 1 : ((Gold)item).goldAmount) : 1,
                 item instanceof Potion ? ((Potion)item).potionType.ordinal() : -1);
-        PhysicalItemState state = host.getItemWorld().spawn(key, owner, item.x, item.y, item.z, properties);
-        nativeItems.put(state.entityId, item);
-        itemIds.put(item, state.entityId);
-        if(item instanceof Key) host.getItemWorld().registerKey(state.entityId);
-        host.getItemWorld().registerEquipment(state.entityId, item.GetEquipLoc(), false);
+    }
+
+    /** Local template identity plus bounded rolls for an Item that is not yet physical. */
+    public static final class ItemDescription {
+        public final String templateId;
+        public final ItemProperties properties;
+        ItemDescription(String templateId, ItemProperties properties) {
+            this.templateId = templateId; this.properties = properties;
+        }
+    }
+
+    public ItemDescription describe(Item item) {
+        return new ItemDescription(remember(item), properties(item));
+    }
+
+    /** Registers native content constructed outside items.dat so every peer can materialize it. */
+    public String rememberTemplate(Item item) {
+        return remember(item);
+    }
+
+    /** Catalogues raw shared-floor items before native spawn-chance filtering diverges per peer. */
+    public void rememberLevelTemplates(Level level) {
+        if(level == null) return;
+        IdentityHashMap<Entity, Boolean> visited = new IdentityHashMap<Entity, Boolean>();
+        rememberLevelTemplates(level.entities, visited);
+        rememberLevelTemplates(level.static_entities, visited);
+        rememberLevelTemplates(level.non_collidable_entities, visited);
+    }
+
+    private void rememberLevelTemplates(Iterable<? extends Entity> entities,
+            IdentityHashMap<Entity, Boolean> visited) {
+        if(entities == null) return;
+        for(Entity entity : entities) rememberEntityTemplate(entity, visited);
+    }
+
+    /** Presentation copy of a Host template; null when local content lacks it. */
+    public Item materialize(String templateId, ItemProperties properties) {
+        Item template = templates.get(templateId);
+        if(template == null) return null;
+        Item item = ItemManager.Copy(template.getClass(), template);
+        return applyProperties(item, properties.condition, properties.quantity, properties)
+                ? item : null;
+    }
+
+    private boolean applyProperties(Item item, int condition, int quantity,
+            ItemProperties properties) {
+        if(!properties.suffix.isEmpty() && !modifications.containsKey(properties.suffix)) {
+            peer.failNativePresentation("Unknown Host item modification: " + properties.suffix);
+            return false;
+        }
+        if(!properties.prefix.isEmpty() && !modifications.containsKey(properties.prefix)) {
+            peer.failNativePresentation("Unknown Host item modification: " + properties.prefix);
+            return false;
+        }
+        item.itemCondition = Item.ItemCondition.values()[condition];
+        item.itemLevel = properties.level;
+        if(item instanceof Potion && properties.potionType >= 0) {
+            ((Potion)item).potionType = Potion.PotionType.values()[properties.potionType];
+        }
+        item.enchantment = modification(properties.suffix);
+        item.prefixEnchantment = modification(properties.prefix);
+        if(item instanceof ItemStack) ((ItemStack)item).count = quantity;
+        if(item instanceof Wand) ((Wand)item).charges = quantity;
+        if(item instanceof Gold) ((Gold)item).goldAmount = quantity;
+        return true;
+    }
+
+    /** Host delivers an accepted purchase to the buyer's backpack, or beside them when it is full. */
+    public void deliverPurchasedItem(Item item, ParticipantContext buyer) {
+        if(host == null || item == null || buyer == null) return;
+        ParticipantId owner = buyer.getParticipantId();
+        if(host.getItemWorld().hasBackpackSpace(owner)) {
+            item.isActive = false;
+            register(item, owner);
+            return;
+        }
+        item.isActive = true;
+        item.isDynamic = true;
+        item.ignorePlayerCollision = true;
+        item.x = buyer.getCharacter().getX();
+        item.y = buyer.getCharacter().getY();
+        item.z = buyer.getCharacter().getZ() + 0.4f;
+        game.level.SpawnEntity(item);
+        register(item, null);
+    }
+
+    /** Shares the per-Participant reliable request sequence used by Host duplicate rejection. */
+    public long submitEconomyAction(ItemAction action, long entityId, int quantity) {
+        if(nextRequest == Long.MAX_VALUE || peer.isSessionPaused()) return 0L;
+        long request = nextRequest++;
+        peer.submitItemAction(request, action, entityId, 0, quantity);
+        return request;
+    }
+
+    public boolean isAttached() { return game != null; }
+
+    public ParticipantId getLocalParticipantId() { return localId; }
+
+    public ParticipantContext participantContext(ParticipantId participant) {
+        return participant(participant);
+    }
+
+    public java.util.Collection<Entity> worldObjects() {
+        return java.util.Collections.unmodifiableCollection(objects.values());
     }
 
     private void applyStates() {
@@ -367,8 +530,11 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             Item item = nativeItems.get(state.entityId);
             if(item == null) {
                 Item template = templates.get(state.templateId);
-                if(template == null) throw new IllegalStateException(
-                        "Host item template is unavailable in local content: " + state.templateId);
+                if(template == null) {
+                    peer.failNativePresentation(
+                            "Host item template is unavailable in local content: " + state.templateId);
+                    return;
+                }
                 item = ItemManager.Copy(template.getClass(), template);
                 nativeItems.put(state.entityId, item);
                 itemIds.put(item, state.entityId);
@@ -381,17 +547,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             int quantity = state.properties.quantity;
             if(alreadyOwnedLocally && item instanceof ItemStack) quantity = Math.min(quantity, ((ItemStack)item).count);
             if(alreadyOwnedLocally && item instanceof Wand) quantity = Math.min(quantity, ((Wand)item).charges);
-            item.itemCondition = Item.ItemCondition.values()[condition];
-            item.itemLevel = state.properties.level;
-            if(item instanceof Potion && state.properties.potionType >= 0) {
-                ((Potion)item).potionType = Potion.PotionType.values()[state.properties.potionType];
-            }
-            item.enchantment = modification(state.properties.suffix);
-            item.prefixEnchantment = modification(state.properties.prefix);
-            if(item instanceof ItemStack) ((ItemStack)item).count = quantity;
-            if(item instanceof Wand) ((Wand)item).charges = quantity;
-            if(item instanceof Gold)
-                ((Gold)item).goldAmount = quantity;
+            if(!applyProperties(item, condition, quantity, state.properties)) return;
             if(!ownedLocally && game.player.ownsPhysicalItem(item)) {
                 game.player.removeAuthoritativeItem(item);
             }
@@ -530,12 +686,20 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     private boolean submitPickup(Item item) {
         reportEquipment();
         Long id = itemIds.get(item);
+        if(id == null) {
+            diagnose("No shared identity for picked up " + item.getClass().getSimpleName()
+                    + " " + item.name);
+        }
         if(id != null) {
             Long previous = lastPickupAttempts.get(id);
             // Auto-pickups can touch each render frame while reliable acknowledgement is in flight.
             if(previous == null || frame - previous >= 30L) {
                 lastPickupAttempts.put(id, frame);
-                submit(ItemAction.PICKUP, id);
+                long request = submit(ItemAction.PICKUP, id);
+                if(request > 0L && item instanceof Gold) {
+                    if(pendingGoldPickups.size() >= 64) pendingGoldPickups.clear();
+                    pendingGoldPickups.put(request, id);
+                }
             }
         }
         return true;
@@ -554,14 +718,29 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     public boolean use(Entity entity, float x, float y) {
         if(entity instanceof Item) return pickup((Item)entity);
         Long id = objectIds.get(entity);
-        if(id == null) return false;
+        if(id == null) {
+            diagnose("No shared identity for used " + entity.getClass().getSimpleName()
+                    + "; native local use continues");
+            return false;
+        }
         submit(ItemAction.USE_OBJECT, id);
         return true;
     }
 
-    private void submit(ItemAction action, long id) {
-        if(nextRequest == Long.MAX_VALUE || peer.isSessionPaused()) return;
-        peer.submitItemAction(nextRequest++, action, id);
+    /** Bounded troubleshooting for interactions that never reach or pass Host authority. */
+    private void diagnose(String message) {
+        if(com.badlogic.gdx.Gdx.app != null) com.badlogic.gdx.Gdx.app.log("DelverMultiplayer", message);
+    }
+
+    private long submit(ItemAction action, long id) {
+        if(nextRequest == Long.MAX_VALUE || peer.isSessionPaused()) {
+            diagnose("Dropped " + action + " for entity " + id
+                    + " (paused=" + peer.isSessionPaused() + ")");
+            return 0L;
+        }
+        long request = nextRequest++;
+        peer.submitItemAction(request, action, id);
+        return request;
     }
 
     private ParticipantContext participant(ParticipantId id) {
@@ -603,6 +782,12 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         }
         public boolean canReach(ParticipantContext participant, float x, float y, float z) {
             return reachable(participant, x, y, null);
+        }
+        public boolean acquireGold(ParticipantContext participant, int amount) {
+            return economyBoundary != null && economyBoundary.acquireGold(participant, amount);
+        }
+        public boolean economyAction(ItemRequest request, ParticipantContext participant) {
+            return economyBoundary != null && economyBoundary.economyAction(request, participant);
         }
         public boolean useObject(long entityId, ParticipantContext participant) {
             Entity entity = objects.get(entityId);
@@ -651,6 +836,42 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         rememberModifications(manager.armorEnchantments); rememberModifications(manager.armorPrefixEnchantments);
     }
 
+    private void catalogue(EntityManager manager) {
+        if(manager == null) return;
+        IdentityHashMap<Entity, Boolean> visited = new IdentityHashMap<Entity, Boolean>();
+        if(manager.entities != null) for(OrderedMap<String, Entity> category : manager.entities.values()) {
+            if(category != null) for(Entity entity : category.values()) rememberEntityTemplate(entity, visited);
+        }
+        if(manager.surprises != null) {
+            for(Entity entity : manager.surprises) rememberEntityTemplate(entity, visited);
+        }
+    }
+
+    private void catalogue(MonsterManager manager) {
+        if(manager == null || manager.monsters == null) return;
+        IdentityHashMap<Entity, Boolean> visited = new IdentityHashMap<Entity, Boolean>();
+        for(Array<Monster> monsters : manager.monsters.values()) {
+            if(monsters == null) continue;
+            for(Monster monster : monsters) rememberEntityTemplate(monster, visited);
+        }
+    }
+
+    private void rememberEntityTemplate(Entity entity, IdentityHashMap<Entity, Boolean> visited) {
+        if(entity == null || visited.put(entity, Boolean.TRUE) != null) return;
+        if(entity instanceof Item) remember((Item)entity);
+        if(entity instanceof Monster) {
+            Monster monster = (Monster)entity;
+            remember(monster.loot);
+            rememberEntityTemplate(monster.projectile, visited);
+        }
+        if(entity instanceof Group) {
+            for(Entity child : ((Group)entity).entities) rememberEntityTemplate(child, visited);
+        }
+        if(entity.getAttached() != null) {
+            for(Entity child : entity.getAttached()) rememberEntityTemplate(child, visited);
+        }
+    }
+
     private void remember(Array<? extends Item> items) {
         if(items != null) for(Item item : items) remember(item);
     }
@@ -660,6 +881,11 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         if(!templates.containsKey(key)) templates.put(key, ItemManager.Copy(item.getClass(), item));
         if(item.enchantment != null) modifications.put(item.enchantment.name, item.enchantment);
         if(item.prefixEnchantment != null) modifications.put(item.prefixEnchantment.name, item.prefixEnchantment);
+        // Stacked native ammo becomes a standalone physical item once it is fired, dropped or bought.
+        if(item instanceof ItemStack) {
+            Item stacked = ((ItemStack)item).item;
+            if(stacked != null && stacked != item) remember(stacked);
+        }
         return key;
     }
 

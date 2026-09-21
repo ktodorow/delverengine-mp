@@ -1,6 +1,7 @@
 package com.interrupt.dungeoneer;
 
 import com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController;
+import com.interrupt.dungeoneer.multiplayer.floor.SharedFloorBuild;
 import com.badlogic.gdx.Application;
 import com.badlogic.gdx.Game;
 import com.badlogic.gdx.Gdx;
@@ -36,6 +37,15 @@ public class GameApplication extends Game {
 
     public static final String OPEN_SOURCE_TEST_LEVEL = "levels/test-level.bin";
     public static final String OWNED_TUTORIAL_FLOOR = "owned-game-copy-tutorial";
+    private static final java.util.regex.Pattern OWNED_LEVEL_FLOOR =
+            java.util.regex.Pattern.compile("levels/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\\.bin");
+
+    /** Development Direct Connect floors name one owned level file; never a filesystem path. */
+    public static boolean isOwnedLevelFloor(String floorId) {
+        return floorId != null && floorId.length()
+                <= com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.MAX_FLOOR_ID_BYTES
+                && OWNED_LEVEL_FLOOR.matcher(floorId).matches();
+    }
 
     private enum StartupMode {
         NORMAL,
@@ -56,6 +66,7 @@ public class GameApplication extends Game {
     private final SlotPresentation directConnectPresentation;
     private final int directConnectRequestedSlot;
     private final ReconnectTokenStore directConnectReconnectTokens;
+    private String directConnectFloor;
     private DirectConnectPeer directConnectPeer;
     private DirectConnectSessionScreen directConnectScreen;
     private DirectConnectMovementController directConnectMovementController;
@@ -107,8 +118,19 @@ public class GameApplication extends Game {
 
     public static GameApplication forDirectConnectHost(int port, CampaignRoster roster,
             CampaignRosterStore rosterStore) {
-        return new GameApplication(StartupMode.DIRECT_CONNECT_HOST, null, port,
+        return forDirectConnectHost(port, roster, rosterStore, null);
+    }
+
+    /** A non-null owned level replaces the tutorial as the shared development floor. */
+    public static GameApplication forDirectConnectHost(int port, CampaignRoster roster,
+            CampaignRosterStore rosterStore, String ownedFloor) {
+        if(ownedFloor != null && !isOwnedLevelFloor(ownedFloor)) {
+            throw new IllegalArgumentException("Invalid owned Direct Connect floor: " + ownedFloor);
+        }
+        GameApplication application = new GameApplication(StartupMode.DIRECT_CONNECT_HOST, null, port,
                 roster, rosterStore, null, null, 0, null);
+        application.directConnectFloor = ownedFloor;
+        return application;
     }
 
     public static GameApplication forDirectConnectClient(String address, int port,
@@ -163,10 +185,15 @@ public class GameApplication extends Game {
         Gdx.app.setLogLevel(Application.LOG_INFO);
         DirectConnectCompatibility compatibility = createDirectConnectCompatibility();
         if(startupMode == StartupMode.DIRECT_CONNECT_HOST) {
-            Level authoritativeLevel = loadDirectConnectLevel();
-            directConnectPeer = DirectConnectHost.start(directConnectPort, compatibility,
+            if(directConnectFloor != null && !OwnedGameCopyMount.isMounted()) {
+                throw new IllegalStateException("Owned Direct Connect floor requires a validated Owned Game Copy.");
+            }
+            Level authoritativeLevel = loadDirectConnectLevel(directConnectFloor);
+            DirectConnectHost host = DirectConnectHost.start(directConnectPort, compatibility,
                     directConnectRoster, directConnectRosterStore,
                     new LevelMovementCollisionWorld(authoritativeLevel));
+            if(directConnectFloor != null) host.useOwnedFloor(directConnectFloor);
+            directConnectPeer = host;
         }
         else {
             directConnectPeer = DirectConnectClient.connect(directConnectAddress,
@@ -184,7 +211,29 @@ public class GameApplication extends Game {
                 : DirectConnectCompatibility.forOwnedGameCopy(ownedCopy);
     }
 
-    private Level loadDirectConnectLevel() {
+    /** Transition floors keep theme in native generator section definitions, not in their .bin. */
+    private static String ownedFloorTheme(String floorId) {
+        for(Level definition : com.interrupt.dungeoneer.game.Game.buildLevelLayout()) {
+            if(floorId.equals(definition.levelFileName) && definition.theme != null) return definition.theme;
+        }
+        throw new IllegalStateException("Owned Game Copy defines no theme for Direct Connect floor: " + floorId);
+    }
+
+    /** Native player template gold; a missing template falls back like Game(Level) to a new Player. */
+    private static int nativeStartingGold() {
+        try {
+            com.interrupt.dungeoneer.entities.Player template = com.interrupt.utils.JsonUtil.fromJson(
+                    com.interrupt.dungeoneer.entities.Player.class,
+                    com.interrupt.dungeoneer.game.Game.findInternalFileInMods(
+                            "data/" + com.interrupt.dungeoneer.game.Game.gameData.playerDataFile));
+            return template == null ? 0 : Math.max(0, template.gold);
+        }
+        catch(Exception missing) {
+            return 0;
+        }
+    }
+
+    private Level loadDirectConnectLevel(String floorId) {
         if(!OwnedGameCopyMount.isMounted()) {
             Level level = KryoSerializer.loadLevel(Gdx.files.internal(OPEN_SOURCE_TEST_LEVEL));
             if(level == null) {
@@ -197,6 +246,20 @@ public class GameApplication extends Game {
 
         com.interrupt.dungeoneer.game.Game.gameData =
                 com.interrupt.dungeoneer.game.Game.getModManager().loadGameData();
+        if(floorId != null && !OWNED_TUTORIAL_FLOOR.equals(floorId)) {
+            if(!isOwnedLevelFloor(floorId)) {
+                throw new IllegalStateException("Host announced an unsupported owned floor: " + floorId);
+            }
+            // Native entities such as TriggeredShop read localized defaults while deserializing.
+            com.interrupt.managers.StringManager.init();
+            com.badlogic.gdx.files.FileHandle file = com.interrupt.dungeoneer.game.Game.getInternal(floorId);
+            Level owned = file == null || !file.exists() ? null : KryoSerializer.loadLevel(file);
+            if(owned == null) {
+                throw new IllegalStateException("Could not load owned Direct Connect floor: " + floorId);
+            }
+            if(owned.theme == null) owned.theme = ownedFloorTheme(floorId);
+            return owned;
+        }
         Level tutorial = com.interrupt.dungeoneer.game.Game.gameData == null
                 ? null : com.interrupt.dungeoneer.game.Game.gameData.tutorialLevel;
         if(tutorial == null || tutorial.levelFileName == null) {
@@ -238,11 +301,29 @@ public class GameApplication extends Game {
                 || directConnectPeer.getStatus().getPhase() != DirectConnectPhase.READY) return;
         enteredDirectConnectFloor = true;
 
-        Level startupLevel = loadDirectConnectLevel();
+        // Clients load the floor announced by Host from their own certified Owned Game Copy.
+        Level startupLevel = loadDirectConnectLevel(directConnectPeer instanceof DirectConnectHost
+                ? directConnectFloor : directConnectPeer.getStatus().getFloorId());
+        DirectConnectItemController items = new DirectConnectItemController(directConnectPeer);
+        items.rememberLevelTemplates(startupLevel);
+        // Every peer builds its own native floor; Host's seed makes those builds identical.
+        long floorSeed = directConnectPeer.getSharedFloorSeed();
+        if(floorSeed == 0L) {
+            throw new IllegalStateException("Host did not announce a Shared Floor seed.");
+        }
+        SharedFloorBuild floorBuild = new SharedFloorBuild(floorSeed);
+        startupLevel.sharedFloorBuild = floorBuild;
 
         DirectConnectSessionScreen completedScreen = directConnectScreen;
         directConnectScreen = null;
         createFromEditor(startupLevel);
+        // Game(Level) is DelvEdit's play-test start and grants debug gold before Campaign Slots
+        // copy the starting character; a new Co-op Campaign starts with native starting gold.
+        GameManager.getGame().player.gold = nativeStartingGold();
+        if(floorBuild.getFingerprint() == null) {
+            throw new IllegalStateException("Shared Floor build did not complete.");
+        }
+        directConnectPeer.recordSharedFloorFingerprint(floorBuild.getFingerprint());
         directConnectMovementController =
                 new DirectConnectMovementController(directConnectPeer);
         if(!directConnectMovementController.applyInitialAuthoritativeState(
@@ -255,10 +336,15 @@ public class GameApplication extends Game {
                 directConnectPeer, directConnectMovementController,
                 OwnedGameCopyMount.isMounted());
         mainScreen.setNetworkCombatController(directConnectCombatController);
-        DirectConnectItemController items = new DirectConnectItemController(directConnectPeer);
         directConnectCombatController.setWeaponResolver(items);
-        items.setConsumableConsumer(directConnectCombatController::consumeNativeItem);
+        com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController economy =
+                new com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController(
+                        directConnectPeer, items, directConnectCombatController);
+        items.setConsumableConsumer(economy.consumableConsumer(directConnectCombatController::consumeNativeItem));
+        items.setEconomyBoundary(economy);
+        directConnectCombatController.setProgressResolver(economy);
         mainScreen.setNetworkItemController(items);
+        mainScreen.setNetworkEconomyController(economy);
         completedScreen.dispose();
     }
 

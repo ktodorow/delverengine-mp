@@ -16,6 +16,7 @@ import com.interrupt.dungeoneer.metrics.MetricsCore;
 import com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController;
 import com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController;
 import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
 import com.interrupt.dungeoneer.overlays.PartyChatOverlay;
@@ -51,6 +52,7 @@ public class GameScreen implements Screen {
     private DirectConnectMovementController networkMovementController;
     private DirectConnectCombatController networkCombatController;
     private DirectConnectItemController networkItemController;
+    private DirectConnectPhase reportedStoppedDirectConnectPhase;
     
     public GameScreen(Level level, GameManager gameManager, GameInput input) {
     	this.gameManager = gameManager;
@@ -75,6 +77,9 @@ public class GameScreen implements Screen {
 		if(running) {
 			Game game = GameManager.getGame();
 			DirectConnectPeer directConnect = directConnectPeer();
+			boolean directConnectReady = directConnect == null
+					|| canAdvanceDirectConnectGameplay(directConnect.getStatus().getPhase());
+			if(!directConnectReady) reportStoppedDirectConnect(directConnect);
 			handlePartyControls(directConnect);
 
 			if(resetDelta) {
@@ -85,10 +90,11 @@ public class GameScreen implements Screen {
 			// set a maximum time between ticks (12 fps, wouldn't be playable anyway)
 			if(delta > 0.083f) delta = 0.083f;
 
-			if((!overlayManager.shouldPauseGame() || directConnect != null)
+			if(directConnectReady && (!overlayManager.shouldPauseGame() || directConnect != null)
 					&& (directConnect == null || !directConnect.isSessionPaused()))
 			{
                 if(networkItemController != null) networkItemController.prepare(game);
+                if(networkEconomyController != null) networkEconomyController.prepare(game);
 				if(networkCombatController != null && game != null) {
 					networkCombatController.prepare(game);
 				}
@@ -106,15 +112,16 @@ public class GameScreen implements Screen {
 			if(game != null)
 				game.updateMouseInput();
 
-			if(networkMovementController != null && game != null
+			if(directConnectReady && networkMovementController != null && game != null
 					&& (directConnect == null || !directConnect.isSessionPaused())) {
                 networkMovementController.update(game, input, delta);
             }
-			if(networkCombatController != null && game != null) {
+			if(directConnectReady && networkCombatController != null && game != null) {
 				networkCombatController.update(game);
 			}
 
-            if(networkItemController != null) networkItemController.update(game);
+            if(directConnectReady && networkItemController != null) networkItemController.update(game);
+            if(directConnectReady && networkEconomyController != null) networkEconomyController.update(game);
 
 			// draw the game
 			gameManager.render();
@@ -253,6 +260,7 @@ public class GameScreen implements Screen {
     public void dispose() {
         if(networkMovementController != null) networkMovementController.dispose();
         if(networkCombatController != null) networkCombatController.dispose();
+        if(networkEconomyController != null) networkEconomyController.dispose();
         if(networkItemController != null) networkItemController.dispose();
 		Audio.disposeAudio(null);
 		if(editorLevel != null) GameApplication.editorRunning = false;
@@ -272,6 +280,13 @@ public class GameScreen implements Screen {
         networkItemController = controller;
     }
 
+    private com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController networkEconomyController;
+
+    public void setNetworkEconomyController(
+            com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController controller) {
+        networkEconomyController = controller;
+    }
+
     private DirectConnectPeer directConnectPeer() {
         return GameApplication.instance == null ? null
                 : GameApplication.instance.getDirectConnectPeer();
@@ -287,6 +302,20 @@ public class GameScreen implements Screen {
             if(peer.canControlSessionPause()) peer.setSessionPaused(!peer.isSessionPaused());
             else peer.requestPauseSession();
         }
+    }
+
+    private void reportStoppedDirectConnect(DirectConnectPeer peer) {
+        if(peer == null || peer.getStatus() == null) return;
+        DirectConnectPhase phase = peer.getStatus().getPhase();
+        if(phase == reportedStoppedDirectConnectPhase) return;
+        reportedStoppedDirectConnectPhase = phase;
+        String message = "Direct Connect stopped: " + peer.getStatus().getMessage();
+        if(Gdx.app != null) Gdx.app.error("DelverMultiplayer", message);
+        Game.ShowMessage(message, 10f, 0.75f);
+    }
+
+    static boolean canAdvanceDirectConnectGameplay(DirectConnectPhase phase) {
+        return phase == DirectConnectPhase.READY;
     }
 
     static boolean canHandlePartyControls(

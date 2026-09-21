@@ -22,6 +22,37 @@ public class DesktopLaunchOptionsTest {
     }
 
     @Test
+    public void hostMayChooseOwnedDevelopmentFloor() {
+        DesktopLaunchOptions host = DesktopLaunchOptions.parse(new String[] {
+                "--direct-host", "--owned-copy=C:\\Games\\Delver\\delver.jar",
+                "--direct-floor=levels/shop-interstitial.bin"
+        });
+
+        assertEquals("levels/shop-interstitial.bin", host.directFloor);
+    }
+
+    @Test
+    public void developmentFloorRejectsClientsPathsAndMissingOwnedCopy() {
+        assertRejected(new String[] {"--direct-connect=127.0.0.1",
+                "--owned-copy=C:\\Games\\Delver\\delver.jar", "--direct-floor=levels/start.bin"});
+        assertRejected(new String[] {"--direct-host", "--direct-floor=levels/start.bin"});
+        assertRejected(new String[] {"--direct-host", "--owned-copy=C:\\Games\\Delver\\delver.jar",
+                "--direct-floor=levels/../saves/game.bin"});
+        assertRejected(new String[] {"--direct-host", "--owned-copy=C:\\Games\\Delver\\delver.jar",
+                "--direct-floor=C:\\levels\\start.bin"});
+        assertRejected(new String[] {"--direct-host", "--owned-copy=C:\\Games\\Delver\\delver.jar",
+                "--direct-floor=data/items.dat"});
+    }
+
+    private static void assertRejected(String[] args) {
+        try {
+            DesktopLaunchOptions.parse(args);
+            fail("Invalid Direct Connect floor launch was accepted.");
+        }
+        catch(IllegalArgumentException expected) { }
+    }
+
+    @Test
     public void inspectionDoesNotLaunchGame() {
         DesktopLaunchOptions options = DesktopLaunchOptions.parse(new String[] {
                 "--inspect-owned-copy", "C:\\Games\\Delver\\delver.jar"

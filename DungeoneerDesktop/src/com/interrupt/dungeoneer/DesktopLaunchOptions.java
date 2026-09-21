@@ -13,6 +13,8 @@ final class DesktopLaunchOptions {
     boolean browseOwnedCopy;
     File ownedCopy;
     boolean directHost;
+    /** Development-only Host floor from the certified Owned Game Copy, e.g. levels/start.bin. */
+    String directFloor;
     String directConnectAddress;
     boolean discoverPrivateSessions;
     String diagnoseDirectConnectAddress;
@@ -73,6 +75,11 @@ final class DesktopLaunchOptions {
                     "--direct-host=".length())) {
                 options.directHost = true;
                 options.sessionPort = parsePort(argument.substring("--direct-host=".length()));
+            }
+            else if(argument.regionMatches(true, 0, "--direct-floor=", 0,
+                    "--direct-floor=".length())) {
+                options.directFloor = requireValue(argument.substring("--direct-floor=".length()),
+                        "Direct Connect floor cannot be empty.");
             }
             else if(argument.regionMatches(true, 0, "--direct-connect=", 0,
                     "--direct-connect=".length())) {
@@ -263,6 +270,18 @@ final class DesktopLaunchOptions {
         }
         if(options.directConnectAddress != null && options.campaignIdSpecified) {
             throw new IllegalArgumentException("Client receives Campaign identity from Host.");
+        }
+        if(options.directFloor != null) {
+            if(!options.directHost) {
+                throw new IllegalArgumentException("Only Host chooses --direct-floor; clients load the Host floor.");
+            }
+            if(options.ownedCopy == null) {
+                throw new IllegalArgumentException("--direct-floor requires --owned-copy.");
+            }
+            if(!GameApplication.isOwnedLevelFloor(options.directFloor)) {
+                throw new IllegalArgumentException(
+                        "--direct-floor must name an owned level such as levels/shop-interstitial.bin.");
+            }
         }
         if(options.directHost && options.requestedSlot != 0) {
             throw new IllegalArgumentException("Host always owns Campaign Slot 1.");

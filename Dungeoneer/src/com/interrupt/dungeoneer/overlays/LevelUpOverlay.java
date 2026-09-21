@@ -134,6 +134,11 @@ public class LevelUpOverlay extends WindowOverlay {
 
 	public void pickStat(String chosenAttribute) {
 		if(!chosenAttribute.equals("")) {
+			if(player.requestStatChoice(chosenAttribute)) {
+				OverlayManager.instance.remove(this);
+				return;
+			}
+
 			if(chosenAttribute.equals("ATTACK")) {
 				player.stats.ATK++;
 			}

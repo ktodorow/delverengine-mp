@@ -37,7 +37,30 @@ public class ShopOverlay extends WindowOverlay {
 	private Array<ShopItem> selected = new Array<ShopItem>();
 	private Label lblTotalAmount;
 	private Label lblGoldAmount;
-	
+
+	/** Multiplayer boundary: a purchase is Host intent and never mutates local gold or stock. */
+	public interface PurchaseAuthority {
+		void purchase(ShopItem item);
+	}
+
+	private PurchaseAuthority purchaseAuthority;
+	private ShopItem modalItem;
+
+	public void setPurchaseAuthority(PurchaseAuthority authority) {
+		purchaseAuthority = authority;
+	}
+
+	public Array<ShopItem> getItems() {
+		return items;
+	}
+
+	/** Rebuilds after authoritative stock or gold changes; a still-available confirmation stays open. */
+	public void refreshStock() {
+		if(ui == null) return;
+		if(modalItem != null && items.contains(modalItem, true)) return;
+		makeLayout();
+	}
+
 	public ShopOverlay(Player player) { this.player = player; }
 	public ShopOverlay(Player player, String prefix, String title, String description, Array<ShopItem> items) {
 		this.player = player;
@@ -79,6 +102,7 @@ public class ShopOverlay extends WindowOverlay {
 	}
 
 	protected void makeBuyModal(final ShopItem item, Image itemIcon) {
+		modalItem = item;
 		buttonOrder.clear();
 		gamepadSelectionIndex = null;
 		lastGamepadSelectionIndex = null;
@@ -121,6 +145,12 @@ public class ShopOverlay extends WindowOverlay {
 			buyButton.addListener(new ClickListener() {
 				@Override
 				public void clicked(InputEvent event, float x, float y) {
+
+					if(purchaseAuthority != null) {
+						purchaseAuthority.purchase(item);
+						makeLayout();
+						return;
+					}
 
 					// Buy the item!
 					if(item.item != null) {
@@ -211,7 +241,8 @@ public class ShopOverlay extends WindowOverlay {
 	public Table makeContent() {
 
 		int windowWidth = 200;
-		
+
+		modalItem = null;
 		buttonOrder.clear();
 		
 		final Overlay thisOverlay = this;

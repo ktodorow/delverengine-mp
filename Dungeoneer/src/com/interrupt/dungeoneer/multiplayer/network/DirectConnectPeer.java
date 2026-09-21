@@ -94,6 +94,13 @@ public interface DirectConnectPeer extends AutoCloseable {
 
     default long getNativeWorldGeneration() { return 1; }
 
+    /** Host-chosen seed every peer builds the Shared Floor from; 0 before Host announces it. */
+    default long getSharedFloorSeed() { return 0L; }
+
+    /** Reports this peer's finished floor build. Host keeps it; a client sends it for comparison. */
+    default void recordSharedFloorFingerprint(
+            com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint fingerprint) { }
+
     default List<com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationCue> drainNativeAnimationCues() { return java.util.Collections.emptyList(); }
 
     default List<NativeExplosionPresentation> drainNativeExplosions() { return java.util.Collections.emptyList(); }
@@ -123,6 +130,19 @@ public interface DirectConnectPeer extends AutoCloseable {
     }
 
     default int getPartyKeys() { return 0; }
+
+    default List<com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress> getParticipantProgress() {
+        return java.util.Collections.emptyList();
+    }
+
+    default List<com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState> getShopEntries() {
+        return java.util.Collections.emptyList();
+    }
+
+    /** Targeted live shop openings for this Participant; never replayed after reconnect. */
+    default List<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> drainShopOpenings() {
+        return java.util.Collections.emptyList();
+    }
 
     default List<PhysicalItemState> getPhysicalItems() {
         return java.util.Collections.emptyList();

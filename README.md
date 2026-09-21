@@ -59,6 +59,10 @@ Start client with Host address, same port, a different profile root, Party-uniqu
 .\gradlew.bat DungeoneerDesktop:runDirectClient --% -PsessionAddress=127.0.0.1 -PsessionPort=37777 -Pnickname=Friend -Pavatar=humanoid-2 -PprofileRoot=C:\DelverMpProfiles\Friend -PownedCopy=C:\Games\Delver\delver.jar --no-daemon
 ```
 
+Development only: Host may add `-PdirectFloor=levels/shop-interstitial.bin` (or another owned `levels/*.bin`, such as `levels/start.bin`) to start the shared session on that floor instead of the tutorial. Clients keep their normal command and load the Host-announced floor from their own Owned Game Copy.
+
+Every peer builds that floor from its own copy using one Host-announced seed, so crates, decorations, monsters, and doors land in identical places regardless of each player's graphics detail. If a client's build still differs, Host removes it before play with `Shared floor build differs from Host (Host/you: ...)`; its Campaign Slot stays safe.
+
 `--%` keeps Windows PowerShell from splitting a dotted address while handing arguments to `gradlew.bat`. For a client in the same Windows VM, `-PsessionAddress=127.0.0.1` can instead be omitted because loopback is the default.
 
 Client waits for explicit Host approval. In Host window, press `A` to approve displayed pending claim or `R` to reject it. After approved clients finish TCP and token-bound UDP setup, press `Enter` to start shared Owned Game Copy tutorial. Capacity three or four accepts more clients before `Enter`; give each separate profile root, Nickname, and unused `humanoid-1` through `humanoid-4` choice. Omitting `-PownedCopy` on both commands deliberately selects repository-owned open-source test floor.

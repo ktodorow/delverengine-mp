@@ -240,7 +240,7 @@ public class Breakable extends Model {
 						}
 					}
 				} else if (Game.rand.nextFloat() <= lootSpawnChance) {
-					Item itm = Game.GetItemManager().GetMonsterLoot(Game.instance.player.level, lootCanBeGold);
+					Item itm = Game.GetItemManager().GetMonsterLootForParticipant(lootCanBeGold);
 					if (itm != null) {
 						itm.x = x;
 						itm.y = y;

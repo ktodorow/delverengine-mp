@@ -286,6 +286,20 @@ public final class AuthoritativeCombatEncounter {
         if(changed) publish(hostTick, output);
     }
 
+    /** Accepted native level/stat change; level-up restores a living Participant like Player.addExperience. */
+    public synchronized void setParticipantMaximumHealth(long hostTick, ParticipantId participantId,
+            int maximumHealth, boolean restoreFull, HostSessionOutput output) {
+        MutableCombatant participant = participants.get(participantId);
+        if(participant == null || maximumHealth < 1
+                || maximumHealth > com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus.MAX_HEALTH) return;
+        int health = restoreFull && participant.health > 0 ? maximumHealth
+                : Math.min(participant.health, maximumHealth);
+        if(participant.maximumHealth == maximumHealth && participant.health == health) return;
+        participant.maximumHealth = maximumHealth;
+        participant.health = health;
+        publish(hostTick, output);
+    }
+
     public synchronized void setParticipantCombatEligible(ParticipantId participantId,
             boolean combatEligible) {
         if(participantId == null) return;

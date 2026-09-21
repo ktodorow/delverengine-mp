@@ -70,6 +70,9 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             new IdentityHashMap<com.interrupt.dungeoneer.entities.Actor, NativeStatusPresentation>();
     private long participantEffectGeneration;
     private CombatWeaponResolver weaponResolver;
+    private com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgressResolver progressResolver;
+    private final Map<Monster, ParticipantId> lastParticipantAttackers =
+            new java.util.WeakHashMap<Monster, ParticipantId>();
     private final Map<ParticipantId, Player> authoritativePlayers =
             new LinkedHashMap<ParticipantId, Player>();
     private final Map<Entity, ProjectilePresentation> projectilePresentations =
@@ -171,6 +174,16 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     }
 
     public void setWeaponResolver(CombatWeaponResolver resolver) { weaponResolver = resolver; }
+
+    public void setProgressResolver(
+            com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgressResolver resolver) {
+        progressResolver = resolver;
+    }
+
+    /** Participant whose accepted native damage last hurt this Host Monster, if any. */
+    public ParticipantId lastParticipantAttacker(Monster monster) {
+        return monster == null ? null : lastParticipantAttackers.get(monster);
+    }
 
     public boolean consumeNativeItem(ParticipantId participant, Item item) {
         return consumeNativeItem(participant, item, null);
@@ -396,6 +409,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         if(nativeAuthority == null || monsterId == null || damage <= 0) return;
         ParticipantId sourceId = participantId(instigator);
         if(sourceId != null) {
+            lastParticipantAttackers.put(damagedMonster, sourceId);
             nativeAuthority.recordNativeMonsterAttacker(monsterId, sourceId);
             CombatAction action = participantActions.get(sourceId);
             if(action == null) action = classify(null, damageType);
@@ -698,6 +712,12 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 if(presentation.targetObjectId > 0L) {
                     Entity target = weaponResolver == null ? null
                             : weaponResolver.worldObject(presentation.targetObjectId);
+                    if(target == null) {
+                        peer.failNativePresentation("Accepted Sword target "
+                                + presentation.targetObjectId
+                                + " is unavailable for native hit presentation.");
+                        continue;
+                    }
                     if(target instanceof Breakable) {
                         ((Breakable)target).playNetworkHitPresentation(presentation.x,
                                 presentation.y, presentation.z, sword, attachedLevel);
@@ -706,12 +726,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                         ((Door)target).playNetworkHitPresentation(presentation.x,
                                 presentation.y, presentation.z, sword, attachedLevel);
                     }
-                    else {
-                        peer.failNativePresentation("Accepted Sword target "
-                                + presentation.targetObjectId
-                                + " is unavailable for native hit presentation.");
-                        continue;
-                    }
+                    // Other shared objects, such as a solid shopkeeper trigger, have only Sword feedback.
                 }
                 sword.playNetworkEntityHitPresentation(presentation.x, presentation.y,
                         presentation.z, attachedLevel);
@@ -958,6 +973,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             authoritativePlayers.put(participantId, player);
         }
         if(weaponResolver != null) weaponResolver.synchronizeEquipment(participantId, player);
+        if(progressResolver != null) progressResolver.synchronizeProgress(participantId, player);
         player.calculatedStats.Recalculate(player);
         return player;
     }
@@ -1664,8 +1680,9 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         private MonsterCandidate(Monster monster, int levelOrder) {
             this.monster = monster;
             this.levelOrder = levelOrder;
+            // Group-placed monsters carry a per-peer random id prefix.
             stableKey = monster.getClass().getName() + "|"
-                    + (monster.id == null ? "" : monster.id) + "|"
+                    + com.interrupt.dungeoneer.multiplayer.floor.SharedFloorIdentity.stableEntityId(monster) + "|"
                     + Float.toString(monster.x) + "|" + Float.toString(monster.y)
                     + "|" + Float.toString(monster.z);
         }

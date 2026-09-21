@@ -22,6 +22,9 @@ public class MonsterManager {
 	Random random;
 	
 	public MonsterManager() { random = new Random(); }
+
+	/** Multiplayer Shared Floor builds replay identical monster picks on every peer. */
+	public void seedRandom(long seed) { random.setSeed(seed); }
 	
 	public Monster GetRandomMonster(String levelTheme) {
 		

@@ -1,4 +1,5 @@
 package com.interrupt.dungeoneer.multiplayer.network;
+import com.badlogic.gdx.Gdx;
 import com.interrupt.dungeoneer.multiplayer.items.ItemActionResult;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionPresentation;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationCue;
@@ -83,6 +84,7 @@ import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -142,6 +144,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
             PartyCommunicationState.initial();
     private int partyKeys;
     private long keyRevision = -1L;
+    private final java.util.Map<ParticipantId, com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress>
+            participantProgress = new java.util.LinkedHashMap<ParticipantId,
+                    com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress>();
+    private final java.util.Map<String, com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState> shopEntries =
+            new java.util.LinkedHashMap<String, com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState>();
+    private final java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> shopOpenings =
+            new java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening>();
     private final java.util.Map<String, ActorEffectsSnapshot> monsterEffects =
             new java.util.LinkedHashMap<String, ActorEffectsSnapshot>();
     private final java.util.Map<Long, NativeDynamicState> nativeDynamicStates =
@@ -592,8 +601,10 @@ public final class DirectConnectClient implements DirectConnectPeer {
 
     private synchronized void fail(String reason) {
         if(closing.get() || status.getPhase() == DirectConnectPhase.REJECTED) return;
-        status = new DirectConnectStatus(DirectConnectPhase.FAILED, boundedReason(reason),
+        String diagnostic = boundedReason(reason);
+        status = new DirectConnectStatus(DirectConnectPhase.FAILED, diagnostic,
                 sessionId, "host", null);
+        if(Gdx.app != null) Gdx.app.error("DelverMultiplayer", diagnostic);
         shutdownAsync();
     }
 
@@ -794,7 +805,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     public synchronized void submitItemAction(long requestId, ItemAction action, long entityId,
             int condition, int quantity, boolean hasAim, float aimX, float aimY, float aimZ) {
         DirectConnectWire.ItemRequestMessage request = new DirectConnectWire.ItemRequestMessage(
-                sessionId, requestId, action, entityId, condition, quantity,
+                sessionId, requestId, nativeWorldGeneration, action, entityId, condition, quantity,
                 hasAim, aimX, aimY, aimZ);
         if(!canSendReliableSessionEvent() || isSessionPaused()) return;
         nextItemRequestId = Math.max(nextItemRequestId, requestId + 1L);
@@ -824,10 +835,22 @@ public final class DirectConnectClient implements DirectConnectPeer {
 
     private long nativeWorldGeneration = 1;
     @Override public synchronized long getNativeWorldGeneration() { return nativeWorldGeneration; }
+
+    @Override public synchronized long getSharedFloorSeed() {
+        return readyMessage == null ? 0L : readyMessage.floorSeed;
+    }
+
+    /** Host compares this build with its own and removes a client whose floor differs. */
+    @Override public synchronized void recordSharedFloorFingerprint(
+            com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint fingerprint) {
+        if(fingerprint == null || !canSendReliableSessionEvent()) return;
+        tcpChannel.writeAndFlush(new DirectConnectWire.SharedFloorFingerprintMessage(sessionId, fingerprint));
+    }
     private synchronized void nativeWorldGeneration(DirectConnectWire.NativeWorldGenerationMessage message) {
         if(!sessionId.equals(message.sessionId)) { fail("Native world belongs to another session."); return; }
         if(message.generation <= nativeWorldGeneration) return;
         nativeWorldGeneration = message.generation;
+        shopEntries.clear(); shopOpenings.clear();
         monsterEffects.clear(); nativeStatusCues.clear(); nativeExplosions.clear(); nativeAnimationCues.clear();
         nativeDynamicCues.clear();
         nativeSpellPresentations.clear();
@@ -1052,6 +1075,52 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.revision > keyRevision) { partyKeys = message.count; keyRevision = message.revision; }
     }
 
+    @Override public synchronized List<com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress> getParticipantProgress() {
+        return new ArrayList<com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress>(participantProgress.values());
+    }
+
+    @Override public synchronized List<com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState> getShopEntries() {
+        return new ArrayList<com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState>(shopEntries.values());
+    }
+
+    @Override public synchronized List<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> drainShopOpenings() {
+        List<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> result =
+                new ArrayList<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening>(shopOpenings);
+        shopOpenings.clear();
+        return result;
+    }
+
+    private synchronized void participantProgress(DirectConnectWire.ParticipantProgressMessage message) {
+        if(!sessionId.equals(message.sessionId)) { fail("Participant progress belongs to another session."); return; }
+        com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress previous =
+                participantProgress.get(message.progress.participantId);
+        if(previous == null && participantProgress.size() >= DirectConnectProtocol.MAX_PARTY_MEMBERS) {
+            fail("Participant progress exceeds Party bound."); return;
+        }
+        if(previous == null || previous.revision < message.progress.revision) {
+            participantProgress.put(message.progress.participantId, message.progress);
+        }
+    }
+
+    private synchronized void shopEntry(DirectConnectWire.ShopEntryStateMessage message) {
+        if(!sessionId.equals(message.sessionId)) { fail("Shop entry belongs to another session."); return; }
+        if(message.entry.generation != nativeWorldGeneration) return;
+        String key = message.entry.shopId + ":" + message.entry.entryId;
+        com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState previous = shopEntries.get(key);
+        if(previous == null && shopEntries.size()
+                >= com.interrupt.dungeoneer.multiplayer.economy.AuthoritativeEconomy.MAX_SHOP_ENTRIES) {
+            fail("Shop entries exceed session bound."); return;
+        }
+        if(previous == null || previous.revision < message.entry.revision) shopEntries.put(key, message.entry);
+    }
+
+    private synchronized void shopOpening(DirectConnectWire.ShopOpeningMessage message) {
+        if(!sessionId.equals(message.sessionId)) { fail("Shop opening belongs to another session."); return; }
+        if(message.opening.generation != nativeWorldGeneration) return;
+        if(shopOpenings.size() >= 16) shopOpenings.removeFirst();
+        shopOpenings.addLast(message.opening);
+    }
+
     private synchronized void physicalItem(DirectConnectWire.ItemStateMessage message) {
         if(!sessionId.equals(message.sessionId)) {
             fail("Physical item state belongs to another session.");
@@ -1243,6 +1312,18 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof DirectConnectWire.PartyKeysMessage && sessionId != null
                     && campaignSlot != 0) {
                 partyKeys((DirectConnectWire.PartyKeysMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.ParticipantProgressMessage && sessionId != null
+                    && campaignSlot != 0) {
+                participantProgress((DirectConnectWire.ParticipantProgressMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.ShopEntryStateMessage && sessionId != null
+                    && campaignSlot != 0) {
+                shopEntry((DirectConnectWire.ShopEntryStateMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.ShopOpeningMessage && sessionId != null
+                    && status.getPhase() == DirectConnectPhase.READY) {
+                shopOpening((DirectConnectWire.ShopOpeningMessage)message);
             }
             else if(message instanceof DirectConnectWire.ItemStateMessage && sessionId != null
                     && campaignSlot != 0) {

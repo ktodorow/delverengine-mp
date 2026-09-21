@@ -891,6 +891,467 @@ public class DirectConnectIntegrationTest {
         }
     }
 
+    @Test public void economyProgressShopStockAndActivatorOpeningConvergeOverReliableChannel() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("shared-economy");
+        HostFixture fixture = host(compatibility, 2, "shared-economy");
+        DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
+                AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
+        try {
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            ParticipantId local = new ParticipantId("campaign-slot-1");
+            ParticipantId remote = new ParticipantId("campaign-slot-2");
+            com.interrupt.dungeoneer.multiplayer.economy.AuthoritativeEconomy economy = fixture.host.getEconomy();
+            economy.registerParticipant(new com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress(
+                    local, 0L, 30, 0, 1, 4, 4, 4, 4, 4, 4, 0, 8, 24, 6));
+            economy.registerParticipant(new com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress(
+                    remote, 0L, 45, 0, 1, 4, 4, 4, 4, 4, 4, 0, 8, 24, 6));
+            economy.divideGold(local, 11, java.util.Arrays.asList(local, remote));
+            com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState entry = economy.offer(1000000L,
+                    "shop-template", com.interrupt.dungeoneer.multiplayer.items.ItemProperties.DEFAULT, 25, false);
+            fixture.host.publishEconomy();
+
+            awaitRemoteEconomy(client, remote, 50, entry.entryId, false);
+
+            fixture.host.publishShopOpening(remote,
+                    new com.interrupt.dungeoneer.multiplayer.economy.ShopOpening(1000000L, 1L, "jeff.dat"));
+            fixture.host.publishShopOpening(local,
+                    new com.interrupt.dungeoneer.multiplayer.economy.ShopOpening(1000000L, 1L, "wizard.dat"));
+            long openingDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            List<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> remoteOpenings = client.drainShopOpenings();
+            while(remoteOpenings.isEmpty() && System.currentTimeMillis() < openingDeadline) {
+                Thread.sleep(10L);
+                remoteOpenings = client.drainShopOpenings();
+            }
+            assertEquals(1, remoteOpenings.size());
+            assertEquals("jeff.dat", remoteOpenings.get(0).dialogueFile);
+            List<com.interrupt.dungeoneer.multiplayer.economy.ShopOpening> hostOpenings = fixture.host.drainShopOpenings();
+            assertEquals(1, hostOpenings.size());
+            assertEquals("wizard.dat", hostOpenings.get(0).dialogueFile);
+
+            assertEquals(client.getStatus().getMessage(), DirectConnectPhase.READY, client.getStatus().getPhase());
+            client.submitItemAction(1L, ItemAction.PURCHASE, 1000000L, 0, entry.entryId);
+            ItemRequest request;
+            try { request = awaitItemRequest(fixture.host); }
+            catch(AssertionError missing) {
+                throw new AssertionError("client=" + client.getStatus().getPhase() + " "
+                        + client.getStatus().getMessage() + " host=" + fixture.host.getStatus().getPhase()
+                        + " " + fixture.host.getStatus().getMessage(), missing);
+            }
+            assertEquals(remote, request.getParticipantId());
+            assertEquals(ItemAction.PURCHASE, request.action);
+            assertEquals(entry.entryId, request.quantity);
+            assertEquals(com.interrupt.dungeoneer.multiplayer.economy.AuthoritativeEconomy.PurchaseOutcome.ACCEPTED,
+                    economy.purchase(request.getParticipantId(), request.entityId, request.quantity));
+            fixture.host.publishEconomy();
+
+            awaitRemoteEconomy(client, remote, 25, entry.entryId, true);
+        }
+        finally {
+            client.close(); fixture.close();
+        }
+    }
+
+    @Test public void clientNativeShopUseAndPurchaseTraverseProductionControllersOverTcp() throws Exception {
+        com.interrupt.dungeoneer.game.Game previousGame = com.interrupt.dungeoneer.game.Game.instance;
+        com.badlogic.gdx.Application previousApp = com.badlogic.gdx.Gdx.app;
+        com.interrupt.dungeoneer.game.Options previousOptions = com.interrupt.dungeoneer.game.Options.instance;
+        com.interrupt.managers.HUDManager previousHudManager =
+                com.interrupt.dungeoneer.game.Game.hudManager;
+        com.interrupt.dungeoneer.ui.Hud previousHud = com.interrupt.dungeoneer.game.Game.hud;
+        HashMap<String, LocalizedString> previousStrings = StringManager.localizedStrings;
+        DirectConnectCompatibility compatibility = compatibility("native-shop-economy");
+        HostFixture fixture = host(compatibility, 2, "native-shop-economy");
+        DirectConnectClient client = null;
+        try {
+            com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{com.badlogic.gdx.Application.class},
+                    (proxy, method, args) -> null);
+            com.interrupt.dungeoneer.game.Options.instance = new com.interrupt.dungeoneer.game.Options();
+            com.interrupt.dungeoneer.game.Game.hudManager = new com.interrupt.managers.HUDManager();
+            com.interrupt.dungeoneer.game.Game.hudManager.quickSlots =
+                    new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() { } };
+            com.interrupt.dungeoneer.game.Game.hudManager.backpack =
+                    new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() { } };
+            com.interrupt.dungeoneer.game.Game.hud =
+                    new com.interrupt.dungeoneer.ui.Hud() {
+                        @Override public void refresh() { }
+                        @Override public void refreshEquipLocations() { }
+                    };
+            StringManager.localizedStrings = new HashMap<String, LocalizedString>();
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitMovementSnapshots(fixture.host, 1);
+
+            com.interrupt.dungeoneer.entities.triggers.TriggeredShop hostShop = nativeWeaponShop();
+            com.interrupt.dungeoneer.game.Game hostGame = economyGame(hostShop);
+            com.interrupt.dungeoneer.entities.items.Armor hostGroundItem =
+                    nativeGroundItem(hostShop.x, hostShop.y, hostShop.z);
+            hostGame.level.entities.add(hostGroundItem);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController hostItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController hostEconomy =
+                    new com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController(
+                            fixture.host, hostItems, null, silentEconomyUi());
+            hostItems.setEconomyBoundary(hostEconomy);
+            com.interrupt.dungeoneer.game.Game.instance = hostGame;
+            hostItems.prepare(hostGame);
+            hostEconomy.prepare(hostGame);
+
+            com.interrupt.dungeoneer.entities.triggers.TriggeredShop clientShop = nativeWeaponShop();
+            com.interrupt.dungeoneer.game.Game clientGame = economyGame(clientShop);
+            com.interrupt.dungeoneer.entities.items.Armor clientGroundItem =
+                    nativeGroundItem(clientShop.x, clientShop.y, clientShop.z);
+            clientGame.level.entities.add(clientGroundItem);
+            final java.util.List<com.badlogic.gdx.utils.Array<com.interrupt.helpers.ShopItem>> opened =
+                    new java.util.ArrayList<com.badlogic.gdx.utils.Array<com.interrupt.helpers.ShopItem>>();
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController clientItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client);
+            com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController clientEconomy =
+                    new com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController(
+                            client, clientItems, null,
+                            new com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController.NativeInterface() {
+                                @Override public void showLevelUp(com.interrupt.dungeoneer.entities.Player player,
+                                        Runnable closed) { }
+                                @Override public void showShop(
+                                        com.interrupt.dungeoneer.entities.triggers.TriggeredShop shop,
+                                        String dialogueFile,
+                                        com.badlogic.gdx.utils.Array<com.interrupt.helpers.ShopItem> stock,
+                                        com.interrupt.dungeoneer.overlays.ShopOverlay.PurchaseAuthority authority) {
+                                    opened.add(stock);
+                                }
+                            });
+            clientItems.setEconomyBoundary(clientEconomy);
+            com.interrupt.dungeoneer.game.Game.instance = clientGame;
+            clientItems.prepare(clientGame);
+            clientEconomy.prepare(clientGame);
+
+            // Production render order attaches items/economy before combat begins world generation.
+            fixture.host.beginNativeWorld();
+            long generationDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(client.getNativeWorldGeneration() != fixture.host.getNativeWorldGeneration()
+                    && System.currentTimeMillis() < generationDeadline) Thread.sleep(10L);
+            assertEquals(2L, fixture.host.getNativeWorldGeneration());
+            assertEquals(fixture.host.getNativeWorldGeneration(), client.getNativeWorldGeneration());
+            com.interrupt.dungeoneer.game.Game.instance = hostGame;
+            hostItems.prepare(hostGame);
+            hostEconomy.prepare(hostGame);
+            hostItems.update(hostGame);
+
+            long itemDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            com.interrupt.dungeoneer.entities.Item clientReplica = null;
+            while(clientReplica == null && System.currentTimeMillis() < itemDeadline) {
+                com.interrupt.dungeoneer.game.Game.instance = clientGame;
+                clientItems.prepare(clientGame);
+                for(com.interrupt.dungeoneer.entities.Entity entity : clientGame.level.entities) {
+                    if(entity instanceof com.interrupt.dungeoneer.entities.Item && entity.isActive) {
+                        clientReplica = (com.interrupt.dungeoneer.entities.Item)entity;
+                        break;
+                    }
+                }
+                if(clientReplica == null) Thread.sleep(10L);
+            }
+            assertNotNull("Client must materialize Host ground item", clientReplica);
+            clientReplica.doPickup(clientGame.player);
+            ParticipantId remote = new ParticipantId("campaign-slot-2");
+            long pickupDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(!clientGame.player.ownsPhysicalItem(clientReplica)
+                    && System.currentTimeMillis() < pickupDeadline) {
+                com.interrupt.dungeoneer.game.Game.instance = hostGame;
+                hostItems.prepare(hostGame);
+                hostItems.update(hostGame);
+                com.interrupt.dungeoneer.game.Game.instance = clientGame;
+                clientItems.prepare(clientGame);
+                Thread.sleep(10L);
+            }
+            assertTrue("Client native pickup must converge through Host authority",
+                    clientGame.player.ownsPhysicalItem(clientReplica));
+            assertEquals(remote, fixture.host.getItemWorld().snapshot().get(0).owner);
+
+            clientGame.player.useEntity(clientShop, 0f, 0f);
+            long openDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(opened.isEmpty() && System.currentTimeMillis() < openDeadline) {
+                com.interrupt.dungeoneer.game.Game.instance = hostGame;
+                hostItems.prepare(hostGame);
+                hostShop.tick(hostGame.level, 0.1f);
+                hostEconomy.update(hostGame);
+                com.interrupt.dungeoneer.game.Game.instance = clientGame;
+                clientEconomy.update(clientGame);
+                Thread.sleep(10L);
+            }
+            assertEquals("Client native use must open Host stock", 1, opened.size());
+            assertEquals(2, opened.get(0).size);
+
+            com.interrupt.helpers.ShopItem chosen = opened.get(0).first();
+            clientEconomy.purchase(chosen);
+            long purchaseDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(System.currentTimeMillis() < purchaseDeadline) {
+                com.interrupt.dungeoneer.game.Game.instance = hostGame;
+                hostItems.prepare(hostGame);
+                hostItems.update(hostGame);
+                hostEconomy.update(hostGame);
+                com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress =
+                        fixture.host.getEconomy().get(remote);
+                if(progress != null && progress.gold == 60
+                        && fixture.host.getItemWorld().inventory(remote).size() == 2) break;
+                Thread.sleep(10L);
+            }
+
+            assertEquals(60, fixture.host.getEconomy().get(remote).gold);
+            assertEquals("Pickup and accepted purchase each deliver one item", 2,
+                    fixture.host.getItemWorld().inventory(remote).size());
+            assertTrue(fixture.host.getEconomy().stock(
+                    fixture.host.getEconomy().shopSnapshot().get(0).shopId).get(0).sold);
+            assertEquals("Host gold stays personal", 100,
+                    fixture.host.getEconomy().get(new ParticipantId("campaign-slot-1")).gold);
+        }
+        finally {
+            if(client != null) client.close();
+            fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previousGame;
+            com.badlogic.gdx.Gdx.app = previousApp;
+            com.interrupt.dungeoneer.game.Options.instance = previousOptions;
+            com.interrupt.dungeoneer.game.Game.hudManager = previousHudManager;
+            com.interrupt.dungeoneer.game.Game.hud = previousHud;
+            StringManager.localizedStrings = previousStrings;
+        }
+    }
+
+    @Test public void clientNativeGoldPickupIsDividedByHostAndConvergesOnBothPeers() throws Exception {
+        com.interrupt.dungeoneer.game.Game previousGame = com.interrupt.dungeoneer.game.Game.instance;
+        com.badlogic.gdx.Application previousApp = com.badlogic.gdx.Gdx.app;
+        com.interrupt.dungeoneer.game.Options previousOptions = com.interrupt.dungeoneer.game.Options.instance;
+        com.interrupt.managers.HUDManager previousHudManager =
+                com.interrupt.dungeoneer.game.Game.hudManager;
+        com.interrupt.dungeoneer.ui.Hud previousHud = com.interrupt.dungeoneer.game.Game.hud;
+        HashMap<String, LocalizedString> previousStrings = StringManager.localizedStrings;
+        DirectConnectCompatibility compatibility = compatibility("native-gold-economy");
+        HostFixture fixture = host(compatibility, 2, "native-gold-economy");
+        DirectConnectClient client = null;
+        try {
+            com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{com.badlogic.gdx.Application.class},
+                    (proxy, method, args) -> null);
+            com.interrupt.dungeoneer.game.Options.instance = new com.interrupt.dungeoneer.game.Options();
+            com.interrupt.dungeoneer.game.Game.hudManager = new com.interrupt.managers.HUDManager();
+            com.interrupt.dungeoneer.game.Game.hudManager.quickSlots =
+                    new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() { } };
+            com.interrupt.dungeoneer.game.Game.hudManager.backpack =
+                    new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() { } };
+            com.interrupt.dungeoneer.game.Game.hud =
+                    new com.interrupt.dungeoneer.ui.Hud() {
+                        @Override public void refresh() { }
+                        @Override public void refreshEquipLocations() { }
+                    };
+            StringManager.localizedStrings = new HashMap<String, LocalizedString>();
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitMovementSnapshots(fixture.host, 1);
+            PresentedGold.presented = 0;
+
+            com.interrupt.dungeoneer.entities.triggers.TriggeredShop hostShop = nativeWeaponShop();
+            com.interrupt.dungeoneer.game.Game hostGame = economyGame(hostShop);
+            hostGame.level.entities.add(nativeGold(7, hostShop.x, hostShop.y, hostShop.z));
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController hostItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController hostEconomy =
+                    new com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController(
+                            fixture.host, hostItems, null, silentEconomyUi());
+            hostItems.setEconomyBoundary(hostEconomy);
+            com.interrupt.dungeoneer.game.Game.instance = hostGame;
+            hostItems.prepare(hostGame);
+            hostEconomy.prepare(hostGame);
+
+            com.interrupt.dungeoneer.entities.triggers.TriggeredShop clientShop = nativeWeaponShop();
+            com.interrupt.dungeoneer.game.Game clientGame = economyGame(clientShop);
+            clientGame.level.entities.add(nativeGold(7, clientShop.x, clientShop.y, clientShop.z));
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController clientItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client);
+            com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController clientEconomy =
+                    new com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController(
+                            client, clientItems, null, silentEconomyUi());
+            clientItems.setEconomyBoundary(clientEconomy);
+            com.interrupt.dungeoneer.game.Game.instance = clientGame;
+            clientItems.prepare(clientGame);
+            clientEconomy.prepare(clientGame);
+
+            com.interrupt.dungeoneer.game.Game.instance = hostGame;
+            hostItems.prepare(hostGame);
+            hostEconomy.prepare(hostGame);
+            hostItems.update(hostGame);
+
+            long itemDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            com.interrupt.dungeoneer.entities.items.Gold clientPile = null;
+            while(clientPile == null && System.currentTimeMillis() < itemDeadline) {
+                com.interrupt.dungeoneer.game.Game.instance = clientGame;
+                clientItems.prepare(clientGame);
+                for(com.interrupt.dungeoneer.entities.Entity entity : clientGame.level.entities) {
+                    if(entity instanceof com.interrupt.dungeoneer.entities.items.Gold && entity.isActive) {
+                        clientPile = (com.interrupt.dungeoneer.entities.items.Gold)entity;
+                        break;
+                    }
+                }
+                if(clientPile == null) Thread.sleep(10L);
+            }
+            assertNotNull("Client must materialize Host gold pile", clientPile);
+            assertEquals(7, clientPile.goldAmount);
+
+            clientPile.doPickup(clientGame.player);
+            ParticipantId hostParticipant = new ParticipantId("campaign-slot-1");
+            ParticipantId remote = new ParticipantId("campaign-slot-2");
+            long splitDeadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(System.currentTimeMillis() < splitDeadline) {
+                com.interrupt.dungeoneer.game.Game.instance = hostGame;
+                hostItems.prepare(hostGame);
+                hostEconomy.prepare(hostGame);
+                hostItems.update(hostGame);
+                hostEconomy.update(hostGame);
+                com.interrupt.dungeoneer.game.Game.instance = clientGame;
+                clientItems.prepare(clientGame);
+                clientEconomy.prepare(clientGame);
+                if(clientGame.player.gold == 104 && !clientPile.isActive
+                        && remoteGold(client, hostParticipant) == 103) break;
+                Thread.sleep(10L);
+            }
+
+            assertEquals("Acquirer takes the odd coin", 104, fixture.host.getEconomy().get(remote).gold);
+            assertEquals(103, fixture.host.getEconomy().get(hostParticipant).gold);
+            assertEquals("Host mirrors its own Campaign Slot", 103, hostGame.player.gold);
+            assertEquals("Client mirrors its own Campaign Slot", 104, clientGame.player.gold);
+            assertEquals("Client observes Host share", 103, remoteGold(client, hostParticipant));
+            assertFalse("Accepted pile leaves client world", clientPile.isActive);
+            assertTrue("Host tombstones pile once", fixture.host.getItemWorld().snapshot().get(0).consumed);
+            assertTrue("Gold never enters backpack",
+                    fixture.host.getItemWorld().inventory(remote).isEmpty());
+            assertEquals("Only the accepted acquirer hears the native pickup, once",
+                    1, PresentedGold.presented);
+        }
+        finally {
+            if(client != null) client.close();
+            fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previousGame;
+            com.badlogic.gdx.Gdx.app = previousApp;
+            com.interrupt.dungeoneer.game.Options.instance = previousOptions;
+            com.interrupt.dungeoneer.game.Game.hudManager = previousHudManager;
+            com.interrupt.dungeoneer.game.Game.hud = previousHud;
+            StringManager.localizedStrings = previousStrings;
+        }
+    }
+
+    /** Native Gold whose render-only pickup feedback is counted instead of drawn. */
+    public static final class PresentedGold extends com.interrupt.dungeoneer.entities.items.Gold {
+        static int presented;
+        public PresentedGold() { super(1); }
+        PresentedGold(int amount) { super(amount); }
+        @Override public void presentPickup(com.interrupt.dungeoneer.entities.Player player) { presented++; }
+    }
+
+    private static com.interrupt.dungeoneer.entities.items.Gold nativeGold(int amount,
+            float x, float y, float z) {
+        com.interrupt.dungeoneer.entities.items.Gold gold = new PresentedGold(amount);
+        gold.x = x;
+        gold.y = y;
+        gold.z = z;
+        return gold;
+    }
+
+    private static int remoteGold(DirectConnectPeer peer, ParticipantId participant) {
+        for(com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress : peer.getParticipantProgress()) {
+            if(progress.participantId.equals(participant)) return progress.gold;
+        }
+        return -1;
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController.NativeInterface
+            silentEconomyUi() {
+        return new com.interrupt.dungeoneer.multiplayer.economy.DirectConnectEconomyController.NativeInterface() {
+            @Override public void showLevelUp(com.interrupt.dungeoneer.entities.Player player,
+                    Runnable closed) { }
+            @Override public void showShop(
+                    com.interrupt.dungeoneer.entities.triggers.TriggeredShop shop,
+                    String dialogueFile, com.badlogic.gdx.utils.Array<com.interrupt.helpers.ShopItem> stock,
+                    com.interrupt.dungeoneer.overlays.ShopOverlay.PurchaseAuthority authority) { }
+        };
+    }
+
+    private com.interrupt.dungeoneer.entities.triggers.TriggeredShop nativeWeaponShop() {
+        com.interrupt.dungeoneer.entities.triggers.TriggeredShop shop =
+                new com.interrupt.dungeoneer.entities.triggers.TriggeredShop();
+        shop.id = "issue-17-shop";
+        shop.shopType = com.interrupt.dungeoneer.entities.triggers.TriggeredShop.ShopType.weapons;
+        shop.x = 16.5f;
+        shop.y = 16.5f;
+        shop.z = 0.5f;
+        return shop;
+    }
+
+    private com.interrupt.dungeoneer.entities.items.Armor nativeGroundItem(float x, float y, float z) {
+        com.interrupt.dungeoneer.entities.items.Armor item =
+                new com.interrupt.dungeoneer.entities.items.Armor();
+        item.name = "Issue 17 ground armor";
+        item.x = x;
+        item.y = y;
+        item.z = z;
+        return item;
+    }
+
+    private com.interrupt.dungeoneer.game.Game economyGame(
+            com.interrupt.dungeoneer.entities.triggers.TriggeredShop shop) {
+        com.interrupt.dungeoneer.game.Game game =
+                new org.objenesis.ObjenesisStd().newInstance(com.interrupt.dungeoneer.game.Game.class);
+        game.player = new com.interrupt.dungeoneer.entities.Player();
+        game.player.inventory.clear();
+        for(int index = 0; index < game.player.inventorySize; index++) game.player.inventory.add(null);
+        game.player.gold = 100;
+        game.player.level = 1;
+        game.player.maxHp = 8;
+        game.level = new com.interrupt.dungeoneer.game.Level(32, 32);
+        for(int index = 0; index < game.level.tiles.length; index++) {
+            game.level.tiles[index] = new com.interrupt.dungeoneer.tiles.Tile();
+        }
+        game.level.entities.add(shop);
+        game.progression = new com.interrupt.dungeoneer.game.Progression();
+        final com.interrupt.dungeoneer.entities.items.Sword template =
+                new com.interrupt.dungeoneer.entities.items.Sword();
+        template.cost = 40;
+        com.interrupt.managers.ItemManager manager = new com.interrupt.managers.ItemManager() {
+            @Override public com.interrupt.dungeoneer.entities.items.Sword GetRandomWeapon(Integer level) {
+                return (com.interrupt.dungeoneer.entities.items.Sword)
+                        com.interrupt.managers.ItemManager.Copy(template.getClass(), template);
+            }
+        };
+        manager.melee = new HashMap<String,
+                com.badlogic.gdx.utils.Array<com.interrupt.dungeoneer.entities.items.Sword>>();
+        com.badlogic.gdx.utils.Array<com.interrupt.dungeoneer.entities.items.Sword> swords =
+                new com.badlogic.gdx.utils.Array<com.interrupt.dungeoneer.entities.items.Sword>();
+        swords.add(template);
+        manager.melee.put("1", swords);
+        game.itemManager = manager;
+        return game;
+    }
+
+    private void awaitRemoteEconomy(DirectConnectPeer peer, ParticipantId participant, int gold,
+            int entryId, boolean sold) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            boolean goldMatches = false, entryMatches = false;
+            for(com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress : peer.getParticipantProgress()) {
+                goldMatches |= progress.participantId.equals(participant) && progress.gold == gold;
+            }
+            for(com.interrupt.dungeoneer.multiplayer.economy.ShopEntryState entry : peer.getShopEntries()) {
+                entryMatches |= entry.entryId == entryId && entry.sold == sold && entry.cost == 25;
+            }
+            if(goldMatches && entryMatches) return;
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("Participant progress and shop stock did not converge.");
+    }
+
     private void awaitPartyKeys(DirectConnectPeer peer, int expected) throws InterruptedException {
         long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
         while(peer.getPartyKeys() != expected && System.currentTimeMillis() < deadline) Thread.sleep(10L);
@@ -1856,6 +2317,73 @@ public class DirectConnectIntegrationTest {
             if(validClient != null) validClient.close();
             fixture.close();
         }
+    }
+
+    @Test
+    public void clientWhoseSharedFloorDiffersIsRemovedWithReasonAndKeepsSlot() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("shared-floor-mismatch");
+        HostFixture fixture = host(compatibility, 2, "floor-mismatch");
+        DirectConnectClient client = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        try {
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            assertTrue(fixture.host.getSharedFloorSeed() != 0L);
+            assertEquals(fixture.host.getSharedFloorSeed(), client.getSharedFloorSeed());
+
+            // Client finishes building first; ordered chat proves Host has its report.
+            client.recordSharedFloorFingerprint(floorWithWorldObjects(56));
+            client.submitPartyChat("Built.");
+            awaitChatCount(fixture.host, 1);
+            assertEquals(DirectConnectPhase.READY, client.getStatus().getPhase());
+
+            fixture.host.recordSharedFloorFingerprint(floorWithWorldObjects(57));
+            awaitPhase(client, DirectConnectPhase.DISCONNECTED);
+
+            String reason = client.getStatus().getMessage();
+            assertTrue(reason, reason.contains(
+                    "Shared floor build differs from Host (Host/you: world objects 57/56)"));
+            assertTrue(fixture.host.getStatus().getMessage(), fixture.host.getStatus().getMessage()
+                    .contains("Removed Friend: shared floor build differs"));
+            assertEquals(identity('2'), fixture.roster.getSlot(2).getLauncherIdentity());
+        }
+        finally {
+            client.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void clientWithIdenticalSharedFloorStaysInSession() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("shared-floor-match");
+        HostFixture fixture = host(compatibility, 2, "floor-match");
+        DirectConnectClient client = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        try {
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+
+            fixture.host.recordSharedFloorFingerprint(floorWithWorldObjects(57));
+            client.recordSharedFloorFingerprint(floorWithWorldObjects(57));
+            client.submitPartyChat("Built.");
+            awaitChatCount(fixture.host, 1);
+            fixture.host.submitPartyChat("Same floor.");
+            awaitChatCount(client, 2);
+
+            assertEquals(DirectConnectPhase.READY, client.getStatus().getPhase());
+            assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
+        }
+        finally {
+            client.close();
+            fixture.close();
+        }
+    }
+
+    private static com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint
+            floorWithWorldObjects(int worldObjects) {
+        return new com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint(
+                new int[] { worldObjects, 3, 0, 120, 812 },
+                new long[] { worldObjects, 11L, 0L, 13L, 17L });
     }
 
     @Test

@@ -160,7 +160,7 @@ public class DesktopStarter {
         GameApplication gameApplication;
         if(launchOptions.directHost) {
             gameApplication = GameApplication.forDirectConnectHost(launchOptions.sessionPort,
-                    campaignRoster, campaignRosterStore);
+                    campaignRoster, campaignRosterStore, launchOptions.directFloor);
         }
         else if(launchOptions.directConnectAddress != null) {
             gameApplication = GameApplication.forDirectConnectClient(

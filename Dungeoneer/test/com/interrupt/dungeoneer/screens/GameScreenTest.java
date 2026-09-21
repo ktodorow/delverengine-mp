@@ -16,4 +16,12 @@ public class GameScreenTest {
     public void partyCombatDoesNotRunWhileAnOverlayOwnsInput() {
         assertFalse(GameScreen.canHandlePartyControls(DirectConnectPhase.READY, true));
     }
+
+    @Test
+    public void failedDirectConnectCannotKeepRunningAsLocalGameplay() {
+        assertTrue(GameScreen.canAdvanceDirectConnectGameplay(DirectConnectPhase.READY));
+        assertFalse(GameScreen.canAdvanceDirectConnectGameplay(DirectConnectPhase.FAILED));
+        assertFalse(GameScreen.canAdvanceDirectConnectGameplay(DirectConnectPhase.DISCONNECTED));
+        assertFalse(GameScreen.canAdvanceDirectConnectGameplay(DirectConnectPhase.CLOSED));
+    }
 }
