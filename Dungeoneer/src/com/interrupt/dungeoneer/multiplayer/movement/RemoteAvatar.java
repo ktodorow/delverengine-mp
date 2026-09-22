@@ -27,6 +27,7 @@ public final class RemoteAvatar extends Actor {
     private float animationTime;
     private float attackAnimationTime;
     private float damageFlashTime;
+    private boolean incapacitated;
     private CombatAction presentedAction = CombatAction.MELEE;
     private transient DamageAuthorityListener damageAuthorityListener;
     private transient com.interrupt.dungeoneer.entities.Player nativeCombatStats;
@@ -80,6 +81,15 @@ public final class RemoteAvatar extends Actor {
     public void playCombatAction(CombatAction action) {
         presentedAction = action == null ? CombatAction.MELEE : action;
         attackAnimationTime = 10f;
+    }
+
+    /** Downed or Life-exhausted body: collapsed, dimmed and never animated as acting. */
+    public void setIncapacitated(boolean incapacitated) {
+        this.incapacitated = incapacitated;
+    }
+
+    public boolean isIncapacitated() {
+        return incapacitated;
     }
 
     public void playDamageReaction() {
@@ -144,6 +154,12 @@ public final class RemoteAvatar extends Actor {
             scale = BASE_SCALE;
         }
         roll = 0f;
+        if(incapacitated) {
+            attackAnimationTime = 0f;
+            yOffset = -0.3f;
+            scale = BASE_SCALE;
+            roll = 90f;
+        }
         if(attackAnimationTime > 0f) {
             attackAnimationTime = Math.max(0f, attackAnimationTime - delta);
             float pulse = Math.abs((float)Math.sin(attackAnimationTime * 0.45f));
@@ -153,6 +169,9 @@ public final class RemoteAvatar extends Actor {
         if(damageFlashTime > 0f) {
             damageFlashTime = Math.max(0f, damageFlashTime - delta);
             color.set(1f, 0.25f, 0.2f, 1f);
+        }
+        else if(incapacitated) {
+            color.set(baseColor.r * 0.45f, baseColor.g * 0.45f, baseColor.b * 0.45f, 1f);
         }
         else {
             color.set(baseColor);

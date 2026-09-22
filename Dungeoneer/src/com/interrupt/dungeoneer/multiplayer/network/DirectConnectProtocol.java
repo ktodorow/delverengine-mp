@@ -5,8 +5,8 @@ import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
 /** Stable, explicitly bounded protocol constants for Direct Connect session traffic. */
 public final class DirectConnectProtocol {
     public static final int MAGIC = 0x444D5031; // DMP1
-    public static final int VERSION = 39;
-    public static final String BUILD_ID = "mp-v108-prototype-shared-floor-40";
+    public static final int VERSION = 40;
+    public static final String BUILD_ID = "mp-v108-prototype-lives-41";
     public static final int DEFAULT_PORT = 37777;
 
     public static final int MAX_TCP_FRAME_BYTES = 1024;

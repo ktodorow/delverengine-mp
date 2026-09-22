@@ -74,7 +74,12 @@ public final class DirectConnectMovementController {
         if(attachedLevel != game.level) attachToLevel(game.level);
 
         captureLocalPrediction(player);
-        sampleInputs(player, input, boundedDelta);
+        if(player.multiplayerIncapacitated) {
+            // Host froze this body; unsent ticks would outrun its accepted input lead.
+            unsampledDeltaX = unsampledDeltaY = unsampledDeltaZ = 0f;
+            inputAccumulator = 0f;
+        }
+        else sampleInputs(player, input, boundedDelta);
         reconcileLocalPlayer(player);
         applyCorrection(player, boundedDelta);
         updateRemoteAvatars(game.level, boundedDelta);

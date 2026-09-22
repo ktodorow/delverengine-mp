@@ -114,6 +114,7 @@ final class DirectConnectWire {
     private static final int SHOP_ENTRY_STATE = 46;
     private static final int SHOP_OPENING = 47;
     private static final int SHARED_FLOOR_FINGERPRINT = 48;
+    private static final int REVIVE_INTENT = 49;
 
     private DirectConnectWire() { }
 
@@ -603,6 +604,14 @@ final class DirectConnectWire {
             output.writeLong(delivery.opening.generation);
             writeString(output, delivery.opening.dialogueFile, ShopOpening.MAX_DIALOGUE_FILE_BYTES, "shop dialogue");
         }
+        else if(message instanceof ReviveIntentMessage) {
+            ReviveIntentMessage intent = (ReviveIntentMessage)message;
+            output.writeByte(REVIVE_INTENT);
+            writeString(output, intent.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeByte(intent.targetSlot);
+            output.writeBoolean(intent.active);
+        }
         else if(message instanceof SharedFloorFingerprintMessage) {
             SharedFloorFingerprintMessage report = (SharedFloorFingerprintMessage)message;
             output.writeByte(SHARED_FLOOR_FINGERPRINT);
@@ -750,6 +759,9 @@ final class DirectConnectWire {
                 output.writeInt(member.getMaximumHealth());
                 output.writeByte(member.getRemainingLives());
                 output.writeByte(member.getState().getWireId());
+                output.writeShort(member.getBleedoutTicks());
+                output.writeShort(member.getRevivalTicks());
+                output.writeByte(member.getReviverSlot());
             }
         }
         else if(message instanceof PartyChatSubmit) {
@@ -1141,6 +1153,19 @@ final class DirectConnectWire {
                             new ShopOpening(openingShop, openingGeneration, openingDialogue));
                 }
                 catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid shop opening.", invalid); }
+                break;
+            case REVIVE_INTENT:
+                String reviveSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                        "session identity");
+                requireReadable(input, 2, "Revival intent");
+                int reviveSlot = input.readUnsignedByte();
+                boolean reviveActive = input.readBoolean();
+                try {
+                    message = new ReviveIntentMessage(reviveSession, reviveSlot, reviveActive);
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid Revival intent.", invalid);
+                }
                 break;
             case SHARED_FLOOR_FINGERPRINT:
                 String floorSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
@@ -1631,18 +1656,22 @@ final class DirectConnectWire {
                             DirectConnectProtocol.MAX_NICKNAME_BYTES, "Nickname");
                     String partyAvatar = readString(input,
                             DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity");
-                    requireReadable(input, 10, "Party member status");
+                    requireReadable(input, 15, "Party member status");
                     int partyHealth = input.readInt();
                     int partyMaximumHealth = input.readInt();
                     int partyLives = input.readUnsignedByte();
                     int partyState = input.readUnsignedByte();
+                    int partyBleedoutTicks = input.readUnsignedShort();
+                    int partyRevivalTicks = input.readUnsignedShort();
+                    int partyReviverSlot = input.readUnsignedByte();
                     try {
                         NetworkEntityId partyEntity = partyEntityValue == null
                                 ? null : new NetworkEntityId(partyEntityValue);
                         partyMembers.add(new PartyMemberStatus(partySlot, partyEntity,
                                 partyNickname, partyAvatar, partyHealth,
                                 partyMaximumHealth, partyLives,
-                                PartyMemberState.fromWireId(partyState)));
+                                PartyMemberState.fromWireId(partyState),
+                                partyBleedoutTicks, partyRevivalTicks, partyReviverSlot));
                     }
                     catch(IllegalArgumentException ex) {
                         throw new ProtocolException("Malformed Party status: "
@@ -2369,6 +2398,19 @@ final class DirectConnectWire {
         ShopEntryStateMessage(String sessionId, ShopEntryState entry) {
             if(sessionId == null || entry == null) throw new IllegalArgumentException("Missing shop entry.");
             this.sessionId = sessionId; this.entry = entry;
+        }
+    }
+
+    /** Held Use toward one Downed Campaign Slot; inactive releases any Revival by sender. */
+    static final class ReviveIntentMessage implements Message {
+        final String sessionId;
+        final int targetSlot;
+        final boolean active;
+        ReviveIntentMessage(String sessionId, int targetSlot, boolean active) {
+            if(sessionId == null || targetSlot < 1 || targetSlot > 4) {
+                throw new IllegalArgumentException("Revival intent needs session and Campaign Slot 1-4.");
+            }
+            this.sessionId = sessionId; this.targetSlot = targetSlot; this.active = active;
         }
     }
 

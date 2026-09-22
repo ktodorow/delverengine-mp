@@ -131,6 +131,14 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         if(participant != null) participant.resume();
     }
 
+    /** Latest accepted input asks to walk or jump; deliberate movement interrupts Revival. */
+    public synchronized boolean isRequestingMovement(ParticipantId participantId) {
+        MutableMovement participant = participants.get(participantId);
+        if(participant == null || participant.input == null) return false;
+        return participant.input.getForward() != 0f || participant.input.getStrafe() != 0f
+                || participant.input.isJump();
+    }
+
     public synchronized MovementEntityState getState(ParticipantId participantId) {
         MutableMovement participant = participants.get(participantId);
         return participant == null ? null : participant.snapshot();

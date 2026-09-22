@@ -181,8 +181,23 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                     host.publishItemActionResult(request.getParticipantId(), new ItemActionResult(
                             request.requestId, request.entityId, false)); continue;
                 }
-                AuthoritativeItemWorld.Outcome result = host.getItemWorld().apply(request,
-                        participant, boundary);
+                // A consumed Life leaves the selected hotbar item where its owner fell.
+                float[] deathDrop = request.action == ItemAction.DROP
+                        ? host.takeDeathDropPosition(request.getParticipantId()) : null;
+                if(deathDrop != null) {
+                    participant = new ParticipantContext(request.getParticipantId(),
+                            new ParticipantCharacterState(deathDrop[0], deathDrop[1], deathDrop[2],
+                                    participant.getCharacter().getRotation()),
+                            participant.getPartyProgression());
+                    deathDropParticipant = request.getParticipantId();
+                }
+                AuthoritativeItemWorld.Outcome result;
+                try {
+                    result = host.getItemWorld().apply(request, participant, boundary);
+                }
+                finally {
+                    deathDropParticipant = null;
+                }
                 if(result != AuthoritativeItemWorld.Outcome.ACCEPTED) {
                     diagnose("Host refused " + request.action + " from "
                             + request.getParticipantId().getValue() + " entity " + request.entityId
@@ -755,9 +770,13 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         return null;
     }
 
+    /** Set only while Host applies one Life-loss drop, which a Spectator must still complete. */
+    private ParticipantId deathDropParticipant;
+
     private final AuthoritativeItemWorld.InteractionBoundary boundary =
             new AuthoritativeItemWorld.InteractionBoundary() {
         public boolean canAct(ParticipantContext participant) {
+            if(participant.getParticipantId().equals(deathDropParticipant)) return true;
             if(peer.isSessionPaused() || peer.getPartyStatus() == null) return false;
             for(MovementEntityDescriptor descriptor : peer.getMovementEntities()) {
                 if(!descriptor.getParticipantId().equals(participant.getParticipantId())) continue;

@@ -1675,6 +1675,106 @@ public class DirectConnectIntegrationTest {
     }
 
     @Test
+    public void downedParticipantCannotActAndIsRevivedOnlyByUninterruptedTeammate() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("revival-floor");
+        HostFixture fixture = host(compatibility, 3, "revival");
+        DirectConnectClient second = approveClient(fixture, compatibility, '2', "Two",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient third = approveClient(fixture, compatibility, '3', "Three",
+                AvatarCatalog.HUMANOID_3);
+        ParticipantId secondId = new ParticipantId("campaign-slot-2");
+        ParticipantId thirdId = new ParticipantId("campaign-slot-3");
+        String thirdTarget = AuthoritativeCombatEncounter.participantTargetId(thirdId);
+        try {
+            fixture.host.setStartingLives(2);
+            fixture.host.startSession();
+            try {
+                fixture.host.setStartingLives(5);
+                fail("Starting Lives must lock once campaign play begins.");
+            }
+            catch(IllegalStateException expected) { }
+            awaitPhase(second, DirectConnectPhase.READY);
+            awaitPhase(third, DirectConnectPhase.READY);
+            awaitPartyState(third, 2, PartyMemberState.CONNECTED);
+            assertEquals(2, third.getPartyStatus().getMember(2).getRemainingLives());
+
+            fixture.host.applyNativeEnvironmentalDamage("test-hazard", secondId, 8,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            awaitPartyState(second, 2, PartyMemberState.DOWNED);
+            awaitPartyState(third, 2, PartyMemberState.DOWNED);
+            awaitPartyState(fixture.host, 2, PartyMemberState.DOWNED);
+            assertTrue(third.getPartyStatus().getMember(2).getBleedoutTicks() > 0);
+
+            // Downed Participant's own actions and Revival attempts are refused by Host.
+            second.submitCombatAction(1L, CombatAction.BENEFICIAL_SPELL, thirdTarget);
+            second.submitReviveIntent(3, true);
+
+            third.submitReviveIntent(2, true);
+            awaitReviver(second, 2, 3);
+            fixture.host.applyNativeEnvironmentalDamage("test-hazard", thirdId, 1,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            awaitReviver(second, 2, 0);
+            assertEquals(PartyMemberState.DOWNED,
+                    second.getPartyStatus().getMember(2).getState());
+
+            third.submitReviveIntent(2, true);
+            awaitReviver(second, 2, 3);
+            awaitPartyState(second, 2, PartyMemberState.CONNECTED);
+            awaitPartyHealth(third, 2, 2);
+            awaitPartyHealth(fixture.host, 2, 2);
+            assertEquals(2, fixture.host.getPartyStatus().getMember(2).getRemainingLives());
+            assertEquals(7, fixture.host.getPartyStatus().getMember(3).getHealth());
+        }
+        finally {
+            third.close();
+            second.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void bleedoutContinuesThroughDisconnectPausesWithSessionAndConsumesOneLife()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("bleedout-floor");
+        HostFixture fixture = host(compatibility, 2, "bleedout");
+        DirectConnectClient second = approveClient(fixture, compatibility, '2', "Two",
+                AvatarCatalog.HUMANOID_2);
+        ParticipantId secondId = new ParticipantId("campaign-slot-2");
+        try {
+            fixture.host.startSession();
+            awaitPhase(second, DirectConnectPhase.READY);
+            awaitPartyState(second, 2, PartyMemberState.CONNECTED);
+            assertEquals(3, second.getPartyStatus().getMember(2).getRemainingLives());
+
+            fixture.host.applyNativeEnvironmentalDamage("test-hazard", secondId, 8,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            awaitPartyState(fixture.host, 2, PartyMemberState.DOWNED);
+
+            fixture.host.setSessionPaused(true);
+            Thread.sleep(1500L);
+            assertEquals(PartyMemberState.DOWNED,
+                    fixture.host.getPartyStatus().getMember(2).getState());
+            fixture.host.setSessionPaused(false);
+
+            second.close();
+            long deadline = System.currentTimeMillis() + 14000L;
+            while(System.currentTimeMillis() < deadline
+                    && fixture.host.getPartyStatus().getMember(2).getRemainingLives() == 3) {
+                Thread.sleep(20L);
+            }
+            PartyMemberStatus respawned = fixture.host.getPartyStatus().getMember(2);
+            assertEquals(2, respawned.getRemainingLives());
+            assertEquals(4, respawned.getHealth());
+            assertTrue(respawned.getState() != PartyMemberState.DOWNED);
+            assertEquals(3, fixture.host.getPartyStatus().getMember(1).getRemainingLives());
+        }
+        finally {
+            second.close();
+            fixture.close();
+        }
+    }
+
+    @Test
     public void directedClientAttackIsTracedAndReplicatedByHost() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("directed-combat-floor");
         HostFixture fixture = host(compatibility, 2, "directed-combat");
@@ -2607,6 +2707,18 @@ public class DirectConnectIntegrationTest {
         fail("Timed out waiting for Campaign Slot " + campaignSlot
                 + " Party state " + expected + ".");
         return null;
+    }
+
+    private void awaitReviver(DirectConnectPeer peer, int campaignSlot, int reviverSlot)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            PartyStatusSnapshot snapshot = peer.getPartyStatus();
+            PartyMemberStatus member = snapshot == null ? null : snapshot.getMember(campaignSlot);
+            if(member != null && member.getReviverSlot() == reviverSlot) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for Campaign Slot " + campaignSlot + " reviver=" + reviverSlot + ".");
     }
 
     private void awaitPartyHealth(DirectConnectPeer peer, int campaignSlot, int health)

@@ -492,6 +492,13 @@ public class GlRenderer {
 			float headRoll = game.player.getHeadRoll();
 			if (headRoll != 0) camera.rotate(Vector3.Z, headRoll);
 
+			// Multiplayer Downed: collapse to the floor while still free to look around.
+			float incapacitatedLerp = game.player.incapacitatedCameraLerp;
+			if (incapacitatedLerp > 0.001f) {
+				camera.position.y -= 0.3f * incapacitatedLerp;
+				camera.rotate(Vector3.Z, 35f * incapacitatedLerp);
+			}
+
 			// is the death animation playing?
 			if (game.player.isDead && game.player.dyingAnimation != null) {
 				camera.position.add(game.player.dyingAnimation.curTransform);
@@ -598,6 +605,10 @@ public class GlRenderer {
 		if (game.player.isDead && game.player.dyingAnimation != null) {
 			Game.flashColor.set(DEATH_COLOR);
 			Game.flashColor.a = Math.min(game.player.dyingAnimation.timeMod() * game.player.dyingAnimation.timeMod() * 1.5f, 1f);
+			drawFlashOverlay(Game.flashColor);
+		} else if (game.player.incapacitatedCameraLerp > 0.001f) {
+			Game.flashColor.set(DEATH_COLOR);
+			Game.flashColor.a = 0.45f * game.player.incapacitatedCameraLerp;
 			drawFlashOverlay(Game.flashColor);
 		} else {
 			if (Game.flashTimer > 0) {
@@ -1707,6 +1718,11 @@ public class GlRenderer {
 		float fontSize = uiSize * 0.17f;
 		float left = -camera2D.viewportWidth / 2f + uiSize * 0.35f;
 		float y = camera2D.viewportHeight / 2f - uiSize * 0.45f;
+		String livesPrompt = application.getDirectConnectLivesPrompt();
+		if(livesPrompt != null) {
+			drawCenteredText(livesPrompt, camera2D.viewportHeight * 0.1f, fontSize * 1.2f,
+					Color.WHITE, Color.BLACK);
+		}
 		if(communication.getPauseSession().isPaused()) {
 			drawCenteredText(peer.canControlSessionPause()
 					? "SESSION PAUSED - PRESS P TO RESUME"

@@ -162,6 +162,9 @@ public interface DirectConnectPeer extends AutoCloseable {
         submitItemAction(requestId, action, entityId, condition, quantity);
     }
 
+    /** Held Use toward one Downed Campaign Slot; inactive releases this Participant's Revival. */
+    default void submitReviveIntent(int targetSlot, boolean active) { }
+
     void submitMovementInput(MovementInputFrame input);
 
     @Override

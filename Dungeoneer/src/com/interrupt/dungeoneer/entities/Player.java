@@ -284,6 +284,27 @@ public class Player extends Actor {
     public LerpedAnimation dyingAnimation = null;
     public transient boolean isDead = false;
 
+    /** Multiplayer: Host owns Downing and respawn, so zero health never starts native death. */
+    public transient boolean deathDeferredToAuthority = false;
+    /** Multiplayer Downed or Life-exhausted: may look around, cannot otherwise act. */
+    public transient boolean multiplayerIncapacitated = false;
+    /** 0 standing, 1 collapsed; eases first-person camera to the floor while incapacitated. */
+    public transient float incapacitatedCameraLerp = 0f;
+
+    /** Enters or leaves multiplayer incapacitation, discarding any half-made action. */
+    public void setMultiplayerIncapacitated(boolean incapacitated) {
+        if(multiplayerIncapacitated == incapacitated) return;
+        multiplayerIncapacitated = incapacitated;
+        attackCharge = 0;
+        tossPower = 0f;
+        xa = 0f;
+        ya = 0f;
+        if(incapacitated && Game.instance != null
+                && Game.instance.menuMode != Game.MenuMode.Hidden) {
+            Game.instance.setMenuMode(Game.MenuMode.Hidden);
+        }
+    }
+
     public transient float strafeCameraAngleMod = 0f;
 
     /** Does player level up? */
@@ -879,17 +900,23 @@ public class Player extends Actor {
 
 		boolean up = false, down = false, left = false, right = false, turnLeft = false, turnRight = false, turnUp = false, turnDown = false, attack = false, jump = false;
 
-        if(!isDead && !isInOverlay) {
+        incapacitatedCameraLerp += ((multiplayerIncapacitated ? 1f : 0f) - incapacitatedCameraLerp)
+                * Math.min(1f, 0.08f * delta);
+
+        if(!isDead && !isInOverlay && !multiplayerIncapacitated) {
             up = input.isMoveForwardPressed();
             down = input.isMoveBackwardsPressed();
             left = input.isStrafeLeftPressed();
             right = input.isStrafeRightPressed();
+            attack = input.isAttackPressed() || controllerState.attack;
+            jump = input.isJumpPressed();
+        }
+
+        if(!isDead && !isInOverlay) {
             turnLeft = input.isTurnLeftPressed();
             turnRight = input.isTurnRightPressed();
             turnUp = input.isLookUpPressed();
             turnDown = input.isLookDownPressed();
-            attack = input.isAttackPressed() || controllerState.attack;
-            jump = input.isJumpPressed();
         }
 
 		// Update player visibility
@@ -1010,7 +1037,7 @@ public class Player extends Actor {
 		touchingItem = false;
 		boolean inOverlay = OverlayManager.instance.current() != null && OverlayManager.instance.current().catchInput;
 
-		if(!inOverlay && !isDead && ((Game.isMobile || !input.isCursorCatched()) && Gdx.input.isButtonPressed(Input.Buttons.LEFT))) {
+		if(!inOverlay && !isDead && !multiplayerIncapacitated && ((Game.isMobile || !input.isCursorCatched()) && Gdx.input.isButtonPressed(Input.Buttons.LEFT))) {
 			if(Game.hud.dragging != null) {
 				touchingItem = true;
 			}
@@ -1045,7 +1072,7 @@ public class Player extends Actor {
 			hovering = pickItem(level, input.getPointerX(), input.getPointerY(), 0.9f);
 		}
 
-		if(!isDead && (!Game.isMobile || input.isCursorCatched()) && !OverlayManager.instance.shouldPauseGame()) {
+		if(!isDead && !multiplayerIncapacitated && (!Game.isMobile || input.isCursorCatched()) && !OverlayManager.instance.shouldPauseGame()) {
 			String useText = ReadableKeys.keyNames.get(Actions.keyBindings.get(Action.USE));
 			if(Game.isMobile) useText = StringManager.get("entities.Player.mobileUseText");
 
@@ -1335,7 +1362,7 @@ public class Player extends Actor {
 			}
 		}
 
-        if(!isDead && !isInOverlay) {
+        if(!isDead && !isInOverlay && !multiplayerIncapacitated) {
             if(input.doUseAction() ||
                     controllerState.buttonEvents.contains(Action.USE, true)) Use(level);
 

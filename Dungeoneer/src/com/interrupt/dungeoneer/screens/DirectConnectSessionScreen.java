@@ -85,7 +85,9 @@ public final class DirectConnectSessionScreen implements Screen {
             y -= 32f;
             font.draw(batch, "Campaign " + host.getRoster().getCampaignId() + "  |  Capacity "
                             + host.getRoster().getCapacity() + "  |  Connected "
-                            + host.getConnectedParticipantCount(),
+                            + host.getConnectedParticipantCount()
+                            + "  |  Starting Lives " + host.getStartingLives()
+                            + (host.isStartingLivesLocked() ? " (locked)" : " [1-5]"),
                     textLeft(width, 0.9f), y, width * 0.9f, Align.center, false);
             List<PendingSlotClaim> pending = host.getPendingClaims();
             y -= 30f;
@@ -122,6 +124,14 @@ public final class DirectConnectSessionScreen implements Screen {
             }
             else if(Gdx.input.isKeyJustPressed(Input.Keys.A)) host.approve(identity);
             else if(Gdx.input.isKeyJustPressed(Input.Keys.R)) host.decline(identity);
+        }
+        // Campaign-wide risk is the Host's choice until play begins; Host locks it at start.
+        for(int startingLives = 1; startingLives <= 5; startingLives++) {
+            if(!host.isStartingLivesLocked()
+                    && (Gdx.input.isKeyJustPressed(Input.Keys.NUM_0 + startingLives)
+                    || Gdx.input.isKeyJustPressed(Input.Keys.NUMPAD_0 + startingLives))) {
+                host.setStartingLives(startingLives);
+            }
         }
         if(Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && host.canStartSession()) {
             host.startSession();

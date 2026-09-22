@@ -697,6 +697,12 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     @Override
+    public synchronized void submitReviveIntent(int targetSlot, boolean active) {
+        if(!canSendReliableSessionEvent() || targetSlot < 1 || targetSlot > 4) return;
+        tcpChannel.writeAndFlush(new DirectConnectWire.ReviveIntentMessage(sessionId, targetSlot, active));
+    }
+
+    @Override
     public boolean isSessionPaused() {
         return partyCommunication.getPauseSession().isPaused();
     }

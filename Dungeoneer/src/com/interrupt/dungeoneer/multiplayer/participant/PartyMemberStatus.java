@@ -11,6 +11,8 @@ public final class PartyMemberStatus {
     public static final int DEFAULT_REMAINING_LIVES = 3;
     public static final int MAX_HEALTH = 1000000;
     public static final int MAX_REMAINING_LIVES = 5;
+    public static final int MAX_BLEEDOUT_TICKS = 600;
+    public static final int MAX_REVIVAL_TICKS = 180;
 
     private final int campaignSlot;
     private final NetworkEntityId entityId;
@@ -20,10 +22,22 @@ public final class PartyMemberStatus {
     private final int maximumHealth;
     private final int remainingLives;
     private final PartyMemberState state;
+    private final int bleedoutTicks;
+    private final int revivalTicks;
+    private final int reviverSlot;
 
     public PartyMemberStatus(int campaignSlot, NetworkEntityId entityId,
             String nickname, String avatarId, int health, int maximumHealth,
             int remainingLives, PartyMemberState state) {
+        this(campaignSlot, entityId, nickname, avatarId, health, maximumHealth,
+                remainingLives, state, 0, 0, 0);
+    }
+
+    /** Tick counts are values at publication; observers count down locally while unpaused. */
+    public PartyMemberStatus(int campaignSlot, NetworkEntityId entityId,
+            String nickname, String avatarId, int health, int maximumHealth,
+            int remainingLives, PartyMemberState state, int bleedoutTicks,
+            int revivalTicks, int reviverSlot) {
         if(campaignSlot < 1 || campaignSlot > 4) {
             throw new IllegalArgumentException("Campaign Slot must be 1-4.");
         }
@@ -35,6 +49,12 @@ public final class PartyMemberStatus {
             throw new IllegalArgumentException("Remaining Lives must be 0-5.");
         }
         if(state == null) throw new IllegalArgumentException("Party member state cannot be null.");
+        if(bleedoutTicks < 0 || bleedoutTicks > MAX_BLEEDOUT_TICKS
+                || revivalTicks < 0 || revivalTicks > MAX_REVIVAL_TICKS
+                || reviverSlot < 0 || reviverSlot > 4 || reviverSlot == campaignSlot
+                || (revivalTicks > 0) != (reviverSlot > 0)) {
+            throw new IllegalArgumentException("Party incapacitation timing is outside protocol bounds.");
+        }
         if(state == PartyMemberState.DISCONNECTED && entityId != null) {
             throw new IllegalArgumentException("Disconnected Party member cannot own an Active Floor Entity.");
         }
@@ -50,10 +70,18 @@ public final class PartyMemberStatus {
         this.maximumHealth = maximumHealth;
         this.remainingLives = remainingLives;
         this.state = state;
+        this.bleedoutTicks = bleedoutTicks;
+        this.revivalTicks = revivalTicks;
+        this.reviverSlot = reviverSlot;
     }
 
     public static PartyMemberStatus initial(CampaignSlot slot,
             MovementEntityDescriptor descriptor) {
+        return initial(slot, descriptor, DEFAULT_REMAINING_LIVES);
+    }
+
+    public static PartyMemberStatus initial(CampaignSlot slot,
+            MovementEntityDescriptor descriptor, int startingLives) {
         if(slot == null) throw new IllegalArgumentException("Campaign Slot cannot be null.");
         if(descriptor != null && descriptor.getCampaignSlot() != slot.getNumber()) {
             throw new IllegalArgumentException("Movement Entity belongs to a different Campaign Slot.");
@@ -62,7 +90,7 @@ public final class PartyMemberStatus {
                 descriptor == null ? null : descriptor.getEntityId(),
                 slot.getPresentation().getNickname(),
                 slot.getPresentation().getAvatarId(), DEFAULT_HEALTH, DEFAULT_HEALTH,
-                DEFAULT_REMAINING_LIVES, descriptor == null
+                startingLives, descriptor == null
                         ? PartyMemberState.DISCONNECTED : PartyMemberState.CONNECTED);
     }
 
@@ -94,7 +122,19 @@ public final class PartyMemberStatus {
     public PartyMemberStatus withHealth(int authoritativeHealth,
             int authoritativeMaximumHealth) {
         return new PartyMemberStatus(campaignSlot, entityId, nickname, avatarId,
-                authoritativeHealth, authoritativeMaximumHealth, remainingLives, state);
+                authoritativeHealth, authoritativeMaximumHealth, remainingLives, state,
+                bleedoutTicks, revivalTicks, reviverSlot);
+    }
+
+    /** Projects Host-authoritative Lives and incapacitation without touching presence identity. */
+    public PartyMemberStatus withIncapacitation(PartyMemberState authoritativeState,
+            int authoritativeLives, int authoritativeBleedoutTicks,
+            int authoritativeRevivalTicks, int authoritativeReviverSlot) {
+        return new PartyMemberStatus(campaignSlot,
+                authoritativeState == PartyMemberState.DISCONNECTED ? null : entityId,
+                nickname, avatarId, health, maximumHealth, authoritativeLives,
+                authoritativeState, authoritativeBleedoutTicks, authoritativeRevivalTicks,
+                authoritativeReviverSlot);
     }
 
     public int getCampaignSlot() {
@@ -127,5 +167,18 @@ public final class PartyMemberStatus {
 
     public PartyMemberState getState() {
         return state;
+    }
+
+    public int getBleedoutTicks() {
+        return bleedoutTicks;
+    }
+
+    public int getRevivalTicks() {
+        return revivalTicks;
+    }
+
+    /** Campaign Slot performing Revival, or 0. */
+    public int getReviverSlot() {
+        return reviverSlot;
     }
 }

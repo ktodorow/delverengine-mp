@@ -71,6 +71,7 @@ public class GameApplication extends Game {
     private DirectConnectSessionScreen directConnectScreen;
     private DirectConnectMovementController directConnectMovementController;
     private DirectConnectCombatController directConnectCombatController;
+    private com.interrupt.dungeoneer.multiplayer.lives.DirectConnectLivesController directConnectLivesController;
     private boolean enteredDirectConnectFloor = false;
 
     public GameScreen mainScreen;
@@ -345,7 +346,17 @@ public class GameApplication extends Game {
         directConnectCombatController.setProgressResolver(economy);
         mainScreen.setNetworkItemController(items);
         mainScreen.setNetworkEconomyController(economy);
+        directConnectLivesController =
+                new com.interrupt.dungeoneer.multiplayer.lives.DirectConnectLivesController(
+                        directConnectPeer, directConnectMovementController);
+        mainScreen.setNetworkLivesController(directConnectLivesController);
         completedScreen.dispose();
+    }
+
+    /** Centered Downed, bleedout or Revival line for local Participant, or null. */
+    public String getDirectConnectLivesPrompt() {
+        return directConnectLivesController == null ? null
+                : directConnectLivesController.getPrompt();
     }
 
     public DirectConnectPeer getDirectConnectPeer() {

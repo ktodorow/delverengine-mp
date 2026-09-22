@@ -17,6 +17,7 @@ import com.interrupt.dungeoneer.multiplayer.combat.ProjectileVisual;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementObstacle;
 import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld;
 import com.interrupt.dungeoneer.multiplayer.items.AuthoritativeItemWorld;
+import com.interrupt.dungeoneer.multiplayer.lives.AuthoritativeLives;
 import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
 import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
 import com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot;
@@ -91,6 +92,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementSpawn;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.movement.RectangularMovementCollisionWorld;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
 import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 import com.interrupt.dungeoneer.multiplayer.participant.ReconnectGrace;
@@ -131,6 +133,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Participant Host authority for explicit lobby approval and persistent Campaign Slots. */
 public final class DirectConnectHost implements DirectConnectPeer, NativeCombatAuthority,
         com.interrupt.dungeoneer.multiplayer.economy.EconomyHost {
+    private static final float REVIVAL_REACH = 1.6f;
+    /** Knockback or sliding beyond this breaks Revival even without movement input. */
+    private static final float REVIVAL_DRIFT = 0.5f;
+    private static final long DEATH_DROP_TICKS = 180L;
     private static final int SNAPSHOT_INTERVAL_TICKS =
             AuthoritativeHostSession.TICKS_PER_SECOND / 20;
     public static final long RECONNECT_GRACE_TICKS =
@@ -184,6 +190,18 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private volatile AuthoritativeHostSession movementSession;
     private volatile ScheduledFuture<?> movementTask;
     private volatile PartyStatusSnapshot partyStatus;
+    private volatile int startingLives = AuthoritativeLives.DEFAULT_STARTING_LIVES;
+    private volatile AuthoritativeLives lives;
+    private long publishedLivesRevision;
+    private volatile List<MovementEntityDescriptor> livesDescriptors =
+            new ArrayList<MovementEntityDescriptor>();
+    private final Map<ParticipantId, RevivalAnchor> revivalAnchors =
+            new LinkedHashMap<ParticipantId, RevivalAnchor>();
+    /** Combat health seen by latest Host tick; read under Host lock where combat state is off limits. */
+    private final Map<ParticipantId, Integer> tickHealths =
+            new LinkedHashMap<ParticipantId, Integer>();
+    private final Map<ParticipantId, DeathDrop> deathDrops =
+            new LinkedHashMap<ParticipantId, DeathDrop>();
     private volatile PartyCommunicationState partyCommunication =
             PartyCommunicationState.initial();
     private final AuthoritativeItemWorld itemWorld = new AuthoritativeItemWorld();
@@ -620,6 +638,13 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         List<MovementEntityDescriptor> descriptors = createMovementDescriptors();
         movementSimulation = new AuthoritativeMovementSimulation(movementWorld, descriptors);
         combatEncounter = new AuthoritativeCombatEncounter(descriptors, movementWorld);
+        List<ParticipantId> livesParticipants = new ArrayList<ParticipantId>();
+        for(MovementEntityDescriptor descriptor : descriptors) {
+            livesParticipants.add(descriptor.getParticipantId());
+        }
+        lives = new AuthoritativeLives(startingLives, livesParticipants);
+        publishedLivesRevision = lives.getRevision();
+        livesDescriptors = descriptors;
         for(MovementEntityDescriptor descriptor : descriptors) {
             MovementEntityState state = movementSimulation.getState(descriptor.getParticipantId());
             if(state != null) {
@@ -734,7 +759,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     break;
                 }
             }
-            members.add(PartyMemberStatus.initial(slot, descriptor));
+            members.add(PartyMemberStatus.initial(slot, descriptor, startingLives));
         }
         return new PartyStatusSnapshot(++nextPartyStatusSequence, members);
     }
@@ -750,6 +775,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     if(session != null && sessionStarted && !closing.get()) {
                         if(!isSessionPaused()) {
                             session.advanceOneTick();
+                            advanceLives(session.getHostTick());
                             expireReconnectGrace(session.getHostTick());
                         }
                     }
@@ -1248,7 +1274,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             changed = true;
         }
         if(!changed) return;
-        partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, updated);
+        partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, projectLives(updated));
         broadcastPartyStatus();
     }
 
@@ -1437,8 +1463,265 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 break;
             }
         }
-        partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, updated);
+        partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, projectLives(updated));
         broadcastPartyStatus();
+    }
+
+    /** Lives own incapacitation; presence only decides between connected, grace and absent. */
+    private List<PartyMemberStatus> projectLives(List<PartyMemberStatus> members) {
+        AuthoritativeLives current = lives;
+        if(current == null) return members;
+        List<PartyMemberStatus> projected = new ArrayList<PartyMemberStatus>(members.size());
+        for(PartyMemberStatus member : members) {
+            ParticipantId participant = new ParticipantId("campaign-slot-" + member.getCampaignSlot());
+            AuthoritativeLives.Condition condition = current.getCondition(participant);
+            if(condition == null) {
+                projected.add(member);
+                continue;
+            }
+            PartyMemberState state;
+            int bleedoutTicks = 0, revivalTicks = 0, reviverSlot = 0;
+            if(member.getEntityId() == null) state = PartyMemberState.DISCONNECTED;
+            else if(condition == AuthoritativeLives.Condition.DOWNED) {
+                state = PartyMemberState.DOWNED;
+                bleedoutTicks = current.getBleedoutTicks(participant);
+                ParticipantId reviver = current.getReviver(participant);
+                if(reviver != null) {
+                    revivalTicks = current.getRevivalTicks(participant);
+                    reviverSlot = campaignSlot(reviver);
+                }
+            }
+            else if(condition == AuthoritativeLives.Condition.EXHAUSTED) {
+                state = PartyMemberState.SPECTATING;
+            }
+            else state = isInReconnectGrace(member.getCampaignSlot())
+                    ? PartyMemberState.RECONNECTING : PartyMemberState.CONNECTED;
+            projected.add(member.withIncapacitation(state, current.getRemainingLives(participant),
+                    bleedoutTicks, revivalTicks, reviverSlot));
+        }
+        return projected;
+    }
+
+    private int campaignSlot(ParticipantId participant) {
+        for(MovementEntityDescriptor descriptor : livesDescriptors) {
+            if(descriptor.getParticipantId().equals(participant)) return descriptor.getCampaignSlot();
+        }
+        return 0;
+    }
+
+    private boolean isInReconnectGrace(int campaignSlot) {
+        for(GraceParticipant grace : reconnectingParticipants.values()) {
+            if(grace.descriptor.getCampaignSlot() == campaignSlot) return true;
+        }
+        return false;
+    }
+
+    private void publishLivesIfChanged() {
+        AuthoritativeLives current = lives;
+        PartyStatusSnapshot published = partyStatus;
+        if(current == null || published == null
+                || current.getRevision() == publishedLivesRevision) return;
+        publishedLivesRevision = current.getRevision();
+        partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence,
+                projectLives(published.getMembers()));
+        broadcastPartyStatus();
+    }
+
+    /**
+     * One unpaused Host tick of Downing, Revival interruption, bleedout and respawn.
+     * Native combat publishes while holding the encounter lock and then takes the Host lock,
+     * whereas reconnect paths hold the Host lock first; this path therefore never holds both.
+     */
+    private void advanceLives(long hostTick) {
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(encounter == null) return;
+        Map<ParticipantId, Integer> healths = new LinkedHashMap<ParticipantId, Integer>();
+        for(MovementEntityDescriptor descriptor : livesDescriptors) {
+            healths.put(descriptor.getParticipantId(),
+                    encounter.getParticipantHealth(descriptor.getParticipantId()));
+        }
+        List<ParticipantId> downed = new ArrayList<ParticipantId>();
+        Map<ParticipantId, Integer> restored = new LinkedHashMap<ParticipantId, Integer>();
+        synchronized(this) {
+            resolveLives(hostTick, healths, downed, restored);
+        }
+        for(ParticipantId participant : downed) encounter.discardParticipantCombatHistory(participant);
+        for(Map.Entry<ParticipantId, Integer> restore : restored.entrySet()) {
+            encounter.restoreParticipant(hostTick, restore.getKey(), restore.getValue(),
+                    nativeCombatOutput);
+        }
+        synchronized(this) {
+            publishLivesIfChanged();
+        }
+    }
+
+    private void resolveLives(long hostTick, Map<ParticipantId, Integer> healths,
+            List<ParticipantId> downed, Map<ParticipantId, Integer> restored) {
+        AuthoritativeLives current = lives;
+        AuthoritativeMovementSimulation simulation = movementSimulation;
+        if(current == null || simulation == null) return;
+        for(Map.Entry<ParticipantId, RevivalAnchor> entry : revivalAnchors.entrySet()) {
+            Integer before = tickHealths.get(entry.getKey());
+            if(entry.getValue().health == RevivalAnchor.UNOBSERVED_HEALTH && before != null) {
+                entry.getValue().health = before.intValue();
+            }
+        }
+        tickHealths.clear();
+        tickHealths.putAll(healths);
+        for(MovementEntityDescriptor descriptor : livesDescriptors) {
+            ParticipantId participant = descriptor.getParticipantId();
+            Integer health = healths.get(participant);
+            if(health == null || health.intValue() != 0 || !current.down(participant)) continue;
+            downed.add(participant);
+            revivalAnchors.remove(participant);
+            deathDrops.remove(participant);
+            MovementEntityState state = simulation.getState(participant);
+            if(state != null) {
+                deathDrops.put(participant, new DeathDrop(state.getX(), state.getY(), state.getZ()));
+            }
+            simulation.freezeParticipant(participant);
+            status = status(DirectConnectPhase.READY, descriptor.getNickname() + " is Downed.",
+                    participant.getValue(), sharedFloorId());
+        }
+        for(Map.Entry<ParticipantId, RevivalAnchor> entry
+                : new ArrayList<Map.Entry<ParticipantId, RevivalAnchor>>(revivalAnchors.entrySet())) {
+            if(revivalContinues(entry.getKey(), entry.getValue(), current, healths, simulation)) continue;
+            revivalAnchors.remove(entry.getKey());
+            current.cancelRevival(entry.getKey());
+        }
+        for(AuthoritativeLives.Outcome outcome : current.tick()) {
+            ParticipantId participant = outcome.participant;
+            MovementEntityDescriptor descriptor = livesDescriptor(participant);
+            if(outcome.kind == AuthoritativeLives.OutcomeKind.REVIVED) {
+                revivalAnchors.remove(outcome.reviver);
+                deathDrops.remove(participant);
+                restored.put(participant, AuthoritativeLives.REVIVAL_HEALTH_PERCENT);
+            }
+            else {
+                DeathDrop drop = deathDrops.get(participant);
+                if(drop != null) drop.expiresAtHostTick = hostTick + DEATH_DROP_TICKS;
+            }
+            if(outcome.kind == AuthoritativeLives.OutcomeKind.EXHAUSTED) continue;
+            if(outcome.kind == AuthoritativeLives.OutcomeKind.RESPAWNED) {
+                if(descriptor != null) {
+                    MovementSpawn respawnPoint = movementWorld.getSpawn(descriptor.getCampaignSlot());
+                    simulation.setNativePosition(participant, respawnPoint.getX(),
+                            respawnPoint.getY(), respawnPoint.getZ());
+                }
+                restored.put(participant, AuthoritativeLives.RESPAWN_HEALTH_PERCENT);
+            }
+            if(descriptor != null && !isInReconnectGrace(descriptor.getCampaignSlot())) {
+                simulation.resumeParticipant(participant);
+            }
+        }
+    }
+
+    private boolean revivalContinues(ParticipantId reviver, RevivalAnchor anchor,
+            AuthoritativeLives current, Map<ParticipantId, Integer> healths,
+            AuthoritativeMovementSimulation simulation) {
+        MovementEntityDescriptor descriptor = livesDescriptor(reviver);
+        if(descriptor == null || !anchor.target.equals(current.getRevivalTarget(reviver))
+                || isInReconnectGrace(descriptor.getCampaignSlot())) return false;
+        Integer observed = healths.get(reviver);
+        if(observed == null) return false;
+        int health = observed.intValue();
+        if(anchor.health != RevivalAnchor.UNOBSERVED_HEALTH && health < anchor.health) return false;
+        anchor.health = health;
+        if(simulation.isRequestingMovement(reviver)) return false;
+        MovementEntityState state = simulation.getState(reviver);
+        if(state == null) return false;
+        float x = state.getX() - anchor.x, y = state.getY() - anchor.y;
+        return x * x + y * y <= REVIVAL_DRIFT * REVIVAL_DRIFT
+                && canReachDowned(state, simulation.getState(anchor.target));
+    }
+
+    private boolean canReachDowned(MovementEntityState reviver, MovementEntityState downed) {
+        if(reviver == null || downed == null) return false;
+        float x = reviver.getX() - downed.getX(), y = reviver.getY() - downed.getY();
+        return x * x + y * y <= REVIVAL_REACH * REVIVAL_REACH
+                && Math.abs(reviver.getZ() - downed.getZ()) <= 1f
+                && movementWorld.hasLineOfSight(reviver.getX(), reviver.getY(),
+                        downed.getX(), downed.getY());
+    }
+
+    private MovementEntityDescriptor livesDescriptor(ParticipantId participant) {
+        for(MovementEntityDescriptor descriptor : livesDescriptors) {
+            if(descriptor.getParticipantId().equals(participant)) return descriptor;
+        }
+        return null;
+    }
+
+    private void reviveIntent(ParticipantId reviver, int targetSlot, boolean active) {
+        AuthoritativeLives current = lives;
+        AuthoritativeMovementSimulation simulation = movementSimulation;
+        if(current == null || simulation == null || isSessionPaused()) return;
+        if(!active) {
+            revivalAnchors.remove(reviver);
+            current.cancelRevival(reviver);
+            publishLivesIfChanged();
+            return;
+        }
+        MovementEntityDescriptor source = livesDescriptor(reviver);
+        MovementEntityDescriptor target = null;
+        for(MovementEntityDescriptor descriptor : livesDescriptors) {
+            if(descriptor.getCampaignSlot() == targetSlot) target = descriptor;
+        }
+        MovementEntityState state = simulation.getState(reviver);
+        if(source == null || target == null || state == null
+                || isInReconnectGrace(source.getCampaignSlot())
+                || simulation.isRequestingMovement(reviver)
+                || !canReachDowned(state, simulation.getState(target.getParticipantId()))
+                || !current.beginRevival(reviver, target.getParticipantId())) return;
+        RevivalAnchor anchor = revivalAnchors.get(reviver);
+        if(anchor == null || !anchor.target.equals(target.getParticipantId())) {
+            revivalAnchors.put(reviver, new RevivalAnchor(target.getParticipantId(),
+                    state.getX(), state.getY(), tickHealths.containsKey(reviver)
+                            ? tickHealths.get(reviver).intValue()
+                            : RevivalAnchor.UNOBSERVED_HEALTH));
+        }
+        publishLivesIfChanged();
+    }
+
+    private synchronized void reviveIntent(ChannelHandlerContext context,
+            DirectConnectWire.ReviveIntentMessage message) {
+        RemoteConnection connection = activeConnection(context, message.sessionId, "Revival intent");
+        if(connection == null || connection.reconnectGrace != null) return;
+        reviveIntent(connection.movementDescriptor.getParticipantId(),
+                message.targetSlot, message.active);
+    }
+
+    @Override
+    public synchronized void submitReviveIntent(int targetSlot, boolean active) {
+        MovementEntityDescriptor descriptor = hostMovementDescriptor();
+        if(descriptor == null || targetSlot < 1 || targetSlot > 4) return;
+        reviveIntent(descriptor.getParticipantId(), targetSlot, active);
+    }
+
+    /** Campaign-wide starting Lives; locked once campaign play begins. */
+    public synchronized void setStartingLives(int startingLives) {
+        AuthoritativeLives.requireStartingLives(startingLives);
+        if(sessionStarted) throw new IllegalStateException("Starting Lives lock once campaign play begins.");
+        this.startingLives = startingLives;
+    }
+
+    public int getStartingLives() {
+        return startingLives;
+    }
+
+    public boolean isStartingLivesLocked() {
+        return sessionStarted;
+    }
+
+    /**
+     * Where a just-respawned Participant lost its Life. Taken once by that Participant's
+     * selected hotbar item drop, so the item stays where they fell instead of at Respawn Point.
+     */
+    public synchronized float[] takeDeathDropPosition(ParticipantId participant) {
+        DeathDrop drop = deathDrops.get(participant);
+        if(drop == null || drop.expiresAtHostTick == 0L) return null;
+        deathDrops.remove(participant);
+        return currentHostTick() > drop.expiresAtHostTick ? null
+                : new float[] { drop.x, drop.y, drop.z };
     }
 
     private void beginReconnectGrace(RemoteConnection connection) {
@@ -1469,7 +1752,11 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             return;
         }
         AuthoritativeMovementSimulation simulation = movementSimulation;
-        if(simulation != null) simulation.resumeParticipant(grace.descriptor.getParticipantId());
+        AuthoritativeLives currentLives = lives;
+        if(simulation != null && (currentLives == null
+                || currentLives.isStanding(grace.descriptor.getParticipantId()))) {
+            simulation.resumeParticipant(grace.descriptor.getParticipantId());
+        }
         AuthoritativeCombatEncounter encounter = combatEncounter;
         if(encounter != null) {
             encounter.setParticipantCombatEligible(grace.descriptor.getParticipantId(), true);
@@ -2180,6 +2467,36 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         DISCONNECTED
     }
 
+    private static final class RevivalAnchor {
+        /** Intent arrives under Host lock, where combat state is off limits; next tick observes it. */
+        private static final int UNOBSERVED_HEALTH = -1;
+        private final ParticipantId target;
+        private final float x;
+        private final float y;
+        private int health;
+
+        private RevivalAnchor(ParticipantId target, float x, float y, int health) {
+            this.target = target;
+            this.x = x;
+            this.y = y;
+            this.health = health;
+        }
+    }
+
+    private static final class DeathDrop {
+        private final float x;
+        private final float y;
+        private final float z;
+        /** Zero until bleedout consumes the Life. */
+        private long expiresAtHostTick;
+
+        private DeathDrop(float x, float y, float z) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+    }
+
     private static final class GraceParticipant {
         private final CampaignSlot slot;
         private final MovementEntityDescriptor descriptor;
@@ -2234,6 +2551,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             else if(message instanceof DirectConnectWire.ItemRequestMessage
                     && helloAccepted && sessionStarted) {
                 itemAction(context, (DirectConnectWire.ItemRequestMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.ReviveIntentMessage
+                    && helloAccepted && sessionStarted) {
+                reviveIntent(context, (DirectConnectWire.ReviveIntentMessage)message);
             }
             else if(message instanceof CombatActionRequestMessage && helloAccepted && sessionStarted) {
                 combatAction(context, (CombatActionRequestMessage)message);

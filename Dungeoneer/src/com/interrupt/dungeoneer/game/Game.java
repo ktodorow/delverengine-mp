@@ -564,7 +564,10 @@ public class Game {
 		Game.useMessage.clear();
 
         // Game over logic!
-        if(player.hp <= 0 && !player.isDead) {
+        if(player.deathDeferredToAuthority) {
+            // Multiplayer Host resolves zero health through Downed, Revival and respawn.
+        }
+        else if(player.hp <= 0 && !player.isDead) {
             player.die();
         }
         else {

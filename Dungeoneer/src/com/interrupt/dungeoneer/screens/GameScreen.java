@@ -98,6 +98,7 @@ public class GameScreen implements Screen {
 				if(networkCombatController != null && game != null) {
 					networkCombatController.prepare(game);
 				}
+				if(networkLivesController != null) networkLivesController.prepare(game);
 				gameManager.tick(delta * 60f);
 
 				if(game != null) {
@@ -120,6 +121,10 @@ public class GameScreen implements Screen {
 				networkCombatController.update(game);
 			}
 
+            // After combat so restored health and native effect authority are already applied.
+            if(directConnectReady && networkLivesController != null) {
+                networkLivesController.update(game, input, delta);
+            }
             if(directConnectReady && networkItemController != null) networkItemController.update(game);
             if(directConnectReady && networkEconomyController != null) networkEconomyController.update(game);
 
@@ -260,6 +265,7 @@ public class GameScreen implements Screen {
     public void dispose() {
         if(networkMovementController != null) networkMovementController.dispose();
         if(networkCombatController != null) networkCombatController.dispose();
+        if(networkLivesController != null) networkLivesController.dispose(GameManager.getGame());
         if(networkEconomyController != null) networkEconomyController.dispose();
         if(networkItemController != null) networkItemController.dispose();
 		Audio.disposeAudio(null);
@@ -274,6 +280,13 @@ public class GameScreen implements Screen {
     public void setNetworkCombatController(
             DirectConnectCombatController networkCombatController) {
         this.networkCombatController = networkCombatController;
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.lives.DirectConnectLivesController networkLivesController;
+
+    public void setNetworkLivesController(
+            com.interrupt.dungeoneer.multiplayer.lives.DirectConnectLivesController controller) {
+        networkLivesController = controller;
     }
 
     public void setNetworkItemController(DirectConnectItemController controller) {

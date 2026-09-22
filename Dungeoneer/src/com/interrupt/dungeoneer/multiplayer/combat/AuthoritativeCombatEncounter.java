@@ -300,6 +300,38 @@ public final class AuthoritativeCombatEncounter {
         publish(hostTick, output);
     }
 
+    /** Current Participant health, or -1 outside this encounter. */
+    public synchronized int getParticipantHealth(ParticipantId participantId) {
+        MutableCombatant participant = participants.get(participantId);
+        return participant == null ? -1 : participant.health;
+    }
+
+    /** Revival or respawn: returns a zero-health Participant at a share of maximum health. */
+    public synchronized void restoreParticipant(long hostTick, ParticipantId participantId,
+            int healthPercent, HostSessionOutput output) {
+        MutableCombatant participant = participants.get(participantId);
+        if(participant == null || participant.health > 0
+                || healthPercent < 1 || healthPercent > 100) return;
+        participant.health = com.interrupt.dungeoneer.multiplayer.lives.AuthoritativeLives
+                .healthPercent(participant.maximumHealth, healthPercent);
+        participant.lastHeardTick = Long.MIN_VALUE / 2L;
+        discardParticipantCombatHistory(participantId);
+        publish(hostTick, output);
+    }
+
+    /** Downing: queued native attacks and monster grudges never reach a later Life. */
+    public synchronized void discardParticipantCombatHistory(ParticipantId participantId) {
+        for(int index = pendingNativeRequests.size() - 1; index >= 0; index--) {
+            if(pendingNativeRequests.get(index).getParticipantId().equals(participantId)) {
+                pendingNativeRequests.remove(index);
+            }
+        }
+        for(Map.Entry<String, ParticipantId> attacker
+                : new ArrayList<Map.Entry<String, ParticipantId>>(lastAttackers.entrySet())) {
+            if(participantId.equals(attacker.getValue())) lastAttackers.remove(attacker.getKey());
+        }
+    }
+
     public synchronized void setParticipantCombatEligible(ParticipantId participantId,
             boolean combatEligible) {
         if(participantId == null) return;
