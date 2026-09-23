@@ -16,9 +16,30 @@ public class Fire extends AnimatedSprite {
     public float hurtTimer = 0f;
     private transient boolean presentationOnly;
     private transient float presentationDelta;
+    /** Replica of a Host world fire: no burn or spread, but it burns out on the local clock. */
+    private transient boolean worldReplica;
+    /** True for fires created while the floor runs (bomb spawns), never for floor-start fires. */
+    private transient boolean runtimeSpawned;
 
     public void setPresentationOnly() { presentationOnly = true; burnsOut = false; }
     public void advancePresentation(float hostElapsed) { presentationDelta += hostElapsed; }
+
+    public void setWorldReplica() {
+        presentationOnly = true;
+        worldReplica = true;
+        burnsOut = true;
+        randomLifeTime = 0f;
+    }
+
+    public boolean isRuntimeSpawned() { return runtimeSpawned; }
+    public void setRuntimeSpawned(boolean spawned) { runtimeSpawned = spawned; }
+    public boolean burnsOut() { return burnsOut; }
+    public boolean makesLight() { return makeLight; }
+    public boolean makesParticles() { return makeParticles; }
+    public boolean makesSound() { return makeSound; }
+    public void setPresentationFlags(boolean burnsOut, boolean light, boolean particles, boolean sound) {
+        this.burnsOut = burnsOut; makeLight = light; makeParticles = particles; makeSound = sound;
+    }
 
     @EditorProperty
     public float hurtTime = 160f;
@@ -72,6 +93,7 @@ public class Fire extends AnimatedSprite {
     public void init(Level level, Level.Source source) {
         super.init(level, source);
 
+        if(source == Level.Source.SPAWNED) runtimeSpawned = true;
         this.lifeTime += Game.rand.nextFloat() * this.randomLifeTime;
         this.fireCollision.set(this.radius, this. radius, this.radius * 2);
     }
@@ -94,7 +116,7 @@ public class Fire extends AnimatedSprite {
 
     @Override
     public void tick(Level level, float delta) {
-        if(presentationOnly) {
+        if(presentationOnly && !worldReplica) {
             delta = presentationDelta;
             presentationDelta = 0;
         }

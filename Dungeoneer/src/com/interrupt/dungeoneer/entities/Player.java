@@ -1362,6 +1362,12 @@ public class Player extends Actor {
 			}
 		}
 
+        // Party Dev tools (opt-in --dev-tools launch) must stay reachable while Downed or spectating.
+        if(Game.devToolsEnabled && !isInOverlay && input.keyEvents.contains(Keys.K)
+                && com.interrupt.dungeoneer.GameApplication.isDirectConnectSession()) {
+            OverlayManager.instance.push(new com.interrupt.dungeoneer.overlays.PartyDevOverlay(this));
+        }
+
         if(!isDead && !isInOverlay && !multiplayerIncapacitated) {
             if(input.doUseAction() ||
                     controllerState.buttonEvents.contains(Action.USE, true)) Use(level);
@@ -1392,7 +1398,8 @@ public class Player extends Actor {
             // Debug stuff!
             if(Game.isDebugMode) {
             	try {
-					if (input.keyEvents.contains(Keys.K))
+					if (input.keyEvents.contains(Keys.K)
+							&& !com.interrupt.dungeoneer.GameApplication.isDirectConnectSession())
 						OverlayManager.instance.push(new DebugOverlay(this));
 					else if (input.keyEvents.contains(Keys.L))
 						Game.instance.level.down.changeLevel(level);

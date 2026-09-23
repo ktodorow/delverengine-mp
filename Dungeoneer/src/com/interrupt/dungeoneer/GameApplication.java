@@ -306,6 +306,7 @@ public class GameApplication extends Game {
         Level startupLevel = loadDirectConnectLevel(directConnectPeer instanceof DirectConnectHost
                 ? directConnectFloor : directConnectPeer.getStatus().getFloorId());
         DirectConnectItemController items = new DirectConnectItemController(directConnectPeer);
+        directConnectItemController = items;
         items.rememberLevelTemplates(startupLevel);
         // Every peer builds its own native floor; Host's seed makes those builds identical.
         long floorSeed = directConnectPeer.getSharedFloorSeed();
@@ -367,6 +368,20 @@ public class GameApplication extends Game {
 
     public DirectConnectPeer getDirectConnectPeer() {
         return directConnectPeer;
+    }
+
+    public DirectConnectCombatController getDirectConnectCombatController() {
+        return directConnectCombatController;
+    }
+
+    public DirectConnectItemController getDirectConnectItemController() {
+        return directConnectItemController;
+    }
+
+    private DirectConnectItemController directConnectItemController;
+
+    public DirectConnectMovementController getDirectConnectMovementController() {
+        return directConnectMovementController;
     }
 
     /**

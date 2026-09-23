@@ -114,7 +114,10 @@ public class FusedBomb extends Item {
 
     @Override
     public void tick(Level level, float delta) {
-        if (nativePresentationReplica) return;
+        if (nativePresentationReplica) {
+            tickReplicaPresentation(delta);
+            return;
+        }
         super.tick(level, delta);
 
         if (isWet) {
@@ -162,6 +165,22 @@ public class FusedBomb extends Item {
                 }
             }
         }
+    }
+
+    /** Observer copy of a Host bomb: same fuse flash, never an explosion or fizzle of its own. */
+    private void tickReplicaPresentation(float delta) {
+        fullbrite = isLit && !isWet;
+        if (!fullbrite) {
+            color = Color.WHITE;
+            return;
+        }
+        if (timerStart < 0) timerStart = countdownTimer;
+        color = flashColor;
+        float sinMod = (float) Math.sin((timerStart / (countdownTimer + 22f)) * 15f) * 0.5f + 0.5f;
+        if (sinMod < 0) sinMod = 0;
+        if (sinMod > 1) sinMod = 1;
+        flashColor.set(0.85f * sinMod + 0.15f, 0.35f * sinMod + 0.15f, 0.35f * sinMod + 0.15f, 1f);
+        countdownTimer = Math.max(0.01f, countdownTimer - delta);
     }
 
     @Override

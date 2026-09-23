@@ -492,6 +492,33 @@ public class DirectConnectWireTest {
         assertFalse(door.state.solid);
     }
 
+    @Test
+    public void nativeMonsterSpawnRoundTripsThemeNamePositionAndHealth() throws Exception {
+        com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn spawn =
+                new com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn("monster:7",
+                        "dungeon", "Spider", 3.5f, -2.25f, 0.125f, 4, 6);
+        DirectConnectWire.NativeMonsterSpawnMessage decoded =
+                (DirectConnectWire.NativeMonsterSpawnMessage)roundTrip(
+                        new DirectConnectWire.NativeMonsterSpawnMessage("session", 9L, spawn, 3L));
+        assertEquals("session", decoded.sessionId);
+        assertEquals(9L, decoded.sequence);
+        assertEquals(3L, decoded.generation);
+        assertEquals("monster:7", decoded.spawn.monsterId);
+        assertEquals("dungeon", decoded.spawn.theme);
+        assertEquals("Spider", decoded.spawn.name);
+        assertEquals(3.5f, decoded.spawn.x, 0f);
+        assertEquals(-2.25f, decoded.spawn.y, 0f);
+        assertEquals(0.125f, decoded.spawn.z, 0f);
+        assertEquals(4, decoded.spawn.health);
+        assertEquals(6, decoded.spawn.maximumHealth);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void nativeMonsterSpawnRejectsHealthAboveMaximum() {
+        new com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn("monster:1", "", "Rat",
+                0f, 0f, 0f, 7, 6);
+    }
+
     @Test(expected = IllegalArgumentException.class)
     public void exhaustedItemRequestIdCannotBeEncoded() {
         new DirectConnectWire.ItemRequestMessage("session", Long.MAX_VALUE,

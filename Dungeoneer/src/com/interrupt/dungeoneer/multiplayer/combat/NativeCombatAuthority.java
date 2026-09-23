@@ -12,6 +12,12 @@ public interface NativeCombatAuthority {
     default void applyNativeParticipantDamage(String sourceId, ParticipantId participant,
             int amount, float x, float y, float z) { }
 
+    /** Same, tagged with the cause Life-loss rules consult if this damage proves fatal. */
+    default void applyNativeParticipantDamage(String sourceId, ParticipantId participant,
+            int amount, float x, float y, float z, DeathCause cause) {
+        applyNativeParticipantDamage(sourceId, participant, amount, x, y, z);
+    }
+
     default void applyNativeParticipantImpulse(ParticipantId participant,
             float x, float y, float z) { }
 
@@ -80,6 +86,9 @@ public interface NativeCombatAuthority {
     }
 
     default void recordNativeMonsterAttacker(String monsterId, ParticipantId attackerId) { }
+
+    /** A Monster bound after the initial attach; replayed to reconnecting peers for this world. */
+    default void publishNativeMonsterSpawn(NativeMonsterSpawn spawn) { }
 
     default void applyNativeEnvironmentalDamage(String sourceId, ParticipantId targetId,
             int damage, float originX, float originY, float originZ,

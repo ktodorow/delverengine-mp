@@ -532,7 +532,17 @@ public class Missile extends Item implements Directional {
 
         super.hitWorld(xa, ya, za);
         Level lvl = Game.GetLevel();
+        if(multiplayerImpactListener != null) multiplayerImpactListener.onProjectileBreak(this);
+        spawnBrokenArrowParticles(lvl);
+    }
 
+    /** Observer replica of a Host break: the two arrow halves, nothing else. */
+    public void playNetworkBreakPresentation(Level level) {
+        if(nativePresentationReplica && level != null) spawnBrokenArrowParticles(level);
+    }
+
+    private void spawnBrokenArrowParticles(Level lvl) {
+        if(lvl == null) return;
         if (hitEffect == HitEffect.ARROW) {
             // TODO: Play audio break
 

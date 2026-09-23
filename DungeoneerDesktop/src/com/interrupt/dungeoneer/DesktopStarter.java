@@ -80,7 +80,11 @@ public class DesktopStarter {
             throw new IllegalArgumentException("Choose either --test-level or --owned-tutorial, not both.");
         }
 
-        if(directConnect) Game.isDebugMode = true;
+        // Dev tools are opt-in per launch; a release launch never enables them.
+        if(launchOptions.devTools) {
+            Game.isDebugMode = true;
+            Game.devToolsEnabled = true;
+        }
 
         // Test content must not create or read a player profile in the source tree.
         if(launchOptions.openSourceTestLevel) {

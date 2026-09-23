@@ -6,7 +6,11 @@ public enum ItemAction {
     /** entityId is shop world object; quantity is Host shop entry identity. */
     PURCHASE(8),
     /** entityId is CharacterStat wire identity. */
-    CHOOSE_STAT(9);
+    CHOOSE_STAT(9),
+    /** entityId is the owned item held in hand; quantity 1 wields, 0 releases it. */
+    WIELD(10),
+    /** entityId is an owned fused bomb whose fuse the owner lit before throwing it. */
+    LIGHT(11);
 
     private final int wireId;
     ItemAction(int wireId) { this.wireId = wireId; }

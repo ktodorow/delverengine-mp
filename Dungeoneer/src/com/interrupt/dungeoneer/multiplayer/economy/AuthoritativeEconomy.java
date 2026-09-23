@@ -112,6 +112,17 @@ public final class AuthoritativeEconomy {
         return Collections.unmodifiableMap(shares);
     }
 
+    /** Life-loss penalty destroys gold outright; nothing is minted or dropped. Returns amount taken. */
+    public synchronized int forfeitGold(ParticipantId participant, int amount) {
+        Ledger ledger = ledgers.get(participant);
+        if(ledger == null || amount <= 0) return 0;
+        int taken = Math.min(ledger.gold, amount);
+        if(taken == 0) return 0;
+        ledger.gold -= taken;
+        ledger.revision = ++revision;
+        return taken;
+    }
+
     /** Player.addExperience per recipient: full award, at most one level per award. */
     public synchronized List<ParticipantId> awardExperience(Collection<ParticipantId> recipients,
             int amount) {

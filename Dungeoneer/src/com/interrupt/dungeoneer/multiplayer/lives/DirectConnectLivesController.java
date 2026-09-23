@@ -268,7 +268,7 @@ public final class DirectConnectLivesController {
         else if(avatar != hiddenForFirstPerson) avatar.hidden = false;
     }
 
-    /** A consumed Life: selected hotbar item stays behind and no temporary effect survives. */
+    /** A consumed Life: Host scatters the backpack itself; here no temporary effect survives. */
     private void beginNewLife(Game game, PartyMemberStatus member, boolean local) {
         Actor actor = local ? game.player : movement.getRemoteAvatar(participantId(member));
         if(actor != null && peer instanceof DirectConnectHost) {
@@ -283,9 +283,6 @@ public final class DirectConnectLivesController {
         Player player = game.player;
         player.attackCharge = 0;
         player.drunkMod = 0f;
-        if(player.selectedBarItem != null) {
-            player.dropItem(player.selectedBarItem, game.level, 0.075f);
-        }
     }
 
     private static ParticipantId participantId(PartyMemberStatus member) {

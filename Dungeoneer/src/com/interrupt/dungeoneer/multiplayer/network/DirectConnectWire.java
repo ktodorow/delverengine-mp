@@ -116,6 +116,7 @@ final class DirectConnectWire {
     private static final int SHARED_FLOOR_FINGERPRINT = 48;
     private static final int REVIVE_INTENT = 49;
     private static final int PARTY_WIPE = 50;
+    private static final int NATIVE_MONSTER_SPAWN = 51;
 
     private DirectConnectWire() { }
 
@@ -380,6 +381,24 @@ final class DirectConnectWire {
             output.writeByte(PARTY_WIPE);
             writeString(output, ((PartyWipeMessage)message).sessionId,
                     DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+        }
+        else if(message instanceof NativeMonsterSpawnMessage) {
+            NativeMonsterSpawnMessage spawnMessage = (NativeMonsterSpawnMessage)message;
+            output.writeByte(NATIVE_MONSTER_SPAWN);
+            writeString(output, spawnMessage.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(spawnMessage.generation);
+            output.writeLong(spawnMessage.sequence);
+            writeString(output, spawnMessage.spawn.monsterId, 64, "monster identity");
+            writeString(output, spawnMessage.spawn.theme,
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn.MAX_NAME_BYTES, "monster theme");
+            writeString(output, spawnMessage.spawn.name,
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn.MAX_NAME_BYTES, "monster name");
+            output.writeFloat(spawnMessage.spawn.x);
+            output.writeFloat(spawnMessage.spawn.y);
+            output.writeFloat(spawnMessage.spawn.z);
+            output.writeInt(spawnMessage.spawn.health);
+            output.writeInt(spawnMessage.spawn.maximumHealth);
         }
         else if(message instanceof DoorStateMessage) {
             DoorStateMessage messageState = (DoorStateMessage)message;
@@ -1164,6 +1183,30 @@ final class DirectConnectWire {
             case PARTY_WIPE:
                 message = new PartyWipeMessage(readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity"));
+                break;
+            case NATIVE_MONSTER_SPAWN:
+                String monsterSpawnSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                        "session identity");
+                requireReadable(input, 16, "native monster spawn header");
+                long monsterSpawnGeneration = input.readLong();
+                long monsterSpawnSequence = input.readLong();
+                String spawnMonsterId = readString(input, 64, "monster identity");
+                String spawnTheme = readString(input,
+                        com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn.MAX_NAME_BYTES, "monster theme");
+                String spawnName = readString(input,
+                        com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn.MAX_NAME_BYTES, "monster name");
+                requireReadable(input, 20, "native monster spawn state");
+                float spawnX = input.readFloat(), spawnY = input.readFloat(), spawnZ = input.readFloat();
+                int spawnHealth = input.readInt(), spawnMaximumHealth = input.readInt();
+                try {
+                    message = new NativeMonsterSpawnMessage(monsterSpawnSession, monsterSpawnSequence,
+                            new com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn(spawnMonsterId,
+                                    spawnTheme, spawnName, spawnX, spawnY, spawnZ, spawnHealth, spawnMaximumHealth),
+                            monsterSpawnGeneration);
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid native monster spawn.", invalid);
+                }
                 break;
             case REVIVE_INTENT:
                 String reviveSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
@@ -2419,6 +2462,24 @@ final class DirectConnectWire {
         PartyWipeMessage(String sessionId) {
             if(sessionId == null) throw new IllegalArgumentException("Party Wipe needs a session.");
             this.sessionId = sessionId;
+        }
+    }
+
+    /** Reliable Host announcement of a Monster that appeared after the floor's initial attach. */
+    static final class NativeMonsterSpawnMessage implements Message {
+        final String sessionId;
+        final long sequence;
+        final com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn spawn;
+        final long generation;
+
+        NativeMonsterSpawnMessage(String sessionId, long sequence,
+                com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn spawn, long generation) {
+            if(sessionId == null || spawn == null || generation <= 0 || sequence <= 0)
+                throw new IllegalArgumentException("Invalid native monster spawn message.");
+            this.sessionId = sessionId;
+            this.sequence = sequence;
+            this.spawn = spawn;
+            this.generation = generation;
         }
     }
 

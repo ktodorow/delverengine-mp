@@ -532,6 +532,28 @@ public final class DirectConnectClient implements DirectConnectPeer {
     @Override
     public boolean isPartyWiped() { return partyWiped; }
 
+    private long lastNativeMonsterSpawnSequence;
+    private final java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn> nativeMonsterSpawns =
+            new java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn>();
+
+    @Override public synchronized List<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn> drainNativeMonsterSpawns() {
+        List<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn> result =
+                new ArrayList<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn>(nativeMonsterSpawns);
+        nativeMonsterSpawns.clear();
+        return result;
+    }
+
+    private synchronized void nativeMonsterSpawn(DirectConnectWire.NativeMonsterSpawnMessage message) {
+        if(!sessionId.equals(message.sessionId)) { fail("Monster spawn belongs to another session."); return; }
+        if(message.generation != nativeWorldGeneration) return;
+        if(message.sequence <= lastNativeMonsterSpawnSequence) return;
+        lastNativeMonsterSpawnSequence = message.sequence;
+        if(nativeMonsterSpawns.size() >= DirectConnectProtocol.MAX_MONSTERS) {
+            fail("Native monster spawn queue exceeded."); return;
+        }
+        nativeMonsterSpawns.addLast(message.spawn);
+    }
+
     private synchronized void partyWipe(DirectConnectWire.PartyWipeMessage delivery) {
         if(sessionId == null || !sessionId.equals(delivery.sessionId)) {
             fail("Party Wipe belongs to another session.");
@@ -872,6 +894,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         shopEntries.clear(); shopOpenings.clear();
         monsterEffects.clear(); nativeStatusCues.clear(); nativeExplosions.clear(); nativeAnimationCues.clear();
         nativeDynamicCues.clear();
+        nativeMonsterSpawns.clear(); lastNativeMonsterSpawnSequence = 0L;
         nativeSpellPresentations.clear();
         nativeMeleePresentations.clear();
         nativeRangedPresentations.clear();
@@ -1363,6 +1386,9 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof PauseRequestedMessage && sessionId != null
                     && campaignSlot != 0) {
                 pauseRequested((PauseRequestedMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.NativeMonsterSpawnMessage && sessionId != null) {
+                nativeMonsterSpawn((DirectConnectWire.NativeMonsterSpawnMessage)message);
             }
             else if(message instanceof DirectConnectWire.PartyWipeMessage && sessionId != null) {
                 partyWipe((DirectConnectWire.PartyWipeMessage)message);

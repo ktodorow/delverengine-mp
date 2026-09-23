@@ -1,6 +1,8 @@
 package com.interrupt.dungeoneer.multiplayer.items;
 
 import com.interrupt.dungeoneer.entities.items.Key;
+import com.interrupt.dungeoneer.entities.items.Armor;
+import com.interrupt.dungeoneer.entities.items.FusedBomb;
 import com.interrupt.dungeoneer.entities.items.Potion;
 import com.interrupt.dungeoneer.entities.items.Food;
 import com.interrupt.dungeoneer.entities.items.Scroll;
@@ -118,6 +120,9 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         PhysicalItemState state = null;
         for(PhysicalItemState candidate : peer.getPhysicalItems()) if(candidate.entityId == id) { state = candidate; break; }
         if(state == null || state.consumed || !localId.equals(state.owner)) return true;
+        // A pickup accepted mid-frame is owned on Host before it is in the local inventory;
+        // a touch-consume (potion, food) must not turn that pickup into a drink.
+        if(!isPresented(state) || !game.player.ownsPhysicalItem(item)) return true;
         if(!pendingConsumption.containsKey(id)) {
             long request = nextRequest++;
             pendingConsumption.put(id, request);
@@ -181,23 +186,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                     host.publishItemActionResult(request.getParticipantId(), new ItemActionResult(
                             request.requestId, request.entityId, false)); continue;
                 }
-                // A consumed Life leaves the selected hotbar item where its owner fell.
-                float[] deathDrop = request.action == ItemAction.DROP
-                        ? host.takeDeathDropPosition(request.getParticipantId()) : null;
-                if(deathDrop != null) {
-                    participant = new ParticipantContext(request.getParticipantId(),
-                            new ParticipantCharacterState(deathDrop[0], deathDrop[1], deathDrop[2],
-                                    participant.getCharacter().getRotation()),
-                            participant.getPartyProgression());
-                    deathDropParticipant = request.getParticipantId();
-                }
-                AuthoritativeItemWorld.Outcome result;
-                try {
-                    result = host.getItemWorld().apply(request, participant, boundary);
-                }
-                finally {
-                    deathDropParticipant = null;
-                }
+                AuthoritativeItemWorld.Outcome result =
+                        host.getItemWorld().apply(request, participant, boundary);
                 if(result != AuthoritativeItemWorld.Outcome.ACCEPTED) {
                     diagnose("Host refused " + request.action + " from "
                             + request.getParticipantId().getValue() + " entity " + request.entityId
@@ -212,6 +202,11 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                         game.level.trigger(item, item.triggersOnPickup, item.name, participant);
                     }
                 }
+                if(result == AuthoritativeItemWorld.Outcome.ACCEPTED
+                        && request.action == ItemAction.LIGHT) {
+                    Item item = nativeItems.get(request.entityId);
+                    if(item instanceof FusedBomb) ((FusedBomb)item).onChargeStart();
+                }
             }
         }
         for(ItemActionResult result : peer.drainItemActionResults()) {
@@ -222,6 +217,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             }
             if(!result.accepted) {
                 diagnose("Host refused request " + result.requestId + " for entity " + result.entityId);
+                // A refused wield report (for example while Downed) is repeated once the owner acts again.
+                if(result.requestId == wieldRequest) reportedWield = -1L;
             }
             Long goldId = pendingGoldPickups.remove(result.requestId);
             Item gold = goldId == null ? null : nativeItems.get(goldId);
@@ -261,11 +258,16 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         if(game == null) return;
         reportEquipment();
         reportSpending();
+        reportWield();
         if(host != null) {
             for(Map.Entry<Long, Item> entry : nativeItems.entrySet()) {
                 Item item = entry.getValue();
                 PhysicalItemState state = host.getItemWorld().get(entry.getKey());
-                if(state != null && !state.consumed && state.owner == null) {
+                // A Life-loss scatter from the Host tick thread is presented first by applyStates;
+                // until then this item is still inactive locally and must not be tombstoned.
+                Long presented = applied.get(entry.getKey());
+                if(state != null && !state.consumed && state.owner == null
+                        && presented != null && presented == state.revision) {
                     if(item.isActive) host.getItemWorld().move(state.entityId, item.x, item.y, item.z);
                     else host.getItemWorld().destroyWorldItem(state.entityId);
                 }
@@ -415,7 +417,17 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         itemIds.put(item, state.entityId);
         if(item instanceof Key) host.getItemWorld().registerKey(state.entityId);
         if(item instanceof Gold) host.getItemWorld().registerGold(state.entityId);
+        host.getItemWorld().registerKind(state.entityId, kindOf(item));
         host.getItemWorld().registerEquipment(state.entityId, item.GetEquipLoc(), false);
+    }
+
+    static ItemKind kindOf(Item item) {
+        if(item instanceof Weapon) return ItemKind.WEAPON;
+        if(item instanceof Armor) return ItemKind.ARMOR;
+        if(item instanceof Potion) return ItemKind.POTION;
+        if(item instanceof Scroll) return ItemKind.SCROLL;
+        if(item instanceof Food) return ItemKind.FOOD;
+        return ItemKind.OTHER;
     }
 
     private static ItemProperties properties(Item item) {
@@ -441,6 +453,15 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     public ItemDescription describe(Item item) {
         return new ItemDescription(remember(item), properties(item));
+    }
+
+    /** Copies of every catalogued template of one class; only these spawn safely on the shared floor. */
+    public List<Item> catalogueTemplates(Class<? extends Item> type) {
+        List<Item> result = new ArrayList<Item>();
+        for(Item template : templates.values()) {
+            if(type.isInstance(template)) result.add(ItemManager.Copy(template.getClass(), template));
+        }
+        return result;
     }
 
     /** Registers native content constructed outside items.dat so every peer can materialize it. */
@@ -632,11 +653,46 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         }
     }
 
+    /** Held item stays in hand through a Life loss, so Host must know which owned item that is. */
+    private void reportWield() {
+        if(peer.isSessionPaused() || nextRequest == Long.MAX_VALUE) return;
+        Item held = game.player.GetHeldItem();
+        Long id = held == null ? null : itemIds.get(held);
+        long wielded = 0L, previousStillOwned = 0L;
+        for(PhysicalItemState state : peer.getPhysicalItems()) {
+            if(!localId.equals(state.owner) || state.consumed) continue;
+            if(id != null && state.entityId == id) wielded = id;
+            if(state.entityId == reportedWield) previousStillOwned = reportedWield;
+        }
+        if(wielded == reportedWield) return;
+        if(wielded != 0L) {
+            wieldRequest = nextRequest;
+            peer.submitItemAction(nextRequest++, ItemAction.WIELD, wielded, 0, 1);
+        }
+        // Host forgets a wield on its own once the item leaves the owner; only an owned release is sent.
+        else if(previousStillOwned != 0L) {
+            wieldRequest = nextRequest;
+            peer.submitItemAction(nextRequest++, ItemAction.WIELD, previousStillOwned, 0, 0);
+        }
+        reportedWield = wielded;
+    }
+
+    private long reportedWield;
+    private long wieldRequest;
+
+    /** True once applyStates has presented this exact revision locally. */
+    private boolean isPresented(PhysicalItemState state) {
+        Long revision = applied.get(state.entityId);
+        return revision != null && revision >= state.revision;
+    }
+
     /** Owner may spend existing inventory; this path cannot mint, improve, or transfer an item. */
     private void reportSpending() {
         if(peer.isSessionPaused()) return;
         for(PhysicalItemState state : peer.getPhysicalItems()) {
-            if(!localId.equals(state.owner) || !applied.containsKey(state.entityId)) continue;
+            // An ownership change that arrived after prepare is not in the inventory yet;
+            // judging it now would report a phantom consumption of the item just picked up.
+            if(!localId.equals(state.owner) || !isPresented(state)) continue;
             Item item = nativeItems.get(state.entityId);
             if(item == null) continue;
             boolean consumed = !game.player.ownsPhysicalItem(item);
@@ -722,6 +778,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         reportEquipment();
         reportSpending();
         Long id = itemIds.get(item);
+        // A thrown bomb was lit while charging; Host's bomb must light before it lands.
+        if(id != null && item instanceof FusedBomb && ((FusedBomb)item).isLit) submit(ItemAction.LIGHT, id);
         if(id != null) submit(ItemAction.DROP, id);
         return true;
     }
@@ -770,13 +828,9 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         return null;
     }
 
-    /** Set only while Host applies one Life-loss drop, which a Spectator must still complete. */
-    private ParticipantId deathDropParticipant;
-
     private final AuthoritativeItemWorld.InteractionBoundary boundary =
             new AuthoritativeItemWorld.InteractionBoundary() {
         public boolean canAct(ParticipantContext participant) {
-            if(participant.getParticipantId().equals(deathDropParticipant)) return true;
             if(peer.isSessionPaused() || peer.getPartyStatus() == null) return false;
             for(MovementEntityDescriptor descriptor : peer.getMovementEntities()) {
                 if(!descriptor.getParticipantId().equals(participant.getParticipantId())) continue;

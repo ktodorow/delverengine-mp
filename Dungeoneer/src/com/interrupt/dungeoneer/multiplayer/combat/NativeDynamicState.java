@@ -26,7 +26,9 @@ public final class NativeDynamicState {
         Class<?> type = entity.getClass();
         return type == Projectile.class || type == MagicMissileProjectile.class
                 || type == BeamProjectile.class || type == Missile.class
-                || type == Bomb.class || type == FusedBomb.class;
+                || type == Bomb.class || type == FusedBomb.class
+                // Floor-start fires already exist on every peer from the shared build.
+                || (type == Fire.class && ((Fire)entity).isRuntimeSpawned());
     }
     public static NativeDynamicState capture(long id, long itemId, Entity e) {
         return capture(id, itemId, e, e.isActive);
@@ -41,14 +43,16 @@ public final class NativeDynamicState {
             out.writeLong(id); out.writeLong(itemId); out.writeBoolean(active);
             int kind = e instanceof MagicMissileProjectile ? 1 : e instanceof BeamProjectile ? 5
                     : e instanceof Projectile ? 0 : e instanceof Missile ? 2
-                    : e instanceof Bomb ? 3 : 4;
+                    : e instanceof Bomb ? 3 : e instanceof Fire ? 6 : 4;
             out.writeByte(kind);
             out.writeFloat(e.x); out.writeFloat(e.y); out.writeFloat(e.z);
             out.writeFloat(e.xa); out.writeFloat(e.ya); out.writeFloat(e.za);
-            out.writeInt(e.tex); out.writeByte(e.artType.ordinal()); out.writeUTF(e.spriteAtlas == null ? "" : e.spriteAtlas);
+            // A fire animates and shrinks locally on every peer; publishing its frame or scale
+            // would change this state every tick for nothing.
+            out.writeInt(kind == 6 ? 0 : e.tex); out.writeByte(e.artType.ordinal()); out.writeUTF(e.spriteAtlas == null ? "" : e.spriteAtlas);
             Color color = e.color == null ? Color.WHITE : e.color;
             out.writeFloat(color.r); out.writeFloat(color.g); out.writeFloat(color.b); out.writeFloat(color.a);
-            out.writeFloat(e.scale); out.writeFloat(e.yOffset); out.writeFloat(e.roll);
+            out.writeFloat(kind == 6 ? ((Fire)e).scaleMod : e.scale); out.writeFloat(e.yOffset); out.writeFloat(e.roll);
             out.writeBoolean(e.fullbrite); out.writeBoolean(e.floating);
             out.writeFloat(e.collision.x); out.writeFloat(e.collision.y); out.writeFloat(e.collision.z);
             if(e instanceof Projectile) {
@@ -93,6 +97,13 @@ public final class NativeDynamicState {
             } else if(kind == 4) {
                 FusedBomb b = (FusedBomb)e; out.writeBoolean(b.isLit); out.writeBoolean(b.isDud); out.writeBoolean(b.isWet());
                 out.writeFloat(b.countdownTimer); out.writeFloat(b.timerStart);
+            } else if(kind == 6) {
+                Fire f = (Fire)e;
+                validateText(f.particleEffect, "Native fire particle effect");
+                out.writeFloat(f.lifeTime); out.writeInt(f.endAnimTex); out.writeFloat(f.animSpeed);
+                out.writeBoolean(f.burnsOut()); out.writeBoolean(f.makesLight());
+                out.writeBoolean(f.makesParticles()); out.writeBoolean(f.makesSound());
+                out.writeUTF(f.particleEffect == null ? "" : f.particleEffect);
             }
             return decode(bytes.toByteArray());
         } catch(IOException invalid) { throw new IllegalArgumentException("Invalid native dynamic state.", invalid); }
@@ -109,19 +120,22 @@ public final class NativeDynamicState {
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload));
         in.readLong(); in.readLong(); in.readBoolean();
         int kind = in.readUnsignedByte();
-        if(kind > 5) throw new IOException("Unknown native dynamic kind.");
+        if(kind > 6) throw new IOException("Unknown native dynamic kind.");
         Entity e = existing;
         if(e == null) e = kind == 0 ? new Projectile() : kind == 1 ? new MagicMissileProjectile()
                 : kind == 2 ? new Missile() : kind == 3 ? new Bomb()
-                : kind == 4 ? new FusedBomb() : new BeamProjectile();
+                : kind == 4 ? new FusedBomb() : kind == 6 ? new Fire() : new BeamProjectile();
         Class<?> entityType = e.getClass();
         if((kind == 0 && entityType != Projectile.class)
                 || (kind == 1 && entityType != MagicMissileProjectile.class)
                 || (kind == 2 && entityType != Missile.class)
                 || (kind == 3 && entityType != Bomb.class)
                 || (kind == 4 && entityType != FusedBomb.class)
-                || (kind == 5 && entityType != BeamProjectile.class))
+                || (kind == 5 && entityType != BeamProjectile.class)
+                || (kind == 6 && entityType != Fire.class))
             throw new IOException("Native dynamic template mismatch.");
+        boolean existingFire = existing != null && kind == 6;
+        int existingTex = e.tex; float existingScale = e.scale;
         e.x = number(in); e.y = number(in); e.z = number(in);
         e.xa = number(in); e.ya = number(in); e.za = number(in);
         e.tex = in.readInt(); int art = in.readUnsignedByte();
@@ -176,6 +190,19 @@ public final class NativeDynamicState {
             FusedBomb b = (FusedBomb)e; b.isLit = in.readBoolean(); b.isDud = in.readBoolean(); b.setNetworkWet(in.readBoolean());
             b.countdownTimer = number(in); b.timerStart = number(in);
             b.wasSpawned = true;
+        } else if(kind == 6) {
+            Fire f = (Fire)e;
+            f.scaleMod = e.scale;
+            f.lifeTime = number(in); f.endAnimTex = in.readInt(); f.animSpeed = number(in);
+            if(f.endAnimTex < 0 || f.endAnimTex > 65535) throw new IOException("Invalid native fire animation.");
+            boolean burnsOut = in.readBoolean(), light = in.readBoolean();
+            boolean particles = in.readBoolean(), sound = in.readBoolean();
+            String effect = in.readUTF();
+            if(effect.length() > 128) throw new IOException("Native fire effect exceeds bound.");
+            f.particleEffect = effect.isEmpty() ? null : effect;
+            f.setWorldReplica();
+            f.setPresentationFlags(burnsOut, light, particles, sound);
+            if(existingFire) { e.tex = existingTex; e.scale = existingScale; }
         }
         if(in.available() != 0) throw new IOException("Trailing native dynamic data.");
         e.nativePresentationReplica = true; e.isActive = active; e.isSolid = false; e.persists = false;

@@ -88,6 +88,11 @@ public interface DirectConnectPeer extends AutoCloseable {
         return java.util.Collections.emptyList();
     }
 
+    /** Monsters Host bound after the floor's initial attach; clients materialize replicas once. */
+    default List<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn> drainNativeMonsterSpawns() {
+        return java.util.Collections.emptyList();
+    }
+
     default List<com.interrupt.dungeoneer.multiplayer.combat.NativeStatusCue> drainNativeStatusCues() {
         return java.util.Collections.emptyList();
     }

@@ -107,6 +107,14 @@ public final class RemoteAvatar extends Actor {
     public void applyAuthoritativeHealth(int health, int maximumHealth) {
         maxHp = Math.max(1, maximumHealth);
         hp = Math.max(0, Math.min(health, maxHp));
+        appliedHealth = hp;
+    }
+
+    private int appliedHealth = -1;
+
+    /** Health this replica last took from a Host snapshot, or -1 before any snapshot. */
+    public int getAppliedHealth() {
+        return appliedHealth;
     }
 
     @Override

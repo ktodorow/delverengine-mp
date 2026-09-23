@@ -131,6 +131,23 @@ public final class AuthoritativeLives {
         return true;
     }
 
+    /**
+     * Dev tools only: optionally grants one Life (capped) and stands a Downed or exhausted slot
+     * back up without consuming anything. Returns true when a body must be restored and moved.
+     */
+    public synchronized boolean devStand(ParticipantId participant, boolean grantLife) {
+        MutableSlot slot = slots.get(participant);
+        if(slot == null) return false;
+        if(grantLife) slot.lives = Math.min(MAXIMUM_STARTING_LIVES, slot.lives + 1);
+        boolean needsBody = slot.condition != Condition.STANDING;
+        if(needsBody) {
+            slot.stand();
+            if(slot.lives == 0) slot.lives = 1;
+        }
+        revision++;
+        return needsBody;
+    }
+
     /** Party Wipe: no Campaign Slot in play can ever return. */
     public synchronized boolean isPartyWiped() {
         for(MutableSlot slot : slots.values()) {
@@ -155,6 +172,7 @@ public final class AuthoritativeLives {
                 if(--slot.bleedoutTicks > 0) continue;
                 slot.stand();
                 slot.lives--;
+                slot.lifeLosses++;
                 if(slot.lives > 0) {
                     outcomes.add(new Outcome(OutcomeKind.RESPAWNED, entry.getKey(), null));
                 }
@@ -180,6 +198,12 @@ public final class AuthoritativeLives {
     public synchronized int getRemainingLives(ParticipantId participant) {
         MutableSlot slot = slots.get(participant);
         return slot == null ? 0 : slot.lives;
+    }
+
+    /** Lives this Campaign Slot has lost so far, including one that just exhausted it. */
+    public synchronized int getLifeLosses(ParticipantId participant) {
+        MutableSlot slot = slots.get(participant);
+        return slot == null ? 0 : slot.lifeLosses;
     }
 
     public synchronized int getBleedoutTicks(ParticipantId participant) {
@@ -212,6 +236,7 @@ public final class AuthoritativeLives {
 
     private static final class MutableSlot {
         private int lives;
+        private int lifeLosses;
         private Condition condition = Condition.STANDING;
         private int bleedoutTicks;
         private int revivalTicks;

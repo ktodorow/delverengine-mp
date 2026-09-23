@@ -1820,6 +1820,159 @@ public class DirectConnectIntegrationTest {
     }
 
     @Test
+    public void lifeLossScattersCarriedItemsKeepsEquipmentForfeitsGoldAndExpiresExhaustedDrops()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("death-drop-floor");
+        HostFixture fixture = host(compatibility, 2, "death-drop");
+        DirectConnectClient second = approveClient(fixture, compatibility, '2', "Two",
+                AvatarCatalog.HUMANOID_2);
+        ParticipantId hostId = new ParticipantId("campaign-slot-1");
+        ParticipantId secondId = new ParticipantId("campaign-slot-2");
+        try {
+            fixture.host.setStartingLives(1);
+            fixture.host.setExhaustedDropTicks(180L);
+            fixture.host.startSession();
+            awaitPhase(second, DirectConnectPhase.READY);
+            awaitPartyState(second, 2, PartyMemberState.CONNECTED);
+            AuthoritativeItemWorld world = fixture.host.getItemWorld();
+            world.registerParticipant(hostId, 8);
+            world.registerParticipant(secondId, 8);
+            fixture.host.getEconomy().registerParticipant(
+                    new com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress(
+                            secondId, 0L, 100, 0, 1, 4, 4, 4, 4, 4, 4, 0, 8, 8, 4));
+            PhysicalItemState armor = world.spawn("armor", secondId, 1f, 1f, 0f,
+                    new com.interrupt.dungeoneer.multiplayer.items.ItemProperties(3, 1, "", "", 1));
+            world.registerKind(armor.entityId, com.interrupt.dungeoneer.multiplayer.items.ItemKind.ARMOR);
+            world.registerEquipment(armor.entityId, "ARMOR", true);
+            PhysicalItemState brokenHelmet = world.spawn("helmet", secondId, 1f, 1f, 0f,
+                    new com.interrupt.dungeoneer.multiplayer.items.ItemProperties(0, 1, "", "", 1));
+            world.registerKind(brokenHelmet.entityId, com.interrupt.dungeoneer.multiplayer.items.ItemKind.ARMOR);
+            world.registerEquipment(brokenHelmet.entityId, "HELMET", true);
+            PhysicalItemState held = world.spawn("sword", secondId, 1f, 1f, 0f,
+                    new com.interrupt.dungeoneer.multiplayer.items.ItemProperties(4, 1, "", "", 1));
+            world.registerKind(held.entityId, com.interrupt.dungeoneer.multiplayer.items.ItemKind.WEAPON);
+            PhysicalItemState spare = world.spawn("axe", secondId, 1f, 1f, 0f,
+                    new com.interrupt.dungeoneer.multiplayer.items.ItemProperties(2, 1, "", "", 1));
+            world.registerKind(spare.entityId, com.interrupt.dungeoneer.multiplayer.items.ItemKind.WEAPON);
+            PhysicalItemState potion = world.spawn("potion", secondId, 1f, 1f, 0f,
+                    new com.interrupt.dungeoneer.multiplayer.items.ItemProperties(2, 1, "", "", 1, 3));
+            world.registerKind(potion.entityId, com.interrupt.dungeoneer.multiplayer.items.ItemKind.POTION);
+            AuthoritativeItemWorld.InteractionBoundary boundary =
+                    new AuthoritativeItemWorld.InteractionBoundary() {
+                public boolean canAct(ParticipantContext p) { return true; }
+                public boolean canReach(ParticipantContext p,
+                        float x, float y, float z) { return true; }
+                public boolean useObject(long id, ParticipantContext p) { return false; }
+            };
+            assertEquals(AuthoritativeItemWorld.Outcome.ACCEPTED, world.apply(
+                    new ItemRequest(secondId, 1L, ItemAction.WIELD, held.entityId, 0, 1),
+                    new ParticipantContext(secondId, new ParticipantCharacterState(1, 1, 0, 0),
+                            new SharedPartyProgression()), boundary));
+            fixture.host.publishPhysicalItems();
+            awaitPhysicalItem(second, potion.entityId, secondId);
+            MovementEntityState fall = awaitMovementState(fixture.host, 2);
+
+            // Spikes: gear loses two condition steps, nothing is destroyed, gold loses 8 percent.
+            fixture.host.applyNativeEnvironmentalDamage("test-spikes", secondId, 8,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            awaitPartyState(second, 2, PartyMemberState.DOWNED);
+            // Nothing scatters while Downed; only the ten-second bleedout consumes the Life.
+            Thread.sleep(500L);
+            assertEquals(secondId, physicalItem(second, potion.entityId).owner);
+            long bleedoutDeadline = System.currentTimeMillis() + 14000L;
+            while(System.currentTimeMillis() < bleedoutDeadline
+                    && second.getPartyStatus().getMember(2).getState() != PartyMemberState.SPECTATING) {
+                Thread.sleep(20L);
+            }
+            assertEquals(PartyMemberState.SPECTATING, second.getPartyStatus().getMember(2).getState());
+            awaitPhysicalItem(second, potion.entityId, null);
+            awaitPhysicalItem(second, spare.entityId, null);
+
+            PhysicalItemState fallenSpare = physicalItem(second, spare.entityId);
+            assertEquals(0, fallenSpare.properties.condition);
+            assertFalse(fallenSpare.consumed);
+            assertTrue(Math.abs(fallenSpare.x - fall.getX()) <= 0.51f);
+            assertTrue(Math.abs(fallenSpare.y - fall.getY()) <= 0.51f);
+            PhysicalItemState fallenPotion = physicalItem(second, potion.entityId);
+            assertFalse(fallenPotion.consumed);
+            assertEquals(2, fallenPotion.properties.condition);
+            assertEquals(3, fallenPotion.properties.potionType);
+            PhysicalItemState wornArmor = physicalItem(second, armor.entityId);
+            assertEquals(secondId, wornArmor.owner);
+            assertEquals("ARMOR", wornArmor.equipmentSlot);
+            assertEquals(3, wornArmor.properties.condition);
+            assertEquals(secondId, physicalItem(second, held.entityId).owner);
+            // Already-broken worn gear does not survive the death, and does not soften the gold penalty.
+            awaitConsumedItem(second, brokenHelmet.entityId);
+            assertNull(physicalItem(second, brokenHelmet.entityId).owner);
+            awaitGold(second, secondId, 92);
+            assertEquals(2, fixture.host.getExpiringDropCount());
+
+            // Pickup cancels the hidden timer for that item; the rest quietly expires.
+            assertEquals(AuthoritativeItemWorld.Outcome.ACCEPTED, world.apply(
+                    new ItemRequest(hostId, 1L, ItemAction.PICKUP, spare.entityId),
+                    new ParticipantContext(hostId, new ParticipantCharacterState(fallenSpare.x,
+                            fallenSpare.y, fallenSpare.z, 0), new SharedPartyProgression()), boundary));
+            fixture.host.publishPhysicalItems();
+            awaitPhysicalItem(second, spare.entityId, hostId);
+            awaitConsumedItem(second, potion.entityId);
+            assertEquals(hostId, physicalItem(second, spare.entityId).owner);
+            assertFalse(physicalItem(second, spare.entityId).consumed);
+            assertEquals(0, fixture.host.getExpiringDropCount());
+            assertEquals(92, fixture.host.getEconomy().get(secondId).gold);
+        }
+        finally {
+            second.close();
+            fixture.close();
+        }
+    }
+
+    private static PhysicalItemState physicalItem(DirectConnectPeer peer, long id) {
+        for(PhysicalItemState state : peer.getPhysicalItems()) if(state.entityId == id) return state;
+        throw new AssertionError("Physical item " + id + " is unknown to " + peer.getRole());
+    }
+
+    private void awaitConsumedItem(DirectConnectPeer peer, long id) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            for(PhysicalItemState state : peer.getPhysicalItems()) {
+                if(state.entityId == id && state.consumed) return;
+            }
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("Physical item " + id + " never expired.");
+    }
+
+    private void awaitGold(DirectConnectPeer peer, ParticipantId participant, int gold)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            for(com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress
+                    : peer.getParticipantProgress()) {
+                if(progress.participantId.equals(participant) && progress.gold == gold) return;
+            }
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("Gold never converged on " + gold + " for " + participant.getValue());
+    }
+
+    private MovementEntityState awaitMovementState(DirectConnectPeer peer, int campaignSlot)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            List<MovementSnapshot> snapshots = peer.getMovementSnapshots();
+            for(MovementEntityDescriptor descriptor : peer.getMovementEntities()) {
+                if(descriptor.getCampaignSlot() != campaignSlot || snapshots.isEmpty()) continue;
+                MovementEntityState state = snapshots.get(snapshots.size() - 1)
+                        .getEntity(descriptor.getEntityId());
+                if(state != null) return state;
+            }
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("No movement state for Campaign Slot " + campaignSlot);
+    }
+
+    @Test
     public void directedClientAttackIsTracedAndReplicatedByHost() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("directed-combat-floor");
         HostFixture fixture = host(compatibility, 2, "directed-combat");

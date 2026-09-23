@@ -132,11 +132,30 @@ public class NativeOwnershipRegressionTest {
         assertEquals(4, remote.applyNativeDamage(4, com.interrupt.dungeoneer.entities.items.Weapon.DamageType.MAGIC, null));
     }
 
+    @Test public void throwingALitBombLightsHostsBombBeforeTheDrop() throws Exception {
+        com.interrupt.dungeoneer.entities.items.FusedBomb bomb = new com.interrupt.dungeoneer.entities.items.FusedBomb();
+        states.add(new PhysicalItemState(1, 1, "bomb", owner, 1, 1, 0));
+        this.<Map<Long, Item>>field("nativeItems").put(1L, bomb);
+        this.<Map<Item, Long>>field("itemIds").put(bomb, 1L);
+        this.<Map<Long, Long>>field("applied").put(1L, 1L);
+        game.player.inventory.set(0, bomb);
+        bomb.onChargeStart();
+        assertTrue(bomb.isLit);
+        assertTrue(controller.drop(bomb));
+        assertEquals(Arrays.asList(ItemAction.LIGHT, ItemAction.DROP), requests);
+        requests.clear();
+        bomb.isLit = false;
+        assertTrue(controller.drop(bomb));
+        assertEquals(Collections.singletonList(ItemAction.DROP), requests);
+    }
+
     @Test public void potionWaitsForAcceptanceWithoutLocalHealingOrRepeatedSpending() throws Exception {
         Potion potion = new Potion(); potion.potionType = Potion.PotionType.health;
         states.add(new PhysicalItemState(1, 1, "potion", owner, 1, 1, 0));
         this.<Map<Long, Item>>field("nativeItems").put(1L, potion);
         this.<Map<Item, Long>>field("itemIds").put(potion, 1L);
+        // An owned item only ever reaches the inventory through a presented state revision.
+        this.<Map<Long, Long>>field("applied").put(1L, 1L);
         game.player.inventory.set(0, potion); game.player.hp = 2;
         potion.Drink(game.player); potion.Drink(game.player);
         assertEquals(2, game.player.hp);

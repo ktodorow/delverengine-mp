@@ -19,6 +19,8 @@ final class DesktopLaunchOptions {
     boolean discoverPrivateSessions;
     String diagnoseDirectConnectAddress;
     boolean networkHelp;
+    /** Testing only: Host-side Party Dev menu (K) and native debug keys. Never set in a release launch. */
+    boolean devTools;
     File exportIdentityRecovery;
     File importIdentityRecovery;
     int sessionPort = com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.DEFAULT_PORT;
@@ -115,6 +117,9 @@ final class DesktopLaunchOptions {
             }
             else if(argument.equalsIgnoreCase("--network-help")) {
                 options.networkHelp = true;
+            }
+            else if(argument.equalsIgnoreCase("--dev-tools") || argument.equalsIgnoreCase("dev-tools=true")) {
+                options.devTools = true;
             }
             else if(argument.regionMatches(true, 0, "--export-identity-recovery=", 0,
                     "--export-identity-recovery=".length())) {

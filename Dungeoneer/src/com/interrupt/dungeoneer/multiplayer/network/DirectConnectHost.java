@@ -18,6 +18,9 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementObstacle;
 import com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld;
 import com.interrupt.dungeoneer.multiplayer.items.AuthoritativeItemWorld;
 import com.interrupt.dungeoneer.multiplayer.lives.AuthoritativeLives;
+import com.interrupt.dungeoneer.multiplayer.lives.DeathDropRules;
+import com.interrupt.dungeoneer.multiplayer.combat.DeathCause;
+import com.interrupt.dungeoneer.multiplayer.items.ItemKind;
 import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
 import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
 import com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot;
@@ -126,6 +129,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -136,7 +140,6 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private static final float REVIVAL_REACH = 1.6f;
     /** Knockback or sliding beyond this breaks Revival even without movement input. */
     private static final float REVIVAL_DRIFT = 0.5f;
-    private static final long DEATH_DROP_TICKS = 180L;
     private static final int SNAPSHOT_INTERVAL_TICKS =
             AuthoritativeHostSession.TICKS_PER_SECOND / 20;
     public static final long RECONNECT_GRACE_TICKS =
@@ -203,6 +206,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private volatile boolean partyWiped;
     private final Map<ParticipantId, DeathDrop> deathDrops =
             new LinkedHashMap<ParticipantId, DeathDrop>();
+    /** Exhausted Participants' scattered items and the unpaused Host tick that removes them. */
+    private final Map<Long, Long> expiringDrops = new LinkedHashMap<Long, Long>();
+    private final Random deathDropRandom = new Random();
+    private long exhaustedDropTicks = DeathDropRules.EXHAUSTED_DROP_TICKS;
     private volatile PartyCommunicationState partyCommunication =
             PartyCommunicationState.initial();
     private final AuthoritativeItemWorld itemWorld = new AuthoritativeItemWorld();
@@ -905,9 +912,62 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         nativeWorldGeneration++;
         monsterEffects.clear(); publishedMonsterEffects.clear(); effectPublishTicks.clear();
         nativeDynamicStates.clear(); publishedNativeDynamicStates.clear(); nativeDynamicPublishTicks.clear();
+        nativeMonsterSpawns.clear();
         doorSnapshots.clear();
         breakableSnapshots.clear();
         broadcast(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
+    }
+
+    private long nativeMonsterSpawnSequence;
+    private final List<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn> nativeMonsterSpawns =
+            new ArrayList<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn>();
+    @Override public synchronized void publishNativeMonsterSpawn(
+            com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn spawn) {
+        if(spawn == null) throw new IllegalArgumentException("Native monster spawn is required.");
+        if(nativeMonsterSpawns.size() >= DirectConnectProtocol.MAX_MONSTERS) return;
+        nativeMonsterSpawns.add(spawn);
+        broadcast(new DirectConnectWire.NativeMonsterSpawnMessage(sessionId,
+                ++nativeMonsterSpawnSequence, spawn, nativeWorldGeneration));
+    }
+
+    /**
+     * Dev menu: stand one Campaign Slot back up (optionally with one more Life) at its Respawn
+     * Point with 50 percent health. Never holds the Host monitor together with the encounter.
+     */
+    public boolean devRespawn(ParticipantId participant, boolean grantLife) {
+        boolean restore;
+        synchronized(this) {
+            AuthoritativeLives current = lives;
+            AuthoritativeMovementSimulation simulation = movementSimulation;
+            MovementEntityDescriptor descriptor = livesDescriptor(participant);
+            if(current == null || simulation == null || descriptor == null || partyWiped) return false;
+            restore = current.devStand(participant, grantLife);
+            if(restore) {
+                revivalAnchors.remove(participant);
+                deathDrops.remove(participant);
+                MovementSpawn respawnPoint = movementWorld.getSpawn(descriptor.getCampaignSlot());
+                simulation.setNativePosition(participant, respawnPoint.getX(),
+                        respawnPoint.getY(), respawnPoint.getZ());
+                if(!isInReconnectGrace(descriptor.getCampaignSlot())) simulation.resumeParticipant(participant);
+            }
+        }
+        AuthoritativeCombatEncounter encounter = combatEncounter;
+        if(restore && encounter != null) {
+            encounter.restoreParticipant(currentHostTick(), participant,
+                    AuthoritativeLives.RESPAWN_HEALTH_PERCENT, nativeCombatOutput);
+        }
+        synchronized(this) { publishLivesIfChanged(); }
+        return true;
+    }
+
+    /** Dev menu: gold for one Campaign Slot through the #17 ledger so every peer converges. */
+    public synchronized boolean devGrantGold(ParticipantId participant, int amount) {
+        if(participant == null || amount < 1) return false;
+        Map<ParticipantId, Integer> shares = economy.divideGold(participant, amount,
+                Collections.singletonList(participant));
+        if(shares == null) return false;
+        publishEconomy();
+        return true;
     }
 
     private long nativeAnimationCueSequence;
@@ -1537,25 +1597,135 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         AuthoritativeCombatEncounter encounter = combatEncounter;
         if(encounter == null) return;
         Map<ParticipantId, Integer> healths = new LinkedHashMap<ParticipantId, Integer>();
+        Map<ParticipantId, DeathCause> causes = new LinkedHashMap<ParticipantId, DeathCause>();
         for(MovementEntityDescriptor descriptor : livesDescriptors) {
             healths.put(descriptor.getParticipantId(),
                     encounter.getParticipantHealth(descriptor.getParticipantId()));
+            causes.put(descriptor.getParticipantId(),
+                    encounter.getLastDamageCause(descriptor.getParticipantId()));
         }
         List<ParticipantId> downed = new ArrayList<ParticipantId>();
         Map<ParticipantId, Integer> restored = new LinkedHashMap<ParticipantId, Integer>();
+        List<LifeLoss> losses = new ArrayList<LifeLoss>();
         synchronized(this) {
-            resolveLives(hostTick, healths, downed, restored);
+            resolveLives(hostTick, healths, causes, downed, restored, losses);
         }
         for(ParticipantId participant : downed) encounter.discardParticipantCombatHistory(participant);
         for(Map.Entry<ParticipantId, Integer> restore : restored.entrySet()) {
             encounter.restoreParticipant(hostTick, restore.getKey(), restore.getValue(),
                     nativeCombatOutput);
         }
+        for(LifeLoss loss : losses) applyLifeLoss(hostTick, loss);
         synchronized(this) {
+            expireDeathDrops(hostTick);
             publishLivesIfChanged();
             AuthoritativeLives current = lives;
             if(current != null && !partyWiped && current.isPartyWiped()) declarePartyWipe();
         }
+    }
+
+    /**
+     * One consumed Life: backpack and hotbar scatter where the Participant fell, the cause of
+     * death destroys or damages part of it, and a balanced share of gold is forfeited. Nothing
+     * is announced; the Participant discovers what is gone. Item world and economy take their
+     * own locks, never together with the Host monitor.
+     */
+    private void applyLifeLoss(long hostTick, LifeLoss loss) {
+        List<PhysicalItemState> carried = new ArrayList<PhysicalItemState>();
+        long wielded = itemWorld.getWielded(loss.participant);
+        for(PhysicalItemState item : itemWorld.inventory(loss.participant)) {
+            if(item.consumed) continue;
+            if(!item.equipmentSlot.isEmpty() || item.entityId == wielded) {
+                // Worn and held gear stays through a death unless it was already broken.
+                // Dead weight lost this way does not soften the gold penalty.
+                if(item.properties.condition == 0) {
+                    itemWorld.forfeit(item.entityId, true, loss.x, loss.y, loss.z, 0);
+                }
+                continue;
+            }
+            carried.add(item);
+        }
+        List<ItemKind> kinds = new ArrayList<ItemKind>(carried.size());
+        List<Integer> conditions = new ArrayList<Integer>(carried.size());
+        for(PhysicalItemState item : carried) {
+            kinds.add(itemWorld.getKind(item.entityId));
+            conditions.add(item.properties.condition);
+        }
+        List<DeathDropRules.Verdict> verdicts;
+        synchronized(deathDropRandom) {
+            verdicts = DeathDropRules.judge(loss.cause, kinds, conditions, deathDropRandom);
+        }
+        int destroyed = 0;
+        float radius = DeathDropRules.scatterRadius(loss.cause);
+        for(int index = 0; index < carried.size(); index++) {
+            PhysicalItemState item = carried.get(index);
+            DeathDropRules.Verdict verdict = verdicts.get(index);
+            if(verdict.fate == DeathDropRules.Fate.DESTROYED) {
+                if(itemWorld.forfeit(item.entityId, true, loss.x, loss.y, loss.z,
+                        item.properties.condition)) destroyed++;
+                continue;
+            }
+            float[] at = scatterPosition(loss.x, loss.y, loss.z, radius);
+            if(!itemWorld.forfeit(item.entityId, false, at[0], at[1], at[2], verdict.condition)) continue;
+            if(loss.exhausted) synchronized(this) {
+                expiringDrops.put(item.entityId, hostTick + exhaustedDropTicks);
+            }
+        }
+        com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress =
+                economy.get(loss.participant);
+        if(progress != null) {
+            economy.forfeitGold(loss.participant,
+                    DeathDropRules.goldLoss(progress.gold, loss.previousLifeLosses, destroyed));
+        }
+        publishPhysicalItems();
+        publishEconomy();
+    }
+
+    /** A free spot within the scatter radius of the fall, else the fall position itself. */
+    private float[] scatterPosition(float x, float y, float z, float radius) {
+        for(int attempt = 0; attempt < 8; attempt++) {
+            float offsetX, offsetY;
+            synchronized(deathDropRandom) {
+                offsetX = (deathDropRandom.nextFloat() * 2f - 1f) * radius;
+                offsetY = (deathDropRandom.nextFloat() * 2f - 1f) * radius;
+            }
+            float candidateX = x + offsetX, candidateY = y + offsetY;
+            if(movementWorld.canOccupy(candidateX, candidateY, z)
+                    && movementWorld.hasLineOfSight(x, y, candidateX, candidateY)) {
+                return new float[] { candidateX, candidateY, z };
+            }
+        }
+        return new float[] { x, y, z };
+    }
+
+    /** Hidden six-minute timer on an exhausted Participant's scatter; pickup cancels per item. */
+    private void expireDeathDrops(long hostTick) {
+        if(expiringDrops.isEmpty()) return;
+        boolean changed = false;
+        for(Map.Entry<Long, Long> entry : new ArrayList<Map.Entry<Long, Long>>(expiringDrops.entrySet())) {
+            PhysicalItemState item = itemWorld.get(entry.getKey());
+            if(item == null || item.consumed || item.owner != null) {
+                expiringDrops.remove(entry.getKey());
+                continue;
+            }
+            if(hostTick < entry.getValue()) continue;
+            itemWorld.destroyWorldItem(entry.getKey());
+            expiringDrops.remove(entry.getKey());
+            changed = true;
+        }
+        if(changed) publishPhysicalItems();
+    }
+
+    /** Items of an exhausted Participant still waiting on their hidden removal timer. */
+    public synchronized int getExpiringDropCount() {
+        return expiringDrops.size();
+    }
+
+    /** Test seam: shortens the hidden six-minute timer before campaign play begins. */
+    public synchronized void setExhaustedDropTicks(long ticks) {
+        if(ticks < 1L) throw new IllegalArgumentException("Exhausted drop timer needs one tick.");
+        if(sessionStarted) throw new IllegalStateException("Exhausted drop timer locks once campaign play begins.");
+        exhaustedDropTicks = ticks;
     }
 
     /** Terminal state: Host keeps serving chat and status, but simulation never advances again. */
@@ -1573,7 +1743,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     public boolean isPartyWiped() { return partyWiped; }
 
     private void resolveLives(long hostTick, Map<ParticipantId, Integer> healths,
-            List<ParticipantId> downed, Map<ParticipantId, Integer> restored) {
+            Map<ParticipantId, DeathCause> causes, List<ParticipantId> downed,
+            Map<ParticipantId, Integer> restored, List<LifeLoss> losses) {
         AuthoritativeLives current = lives;
         AuthoritativeMovementSimulation simulation = movementSimulation;
         if(current == null || simulation == null) return;
@@ -1594,7 +1765,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             deathDrops.remove(participant);
             MovementEntityState state = simulation.getState(participant);
             if(state != null) {
-                deathDrops.put(participant, new DeathDrop(state.getX(), state.getY(), state.getZ()));
+                deathDrops.put(participant, new DeathDrop(state.getX(), state.getY(), state.getZ(),
+                        causes.get(participant)));
             }
             simulation.freezeParticipant(participant);
             status = status(DirectConnectPhase.READY, descriptor.getNickname() + " is Downed.",
@@ -1623,8 +1795,16 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 restored.put(participant, AuthoritativeLives.REVIVAL_HEALTH_PERCENT);
             }
             else {
-                DeathDrop drop = deathDrops.get(participant);
-                if(drop != null) drop.expiresAtHostTick = hostTick + DEATH_DROP_TICKS;
+                DeathDrop drop = deathDrops.remove(participant);
+                MovementEntityState state = drop == null ? simulation.getState(participant) : null;
+                if(drop == null && state != null) {
+                    drop = new DeathDrop(state.getX(), state.getY(), state.getZ(), DeathCause.COMBAT);
+                }
+                if(drop != null) {
+                    losses.add(new LifeLoss(participant, drop,
+                            outcome.kind == AuthoritativeLives.OutcomeKind.EXHAUSTED,
+                            Math.max(0, current.getLifeLosses(participant) - 1)));
+                }
             }
             if(outcome.kind == AuthoritativeLives.OutcomeKind.EXHAUSTED) continue;
             if(outcome.kind == AuthoritativeLives.OutcomeKind.RESPAWNED) {
@@ -1737,18 +1917,6 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         return sessionStarted;
     }
 
-    /**
-     * Where a just-respawned Participant lost its Life. Taken once by that Participant's
-     * selected hotbar item drop, so the item stays where they fell instead of at Respawn Point.
-     */
-    public synchronized float[] takeDeathDropPosition(ParticipantId participant) {
-        DeathDrop drop = deathDrops.get(participant);
-        if(drop == null || drop.expiresAtHostTick == 0L) return null;
-        deathDrops.remove(participant);
-        return currentHostTick() > drop.expiresAtHostTick ? null
-                : new float[] { drop.x, drop.y, drop.z };
-    }
-
     private void beginReconnectGrace(RemoteConnection connection) {
         MovementEntityDescriptor descriptor = connection.movementDescriptor;
         AuthoritativeHostSession session = movementSession;
@@ -1798,6 +1966,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     encounter.getSnapshot(session == null ? 0L : session.getHostTick())));
         }
         connection.channel.write(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
+        for(com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn spawn : nativeMonsterSpawns) {
+            connection.channel.write(new DirectConnectWire.NativeMonsterSpawnMessage(sessionId,
+                    ++nativeMonsterSpawnSequence, spawn, nativeWorldGeneration));
+        }
         if(partyWiped) connection.channel.write(new DirectConnectWire.PartyWipeMessage(sessionId));
         for(ActorEffectsSnapshot effects : getActorEffects()) {
             connection.channel.write(new DirectConnectWire.MonsterEffectsMessage(sessionId, effects, false, nativeWorldGeneration));
@@ -2211,9 +2383,14 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     @Override public void applyNativeParticipantDamage(String sourceId, ParticipantId participant,
             int amount, float x, float y, float z) {
+        applyNativeParticipantDamage(sourceId, participant, amount, x, y, z, DeathCause.COMBAT);
+    }
+
+    @Override public void applyNativeParticipantDamage(String sourceId, ParticipantId participant,
+            int amount, float x, float y, float z, DeathCause cause) {
         AuthoritativeCombatEncounter encounter = combatEncounter;
         if(encounter != null && !isSessionPaused()) encounter.applyNativeParticipantDamage(
-                currentHostTick(), sourceId, participant, amount, x, y, z, nativeCombatOutput);
+                currentHostTick(), sourceId, participant, amount, x, y, z, cause, nativeCombatOutput);
     }
 
     @Override
@@ -2509,17 +2686,37 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
     }
 
+    /** Where and from what a Participant went Down; consumed when the Life resolves. */
     private static final class DeathDrop {
         private final float x;
         private final float y;
         private final float z;
-        /** Zero until bleedout consumes the Life. */
-        private long expiresAtHostTick;
+        private final DeathCause cause;
 
-        private DeathDrop(float x, float y, float z) {
+        private DeathDrop(float x, float y, float z, DeathCause cause) {
             this.x = x;
             this.y = y;
             this.z = z;
+            this.cause = cause == null ? DeathCause.COMBAT : cause;
+        }
+    }
+
+    private static final class LifeLoss {
+        private final ParticipantId participant;
+        private final float x, y, z;
+        private final DeathCause cause;
+        private final boolean exhausted;
+        private final int previousLifeLosses;
+
+        private LifeLoss(ParticipantId participant, DeathDrop drop, boolean exhausted,
+                int previousLifeLosses) {
+            this.participant = participant;
+            this.x = drop.x;
+            this.y = drop.y;
+            this.z = drop.z;
+            this.cause = drop.cause;
+            this.exhausted = exhausted;
+            this.previousLifeLosses = previousLifeLosses;
         }
     }
 

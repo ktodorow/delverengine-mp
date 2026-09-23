@@ -219,6 +219,95 @@ public class AuthoritativeItemWorldTest {
         return new ParticipantContext(id, new ParticipantCharacterState(1, 1, 0, 0), progression);
     }
 
+    @Test
+    public void forfeitScattersOwnedItemsWithNewConditionOrTombstonesThem() {
+        PhysicalItemState sword = world.spawn("sword", alpha.getParticipantId(), 1, 1, 0,
+                new ItemProperties(3, 2, "flaming", "", 1));
+        PhysicalItemState potion = world.spawn("potion", alpha.getParticipantId(), 1, 1, 0,
+                new ItemProperties(2, 1, "", "", 1, 4));
+        world.registerEquipment(sword.entityId, "HAND", true);
+
+        assertTrue(world.forfeit(sword.entityId, false, 1.5f, 0.5f, 0.25f, 1));
+        PhysicalItemState fallen = world.get(sword.entityId);
+        assertNull(fallen.owner);
+        assertEquals("", fallen.equipmentSlot);
+        assertFalse(fallen.consumed);
+        assertEquals(1, fallen.properties.condition);
+        assertEquals("flaming", fallen.properties.suffix);
+        assertEquals(2, fallen.properties.level);
+        assertEquals(1.5f, fallen.x, 0f);
+        assertEquals(0.5f, fallen.y, 0f);
+        assertEquals(0.25f, fallen.z, 0f);
+        assertTrue(fallen.revision > sword.revision);
+
+        assertTrue(world.forfeit(potion.entityId, true, 5f, 6f, 0.25f, 2));
+        PhysicalItemState shattered = world.get(potion.entityId);
+        assertTrue(shattered.consumed);
+        assertNull(shattered.owner);
+        assertEquals(4, shattered.properties.potionType);
+
+        // Tombstones and world items are never forfeited twice.
+        assertFalse(world.forfeit(potion.entityId, false, 0, 0, 0, 2));
+        assertFalse(world.forfeit(sword.entityId, true, 0, 0, 0, 2));
+        assertFalse(world.forfeit(404L, true, 0, 0, 0, 2));
+        assertEquals(ACCEPTED, request(beta, 1, ItemAction.PICKUP, sword.entityId));
+        assertEquals(UNKNOWN_ENTITY, request(beta, 2, ItemAction.PICKUP, potion.entityId));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void forfeitRejectsConditionOutsideProtocolBounds() {
+        PhysicalItemState sword = world.spawn("sword", alpha.getParticipantId(), 1, 1, 0);
+        world.forfeit(sword.entityId, false, 1, 1, 0, 5);
+    }
+
+    @Test
+    public void wieldTracksOnlyAnOwnedItemAndForgetsItOnceItLeavesTheOwner() {
+        PhysicalItemState sword = world.spawn("sword", alpha.getParticipantId(), 1, 1, 0);
+        PhysicalItemState loose = world.spawn("axe", null, 1, 1, 0);
+        assertEquals(0L, world.getWielded(alpha.getParticipantId()));
+        assertEquals(NOT_OWNER, world.apply(new ItemRequest(alpha.getParticipantId(), 1,
+                ItemAction.WIELD, loose.entityId, 0, 1), alpha, boundary));
+        assertEquals(ACCEPTED, world.apply(new ItemRequest(alpha.getParticipantId(), 2,
+                ItemAction.WIELD, sword.entityId, 0, 1), alpha, boundary));
+        assertEquals(sword.entityId, world.getWielded(alpha.getParticipantId()));
+        assertEquals(0L, world.getWielded(beta.getParticipantId()));
+
+        assertEquals(ACCEPTED, world.apply(new ItemRequest(alpha.getParticipantId(), 3,
+                ItemAction.WIELD, sword.entityId, 0, 0), alpha, boundary));
+        assertEquals(0L, world.getWielded(alpha.getParticipantId()));
+
+        assertEquals(ACCEPTED, world.apply(new ItemRequest(alpha.getParticipantId(), 4,
+                ItemAction.WIELD, sword.entityId, 0, 1), alpha, boundary));
+        assertEquals(ACCEPTED, request(alpha, 5, ItemAction.DROP, sword.entityId));
+        assertEquals(0L, world.getWielded(alpha.getParticipantId()));
+        assertEquals(ACCEPTED, request(beta, 1, ItemAction.PICKUP, sword.entityId));
+        assertEquals(0L, world.getWielded(beta.getParticipantId()));
+    }
+
+    @Test
+    public void lightingABombIsAnOwnerOnlyIntentWithoutStateChange() {
+        PhysicalItemState bomb = world.spawn("bomb", alpha.getParticipantId(), 1, 1, 0);
+        assertEquals(NOT_OWNER, request(beta, 1, ItemAction.LIGHT, bomb.entityId));
+        long before = world.get(bomb.entityId).revision;
+        assertEquals(ACCEPTED, request(alpha, 1, ItemAction.LIGHT, bomb.entityId));
+        assertEquals(before, world.get(bomb.entityId).revision);
+        assertEquals(alpha.getParticipantId(), world.get(bomb.entityId).owner);
+    }
+
+    @Test
+    public void itemKindsComeFromHostCatalogueAndDefaultToOther() {
+        PhysicalItemState sword = world.spawn("sword", alpha.getParticipantId(), 1, 1, 0);
+        assertEquals(ItemKind.OTHER, world.getKind(sword.entityId));
+        world.registerKind(sword.entityId, ItemKind.WEAPON);
+        assertEquals(ItemKind.WEAPON, world.getKind(sword.entityId));
+        assertEquals(ItemKind.OTHER, world.getKind(99L));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void itemKindRequiresAKnownItem() {
+        world.registerKind(99L, ItemKind.POTION);
+    }
+
     private AuthoritativeItemWorld.Outcome request(ParticipantContext participant,
             long requestId, ItemAction action, long entityId) {
         return world.apply(new ItemRequest(participant.getParticipantId(), requestId, action,

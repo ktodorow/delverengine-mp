@@ -165,6 +165,67 @@ public class NativeShotRegressionTest {
         finally { controller.dispose(); Game.instance = previous; }
     }
 
+    @Test public void fireAttachedToASpawnedParticleIsPublishedAsAWorldFire() {
+        List<NativeDynamicState> states = new ArrayList<NativeDynamicState>();
+        DirectConnectPeer peer = peer(new ArrayList<CombatRequest>(), new ArrayList<Object[]>(),
+                new ArrayList<NativeDynamicCue>(), states, new ArrayList<NativeSpellPresentation>());
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        Game game = game();
+        Game previous = Game.instance;
+        Game.instance = game;
+        try {
+            Entity carrier = new Entity();
+            carrier.x = 2f; carrier.y = 3f; carrier.isActive = true;
+            com.interrupt.dungeoneer.entities.Fire fire = new com.interrupt.dungeoneer.entities.Fire();
+            fire.x = 2f; fire.y = 3f; fire.isActive = true;
+            fire.setRuntimeSpawned(true);
+            carrier.attach(fire);
+            game.level.entities.add(carrier);
+            controller.update(game);
+            assertEquals(1, states.size());
+            assertTrue(states.get(0).active);
+            assertTrue(states.get(0).apply(null) instanceof com.interrupt.dungeoneer.entities.Fire);
+            game.level.entities.removeValue(carrier, true);
+            controller.update(game);
+            assertEquals(2, states.size());
+            assertFalse(states.get(1).active);
+        }
+        finally { controller.dispose(); Game.instance = previous; }
+    }
+
+    @Test public void sourcelessArrowStillPublishesImpactAndBreakCuesWithoutTrailPresentation() {
+        List<NativeDynamicCue> cues = new ArrayList<NativeDynamicCue>();
+        List<Object[]> events = new ArrayList<Object[]>();
+        DirectConnectPeer peer = peer(new ArrayList<CombatRequest>(), events, cues,
+                new ArrayList<NativeDynamicState>(), new ArrayList<NativeSpellPresentation>());
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        Game game = game();
+        Game previous = Game.instance;
+        Game.instance = game;
+        java.util.HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> previousStrings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        com.interrupt.managers.StringManager.localizedStrings =
+                new java.util.HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
+        try {
+            // A bomb-spawned arrow: no owner, no attacker, so no trail presentation exists.
+            Missile arrow = new Missile();
+            arrow.xa = 0.2f; arrow.x = 1f; arrow.y = 1f; arrow.z = 0.5f;
+            game.level.entities.add(arrow);
+            controller.update(game);
+            controller.onProjectileImpact(arrow, null, 1.5f, 1f, 0.5f);
+            controller.onProjectileBreak(arrow);
+            assertEquals(2, cues.size());
+            assertEquals(NativeDynamicCue.Kind.PROJECTILE_IMPACT, cues.get(0).kind);
+            assertEquals(NativeDynamicCue.Kind.PROJECTILE_BREAK, cues.get(1).kind);
+            assertTrue(cues.get(1).state.apply(null) instanceof Missile);
+            assertTrue("no attack presentation without a source", events.isEmpty());
+        }
+        finally {
+            controller.dispose(); Game.instance = previous;
+            com.interrupt.managers.StringManager.localizedStrings = previousStrings;
+        }
+    }
+
     @Test public void remoteSwordPublishesAcceptedSwingAndWorldImpactFromExactItem()
             throws Exception {
         ParticipantId remote = new ParticipantId("campaign-slot-2");

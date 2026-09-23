@@ -207,6 +207,46 @@ public class AuthoritativeLivesTest {
     }
 
     @Test
+    public void lifeLossesCountOnlyConsumedLivesNeverRevivals() {
+        AuthoritativeLives lives = lives(3);
+        lives.down(alpha);
+        lives.beginRevival(beta, alpha);
+        advance(lives, AuthoritativeLives.REVIVAL_TICKS);
+        assertEquals(0, lives.getLifeLosses(alpha));
+
+        lives.down(alpha);
+        advance(lives, AuthoritativeLives.BLEEDOUT_TICKS);
+        lives.down(alpha);
+        advance(lives, AuthoritativeLives.BLEEDOUT_TICKS);
+        assertEquals(2, lives.getLifeLosses(alpha));
+        assertEquals(0, lives.getLifeLosses(beta));
+        assertEquals(0, lives.getLifeLosses(new ParticipantId("campaign-slot-9")));
+    }
+
+    @Test
+    public void devStandReturnsDownedOrExhaustedSlotsAndCapsGrantedLives() {
+        AuthoritativeLives lives = lives(1);
+        lives.down(alpha);
+        advance(lives, AuthoritativeLives.BLEEDOUT_TICKS);
+        assertEquals(Condition.EXHAUSTED, lives.getCondition(alpha));
+
+        assertTrue(lives.devStand(alpha, false));
+        assertEquals(Condition.STANDING, lives.getCondition(alpha));
+        assertEquals(1, lives.getRemainingLives(alpha));
+        assertFalse(lives.devStand(alpha, true));
+        assertEquals(2, lives.getRemainingLives(alpha));
+
+        lives.down(beta);
+        lives.beginRevival(gamma, beta);
+        assertTrue(lives.devStand(beta, false));
+        assertNull(lives.getRevivalTarget(gamma));
+        assertEquals(1, lives.getRemainingLives(beta));
+        for(int i = 0; i < 10; i++) lives.devStand(gamma, true);
+        assertEquals(AuthoritativeLives.MAXIMUM_STARTING_LIVES, lives.getRemainingLives(gamma));
+        assertFalse(lives.devStand(new ParticipantId("campaign-slot-9"), true));
+    }
+
+    @Test
     public void revisionChangesOnTransitionsOnly() {
         AuthoritativeLives lives = lives(3);
         long initial = lives.getRevision();

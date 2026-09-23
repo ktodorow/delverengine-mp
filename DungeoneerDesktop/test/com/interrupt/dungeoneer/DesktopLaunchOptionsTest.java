@@ -192,4 +192,11 @@ public class DesktopLaunchOptionsTest {
             assertTrue(failure.getMessage(), failure.getMessage().contains(expected));
         }
     }
+
+    @Test
+    public void devToolsAreOptInPerLaunch() {
+        assertFalse(DesktopLaunchOptions.parse(new String[] { "--direct-host" }).devTools);
+        assertTrue(DesktopLaunchOptions.parse(new String[] { "--direct-host", "--dev-tools" }).devTools);
+        assertTrue(DesktopLaunchOptions.parse(new String[] { "dev-tools=true" }).devTools);
+    }
 }

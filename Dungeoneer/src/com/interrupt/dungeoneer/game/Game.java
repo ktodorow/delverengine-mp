@@ -105,6 +105,8 @@ public class Game {
 
 	public static boolean isMobile = false;
 	public static boolean isDebugMode = false;
+	/** Host Party Dev menu on K in a Direct Connect session; set only by the --dev-tools launch flag. */
+	public static boolean devToolsEnabled = false;
 	public static boolean drawDebugBoxes = false;
 	public static boolean ignoreEscape = false;
 	public static boolean inEditor = false;

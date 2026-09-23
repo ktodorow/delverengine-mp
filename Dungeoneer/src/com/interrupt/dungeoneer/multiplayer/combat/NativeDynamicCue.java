@@ -16,7 +16,7 @@ import java.io.IOException;
 /** Bounded live-only native presentation for dynamic world entities. */
 public final class NativeDynamicCue {
     public static final int MAX_BYTES = NativeDynamicState.MAX_BYTES + 48;
-    public enum Kind { PROJECTILE_IMPACT, FUSED_BOMB_FIZZLE }
+    public enum Kind { PROJECTILE_IMPACT, FUSED_BOMB_FIZZLE, PROJECTILE_BREAK }
 
     public final Kind kind;
     public final NativeDynamicState state;
@@ -44,6 +44,14 @@ public final class NativeDynamicCue {
             throw new IOException("Impact cue requires native projectile state.");
         if(kind == Kind.FUSED_BOMB_FIZZLE && !(entity instanceof FusedBomb))
             throw new IOException("Fizzle cue requires native fused-bomb state.");
+        if(kind == Kind.PROJECTILE_BREAK && !(entity instanceof Missile))
+            throw new IOException("Break cue requires native missile state.");
+    }
+
+    public static NativeDynamicCue captureBreak(long id, long itemId, Missile missile) {
+        return create(Kind.PROJECTILE_BREAK,
+                NativeDynamicState.capture(id, itemId, missile, true),
+                false, false, missile.x, missile.y, missile.z);
     }
 
     public static NativeDynamicCue captureImpact(long id, long itemId, Entity projectile,
@@ -99,6 +107,7 @@ public final class NativeDynamicCue {
                         level, entityHit, secondaryExplosion);
             else ((Missile)entity).playNetworkImpactPresentation(level);
         }
+        else if(kind == Kind.PROJECTILE_BREAK) ((Missile)entity).playNetworkBreakPresentation(level);
         else ((FusedBomb)entity).playNetworkFizzle(level);
     }
 

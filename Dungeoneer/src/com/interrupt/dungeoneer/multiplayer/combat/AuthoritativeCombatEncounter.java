@@ -257,10 +257,20 @@ public final class AuthoritativeCombatEncounter {
             float originX, float originY, float originZ,
             float impactX, float impactY, float impactZ,
             HostSessionOutput output) {
+        applyNativeEnvironmentalDamage(hostTick, sourceId, targetId, damage, originX, originY,
+                originZ, impactX, impactY, impactZ, DeathCause.TRAP, output);
+    }
+
+    public synchronized void applyNativeEnvironmentalDamage(long hostTick,
+            String sourceId, ParticipantId targetId, int damage,
+            float originX, float originY, float originZ,
+            float impactX, float impactY, float impactZ, DeathCause cause,
+            HostSessionOutput output) {
         MutableCombatant target = participants.get(targetId);
         if(sourceId == null || sourceId.trim().isEmpty() || target == null
                 || !target.isCombatEligible() || !target.isLiving() || damage <= 0) return;
         boolean changed = target.damage(damage);
+        if(changed) target.lastDamageCause = cause == null ? DeathCause.COMBAT : cause;
         publishPresentation(hostTick, sourceId, target.id,
                 CombatAction.ENVIRONMENTAL_HAZARD, CombatPresentationPhase.DAMAGE,
                 originX, originY, originZ, impactX, impactY, impactZ,
@@ -276,10 +286,18 @@ public final class AuthoritativeCombatEncounter {
     public synchronized void applyNativeParticipantDamage(long hostTick, String sourceId,
             ParticipantId participantId, int amount, float x, float y, float z,
             HostSessionOutput output) {
+        applyNativeParticipantDamage(hostTick, sourceId, participantId, amount, x, y, z,
+                DeathCause.COMBAT, output);
+    }
+
+    public synchronized void applyNativeParticipantDamage(long hostTick, String sourceId,
+            ParticipantId participantId, int amount, float x, float y, float z,
+            DeathCause cause, HostSessionOutput output) {
         MutableCombatant target = participants.get(participantId);
         if(sourceId == null || sourceId.isEmpty() || target == null
                 || !target.isCombatEligible() || amount == 0 || amount == Integer.MIN_VALUE) return;
         boolean changed = amount > 0 ? target.damage(amount) : target.heal(-amount);
+        if(changed && amount > 0) target.lastDamageCause = cause == null ? DeathCause.COMBAT : cause;
         publishPresentation(hostTick, sourceId, target.id,
                 amount > 0 ? CombatAction.ENVIRONMENTAL_HAZARD : CombatAction.BENEFICIAL_SPELL,
                 CombatPresentationPhase.DAMAGE, x, y, z, x, y, z, changed, output);
@@ -300,6 +318,12 @@ public final class AuthoritativeCombatEncounter {
         publish(hostTick, output);
     }
 
+    /** Cause of the last damage that changed this Participant's health; COMBAT when unknown. */
+    public synchronized DeathCause getLastDamageCause(ParticipantId participantId) {
+        MutableCombatant participant = participants.get(participantId);
+        return participant == null ? DeathCause.COMBAT : participant.lastDamageCause;
+    }
+
     /** Current Participant health, or -1 outside this encounter. */
     public synchronized int getParticipantHealth(ParticipantId participantId) {
         MutableCombatant participant = participants.get(participantId);
@@ -314,6 +338,7 @@ public final class AuthoritativeCombatEncounter {
                 || healthPercent < 1 || healthPercent > 100) return;
         participant.health = com.interrupt.dungeoneer.multiplayer.lives.AuthoritativeLives
                 .healthPercent(participant.maximumHealth, healthPercent);
+        participant.lastDamageCause = DeathCause.COMBAT;
         participant.lastHeardTick = Long.MIN_VALUE / 2L;
         discardParticipantCombatHistory(participantId);
         publish(hostTick, output);
@@ -383,6 +408,7 @@ public final class AuthoritativeCombatEncounter {
         }
         else if(action == CombatAction.SELF_DAMAGE || action == CombatAction.ENVIRONMENTAL_HAZARD) {
             if(target == source) changed = target.damage(action.getAmount());
+            if(changed) target.lastDamageCause = DeathCause.COMBAT;
         }
         else if(target.kind == CombatantKind.MONSTER && target.isLiving()
                 && canReach(source, target, action.getMaximumRange())) {
@@ -656,6 +682,7 @@ public final class AuthoritativeCombatEncounter {
         private float y;
         private float z;
         private boolean gibbed;
+        private DeathCause lastDamageCause = DeathCause.COMBAT;
         private boolean combatEligible = true;
         private long lastHeardTick = Long.MIN_VALUE / 2L;
 

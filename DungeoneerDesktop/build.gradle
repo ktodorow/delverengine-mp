@@ -45,6 +45,7 @@ task runDirectHost(dependsOn: classes, type: JavaExec) {
     if(project.hasProperty("avatar")) args "--avatar=" + project.property("avatar")
     if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
     if(project.hasProperty("ownedCopy")) args "--owned-copy=" + project.property("ownedCopy")
+    if(project.hasProperty("devTools")) args "--dev-tools"
 }
 
 task runDirectClient(dependsOn: classes, type: JavaExec) {
@@ -62,6 +63,7 @@ task runDirectClient(dependsOn: classes, type: JavaExec) {
     if(project.hasProperty("campaignSlot")) args "--campaign-slot=" + project.property("campaignSlot")
     if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
     if(project.hasProperty("ownedCopy")) args "--owned-copy=" + project.property("ownedCopy")
+    if(project.hasProperty("devTools")) args "--dev-tools"
 }
 
 task discoverPrivateSessions(dependsOn: classes, type: JavaExec) {

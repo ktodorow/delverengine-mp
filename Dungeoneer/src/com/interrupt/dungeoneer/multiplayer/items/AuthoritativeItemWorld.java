@@ -43,6 +43,8 @@ public final class AuthoritativeItemWorld {
     private final Map<Long, String> equipmentSlots = new LinkedHashMap<Long, String>();
     private final java.util.Set<Long> keys = new java.util.HashSet<Long>();
     private final java.util.Set<Long> gold = new java.util.HashSet<Long>();
+    private final Map<Long, ItemKind> kinds = new LinkedHashMap<Long, ItemKind>();
+    private final Map<ParticipantId, Long> wielded = new LinkedHashMap<ParticipantId, Long>();
     private int partyKeys;
     private long keyRevision;
     private long nextEntityId = 1L;
@@ -142,6 +144,15 @@ public final class AuthoritativeItemWorld {
             }
             setEquipment(item, slot);
         }
+        else if(request.action == ItemAction.WIELD) {
+            if(!actor.equals(item.owner)) return Outcome.NOT_OWNER;
+            if(request.quantity > 0) wielded.put(actor, item.entityId);
+            else if(item.entityId == getWielded(actor)) wielded.remove(actor);
+        }
+        else if(request.action == ItemAction.LIGHT) {
+            // Ownership is the only rule here; the native fuse itself lives on Host's bomb.
+            if(!actor.equals(item.owner)) return Outcome.NOT_OWNER;
+        }
         else if(request.action == ItemAction.SPEND || request.action == ItemAction.CONSUME) {
             if(!actor.equals(item.owner)) return Outcome.NOT_OWNER;
             if(request.condition > item.properties.condition || request.quantity > item.properties.quantity) {
@@ -154,6 +165,7 @@ public final class AuthoritativeItemWorld {
             items.put(item.entityId, new PhysicalItemState(item.entityId, ++revision,
                     item.templateId, consumed ? null : actor, item.x, item.y, item.z,
                     properties, consumed, consumed ? "" : item.equipmentSlot));
+            if(consumed) releaseWield(item.entityId);
         }
         else {
             if(!actor.equals(item.owner)) return Outcome.NOT_OWNER;
@@ -161,6 +173,59 @@ public final class AuthoritativeItemWorld {
                     participant.getCharacter().getY(), participant.getCharacter().getZ());
         }
         return Outcome.ACCEPTED;
+    }
+
+    /** Native Host catalogue records the item family that Life-loss rules consult. */
+    public synchronized void registerKind(long id, ItemKind kind) {
+        if(kind == null || !items.containsKey(id)) throw new IllegalArgumentException("Invalid item kind.");
+        kinds.put(id, kind);
+    }
+
+    public synchronized ItemKind getKind(long id) {
+        ItemKind kind = kinds.get(id);
+        return kind == null ? ItemKind.OTHER : kind;
+    }
+
+    /** Entity the Participant holds in hand, or 0. Only an owned item can be wielded. */
+    public synchronized long getWielded(ParticipantId participant) {
+        Long id = participant == null ? null : wielded.get(participant);
+        if(id == null) return 0L;
+        PhysicalItemState item = items.get(id);
+        if(item == null || item.consumed || !participant.equals(item.owner)) {
+            wielded.remove(participant);
+            return 0L;
+        }
+        return id.longValue();
+    }
+
+    private void releaseWield(long entityId) {
+        for(Map.Entry<ParticipantId, Long> entry
+                : new ArrayList<Map.Entry<ParticipantId, Long>>(wielded.entrySet())) {
+            if(entry.getValue() == entityId) wielded.remove(entry.getKey());
+        }
+    }
+
+    /**
+     * Life loss: an owned item leaves its owner at the fall position with the given condition,
+     * or becomes a consumed tombstone when destroyed. Equipment slot is released either way.
+     */
+    public synchronized boolean forfeit(long entityId, boolean destroyed, float x, float y, float z,
+            int condition) {
+        PhysicalItemState item = items.get(entityId);
+        if(item == null || item.consumed || item.owner == null) return false;
+        if(condition < 0 || condition > 4) throw new IllegalArgumentException("Invalid item condition.");
+        releaseWield(entityId);
+        if(destroyed) {
+            items.put(entityId, new PhysicalItemState(item.entityId, ++revision, item.templateId,
+                    null, item.x, item.y, item.z, item.properties, true));
+            return true;
+        }
+        ItemProperties properties = condition == item.properties.condition ? item.properties
+                : new ItemProperties(condition, item.properties.level, item.properties.suffix,
+                        item.properties.prefix, item.properties.quantity, item.properties.potionType);
+        items.put(entityId, new PhysicalItemState(item.entityId, ++revision, item.templateId,
+                null, x, y, z, properties, false, ""));
+        return true;
     }
 
     public synchronized void registerEquipment(long id, String slot, boolean equipped) {
