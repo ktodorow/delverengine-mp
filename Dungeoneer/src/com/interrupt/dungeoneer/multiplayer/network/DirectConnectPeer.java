@@ -162,6 +162,9 @@ public interface DirectConnectPeer extends AutoCloseable {
         submitItemAction(requestId, action, entityId, condition, quantity);
     }
 
+    /** True once Host declared the campaign defeated; gameplay never resumes on this session. */
+    default boolean isPartyWiped() { return false; }
+
     /** Held Use toward one Downed Campaign Slot; inactive releases this Participant's Revival. */
     default void submitReviveIntent(int targetSlot, boolean active) { }
 

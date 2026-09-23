@@ -13,10 +13,20 @@ public final class MovementEntityState {
     private final float velocityZ;
     private final float rotation;
     private final MovementState movementState;
+    private final float lookY;
 
     public MovementEntityState(NetworkEntityId entityId, long lifecycleSequence,
             long lastProcessedInputTick, float x, float y, float z, float velocityX,
             float velocityY, float velocityZ, float rotation, MovementState movementState) {
+        this(entityId, lifecycleSequence, lastProcessedInputTick, x, y, z, velocityX,
+                velocityY, velocityZ, rotation, movementState, 0f);
+    }
+
+    /** lookY is the accepted vertical look axis, so Spectators can reproduce first person. */
+    public MovementEntityState(NetworkEntityId entityId, long lifecycleSequence,
+            long lastProcessedInputTick, float x, float y, float z, float velocityX,
+            float velocityY, float velocityZ, float rotation, MovementState movementState,
+            float lookY) {
         if(entityId == null) throw new IllegalArgumentException("Network Entity ID cannot be null.");
         if(lifecycleSequence <= 0L) {
             throw new IllegalArgumentException("Entity lifecycle sequence must be positive.");
@@ -31,6 +41,9 @@ public final class MovementEntityState {
         requireFinite(velocityY, "Authoritative y velocity");
         requireFinite(velocityZ, "Authoritative z velocity");
         requireFinite(rotation, "Authoritative rotation");
+        if(Float.isNaN(lookY) || lookY < -1f || lookY > 1f) {
+            throw new IllegalArgumentException("Authoritative vertical look must be within -1..1.");
+        }
         if(movementState == null) {
             throw new IllegalArgumentException("Authoritative movement state cannot be null.");
         }
@@ -45,6 +58,7 @@ public final class MovementEntityState {
         this.velocityZ = velocityZ;
         this.rotation = rotation;
         this.movementState = movementState;
+        this.lookY = lookY;
     }
 
     public NetworkEntityId getEntityId() { return entityId; }
@@ -58,6 +72,7 @@ public final class MovementEntityState {
     public float getVelocityZ() { return velocityZ; }
     public float getRotation() { return rotation; }
     public MovementState getMovementState() { return movementState; }
+    public float getLookY() { return lookY; }
 
     private static void requireFinite(float value, String label) {
         if(Float.isNaN(value) || Float.isInfinite(value)) {

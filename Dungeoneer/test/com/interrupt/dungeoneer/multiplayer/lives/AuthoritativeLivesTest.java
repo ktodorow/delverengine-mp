@@ -165,6 +165,48 @@ public class AuthoritativeLivesTest {
     }
 
     @Test
+    public void simultaneousDowningResolvesBleedoutsImmediatelyAndRespawnsTogether() {
+        AuthoritativeLives lives = lives(2);
+        lives.down(alpha);
+        advance(lives, 200);
+        lives.down(beta);
+        assertFalse(lives.collapseBleedouts(Arrays.asList(alpha, beta, gamma)));
+
+        lives.down(gamma);
+        assertTrue(lives.collapseBleedouts(Arrays.asList(alpha, beta, gamma)));
+        List<Outcome> outcomes = advance(lives, 1);
+
+        assertEquals(3, outcomes.size());
+        for(Outcome outcome : outcomes) assertEquals(OutcomeKind.RESPAWNED, outcome.kind);
+        assertEquals(1, lives.getRemainingLives(alpha));
+        assertFalse(lives.isPartyWiped());
+    }
+
+    @Test
+    public void absentSlotsDoNotCountAsStandingForSimultaneousDowning() {
+        AuthoritativeLives lives = lives(3);
+        lives.down(alpha);
+        // gamma is disconnected and returned to its Campaign Slot; beta stands.
+        assertFalse(lives.collapseBleedouts(Arrays.asList(alpha, beta)));
+        lives.down(beta);
+        assertTrue(lives.collapseBleedouts(Arrays.asList(alpha, beta)));
+        assertEquals(2, advance(lives, 1).size());
+    }
+
+    @Test
+    public void partyWipeOnlyWhenNoSlotCanReturn() {
+        AuthoritativeLives lives = lives(1);
+        lives.down(alpha);
+        lives.down(beta);
+        advance(lives, AuthoritativeLives.BLEEDOUT_TICKS);
+        assertFalse(lives.isPartyWiped());
+
+        lives.down(gamma);
+        advance(lives, AuthoritativeLives.BLEEDOUT_TICKS);
+        assertTrue(lives.isPartyWiped());
+    }
+
+    @Test
     public void revisionChangesOnTransitionsOnly() {
         AuthoritativeLives lives = lives(3);
         long initial = lives.getRevision();

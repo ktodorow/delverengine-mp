@@ -200,6 +200,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     /** Combat health seen by latest Host tick; read under Host lock where combat state is off limits. */
     private final Map<ParticipantId, Integer> tickHealths =
             new LinkedHashMap<ParticipantId, Integer>();
+    private volatile boolean partyWiped;
     private final Map<ParticipantId, DeathDrop> deathDrops =
             new LinkedHashMap<ParticipantId, DeathDrop>();
     private volatile PartyCommunicationState partyCommunication =
@@ -1552,8 +1553,24 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         synchronized(this) {
             publishLivesIfChanged();
+            AuthoritativeLives current = lives;
+            if(current != null && !partyWiped && current.isPartyWiped()) declarePartyWipe();
         }
     }
+
+    /** Terminal state: Host keeps serving chat and status, but simulation never advances again. */
+    private void declarePartyWipe() {
+        partyWiped = true;
+        ScheduledFuture<?> task = movementTask;
+        if(task != null) task.cancel(false);
+        broadcast(new DirectConnectWire.PartyWipeMessage(sessionId));
+        status = status(DirectConnectPhase.READY,
+                "Party Wipe: no Campaign Slot can return. The campaign is defeated.",
+                null, sharedFloorId());
+    }
+
+    @Override
+    public boolean isPartyWiped() { return partyWiped; }
 
     private void resolveLives(long hostTick, Map<ParticipantId, Integer> healths,
             List<ParticipantId> downed, Map<ParticipantId, Integer> restored) {
@@ -1589,6 +1606,14 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             revivalAnchors.remove(entry.getKey());
             current.cancelRevival(entry.getKey());
         }
+        List<ParticipantId> present = new ArrayList<ParticipantId>();
+        for(MovementEntityDescriptor descriptor : livesDescriptors) {
+            PartyStatusSnapshot published = partyStatus;
+            PartyMemberStatus member = published == null ? null
+                    : published.getMember(descriptor.getCampaignSlot());
+            if(member != null && member.getEntityId() != null) present.add(descriptor.getParticipantId());
+        }
+        current.collapseBleedouts(present);
         for(AuthoritativeLives.Outcome outcome : current.tick()) {
             ParticipantId participant = outcome.participant;
             MovementEntityDescriptor descriptor = livesDescriptor(participant);
@@ -1773,6 +1798,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     encounter.getSnapshot(session == null ? 0L : session.getHostTick())));
         }
         connection.channel.write(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
+        if(partyWiped) connection.channel.write(new DirectConnectWire.PartyWipeMessage(sessionId));
         for(ActorEffectsSnapshot effects : getActorEffects()) {
             connection.channel.write(new DirectConnectWire.MonsterEffectsMessage(sessionId, effects, false, nativeWorldGeneration));
         }

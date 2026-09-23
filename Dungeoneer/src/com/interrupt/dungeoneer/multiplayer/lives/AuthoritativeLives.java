@@ -106,6 +106,39 @@ public final class AuthoritativeLives {
         return cancelled;
     }
 
+    /**
+     * Simultaneous Downing: when no present Participant stands, nobody can revive, so every
+     * present Downed Participant's bleedout completes on the next tick and survivors respawn together.
+     */
+    public synchronized boolean collapseBleedouts(Collection<ParticipantId> present) {
+        if(present == null || present.isEmpty()) return false;
+        boolean anyDowned = false;
+        for(ParticipantId participant : present) {
+            MutableSlot slot = slots.get(participant);
+            if(slot == null) continue;
+            if(slot.condition == Condition.STANDING) return false;
+            if(slot.condition == Condition.DOWNED) anyDowned = true;
+        }
+        if(!anyDowned) return false;
+        for(ParticipantId participant : present) {
+            MutableSlot slot = slots.get(participant);
+            if(slot == null || slot.condition != Condition.DOWNED) continue;
+            slot.reviver = null;
+            slot.revivalTicks = 0;
+            slot.bleedoutTicks = 1;
+        }
+        revision++;
+        return true;
+    }
+
+    /** Party Wipe: no Campaign Slot in play can ever return. */
+    public synchronized boolean isPartyWiped() {
+        for(MutableSlot slot : slots.values()) {
+            if(slot.condition != Condition.EXHAUSTED) return false;
+        }
+        return true;
+    }
+
     /** One unpaused Host tick. Bleedout holds while an uninterrupted Revival is in progress. */
     public synchronized List<Outcome> tick() {
         List<Outcome> outcomes = new ArrayList<Outcome>();

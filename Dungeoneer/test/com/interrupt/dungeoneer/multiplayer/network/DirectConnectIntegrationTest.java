@@ -1775,6 +1775,51 @@ public class DirectConnectIntegrationTest {
     }
 
     @Test
+    public void simultaneousDowningRespawnsTogetherAndLastLivesEndInPartyWipe() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("wipe-floor");
+        HostFixture fixture = host(compatibility, 2, "wipe");
+        DirectConnectClient second = approveClient(fixture, compatibility, '2', "Two",
+                AvatarCatalog.HUMANOID_2);
+        ParticipantId hostId = new ParticipantId("campaign-slot-1");
+        ParticipantId secondId = new ParticipantId("campaign-slot-2");
+        try {
+            fixture.host.setStartingLives(2);
+            fixture.host.startSession();
+            awaitPhase(second, DirectConnectPhase.READY);
+            awaitPartyState(second, 2, PartyMemberState.CONNECTED);
+
+            fixture.host.applyNativeEnvironmentalDamage("test-hazard", secondId, 8,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            awaitPartyState(second, 2, PartyMemberState.DOWNED);
+            fixture.host.applyNativeEnvironmentalDamage("test-hazard", hostId, 8,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            // Nobody stands: both bleedouts resolve at once, long before ten seconds.
+            awaitPartyHealth(second, 1, 4);
+            awaitPartyHealth(second, 2, 4);
+            assertEquals(1, second.getPartyStatus().getMember(1).getRemainingLives());
+            assertEquals(1, second.getPartyStatus().getMember(2).getRemainingLives());
+            assertFalse(second.isPartyWiped());
+
+            fixture.host.applyNativeEnvironmentalDamage("test-hazard", secondId, 8,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            awaitPartyState(second, 2, PartyMemberState.DOWNED);
+            fixture.host.applyNativeEnvironmentalDamage("test-hazard", hostId, 8,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            awaitPartyState(second, 1, PartyMemberState.SPECTATING);
+            awaitPartyState(second, 2, PartyMemberState.SPECTATING);
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(System.currentTimeMillis() < deadline && !second.isPartyWiped()) Thread.sleep(10L);
+            assertTrue(second.isPartyWiped());
+            assertTrue(fixture.host.isPartyWiped());
+            assertEquals(0, fixture.host.getPartyStatus().getMember(1).getRemainingLives());
+        }
+        finally {
+            second.close();
+            fixture.close();
+        }
+    }
+
+    @Test
     public void directedClientAttackIsTracedAndReplicatedByHost() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("directed-combat-floor");
         HostFixture fixture = host(compatibility, 2, "directed-combat");

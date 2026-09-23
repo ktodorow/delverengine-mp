@@ -115,6 +115,7 @@ final class DirectConnectWire {
     private static final int SHOP_OPENING = 47;
     private static final int SHARED_FLOOR_FINGERPRINT = 48;
     private static final int REVIVE_INTENT = 49;
+    private static final int PARTY_WIPE = 50;
 
     private DirectConnectWire() { }
 
@@ -372,7 +373,13 @@ final class DirectConnectWire {
                 output.writeFloat(entity.getVelocityZ());
                 output.writeFloat(entity.getRotation());
                 output.writeByte(entity.getMovementState().getWireId());
+                output.writeFloat(entity.getLookY());
             }
+        }
+        else if(message instanceof PartyWipeMessage) {
+            output.writeByte(PARTY_WIPE);
+            writeString(output, ((PartyWipeMessage)message).sessionId,
+                    DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
         }
         else if(message instanceof DoorStateMessage) {
             DoorStateMessage messageState = (DoorStateMessage)message;
@@ -1154,6 +1161,10 @@ final class DirectConnectWire {
                 }
                 catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid shop opening.", invalid); }
                 break;
+            case PARTY_WIPE:
+                message = new PartyWipeMessage(readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity"));
+                break;
             case REVIVE_INTENT:
                 String reviveSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                         "session identity");
@@ -1455,7 +1466,7 @@ final class DirectConnectWire {
                 List<MovementEntityState> movementEntities =
                         new ArrayList<MovementEntityState>();
                 for(int i = 0; i < entityCount; i++) {
-                    requireReadable(input, 53, "Movement snapshot entity");
+                    requireReadable(input, 57, "Movement snapshot entity");
                     long entityId = input.readLong();
                     long lifecycleSequence = input.readLong();
                     long acknowledgedInput = input.readLong();
@@ -1467,11 +1478,12 @@ final class DirectConnectWire {
                     float velocityZ = input.readFloat();
                     float rotation = input.readFloat();
                     int movementState = input.readUnsignedByte();
+                    float lookY = input.readFloat();
                     try {
                         movementEntities.add(new MovementEntityState(
                                 new NetworkEntityId(entityId), lifecycleSequence,
                                 acknowledgedInput, x, y, z, velocityX, velocityY,
-                                velocityZ, rotation, MovementState.fromWireId(movementState)));
+                                velocityZ, rotation, MovementState.fromWireId(movementState), lookY));
                     }
                     catch(IllegalArgumentException ex) {
                         throw new ProtocolException("Malformed movement snapshot: "
@@ -2398,6 +2410,15 @@ final class DirectConnectWire {
         ShopEntryStateMessage(String sessionId, ShopEntryState entry) {
             if(sessionId == null || entry == null) throw new IllegalArgumentException("Missing shop entry.");
             this.sessionId = sessionId; this.entry = entry;
+        }
+    }
+
+    /** Terminal campaign defeat: no Campaign Slot can return; normal play never resumes. */
+    static final class PartyWipeMessage implements Message {
+        final String sessionId;
+        PartyWipeMessage(String sessionId) {
+            if(sessionId == null) throw new IllegalArgumentException("Party Wipe needs a session.");
+            this.sessionId = sessionId;
         }
     }
 

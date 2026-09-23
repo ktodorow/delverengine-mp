@@ -25,6 +25,13 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
     private static final float JUMP_SPEED = 3.2f;
     private static final float GRAVITY = 9.8f;
     private static final float MOVING_EPSILON = 0.01f;
+    /**
+     * Native water: walking force is scaled by min(0.08 * 1.4, 1) and only 4 percent of velocity
+     * is removed per tick, so top speed is 0.112 / 0.04 = 2.8 units of force against 5 on land
+     * (0.56) and the velocity time constant is 25 ticks instead of 5.
+     */
+    static final float WATER_SPEED = 0.56f;
+    static final float WATER_RATE = 2.4f;
 
     private final MovementCollisionWorld world;
     private final Map<ParticipantId, MutableMovement> participants =
@@ -233,11 +240,14 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         }
 
         float previousVelocityX = participant.velocityX, previousVelocityY = participant.velocityY;
+        boolean inWater = !participant.floating && !Float.isNaN(
+                world.getWaterSurfaceZ(participant.x, participant.y, participant.z));
+        float speed = MAX_SPEED * participant.nativeSpeedModifier * (inWater ? WATER_SPEED : 1f);
         float targetVelocityX = (float)(strafe * Math.cos(rotation)
-                + forward * Math.sin(rotation)) * MAX_SPEED * participant.nativeSpeedModifier;
+                + forward * Math.sin(rotation)) * speed;
         float targetVelocityY = (float)(forward * Math.cos(rotation)
-                - strafe * Math.sin(rotation)) * MAX_SPEED * participant.nativeSpeedModifier;
-        float rate = Math.abs(forward) + Math.abs(strafe) > 0f
+                - strafe * Math.sin(rotation)) * speed;
+        float rate = inWater ? WATER_RATE : Math.abs(forward) + Math.abs(strafe) > 0f
                 ? ACCELERATION : DECELERATION;
         float blend = Math.min(1f, rate * deltaSeconds);
         participant.velocityX += (targetVelocityX - participant.velocityX) * blend;
@@ -262,6 +272,7 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
             participant.velocityY = nativeY * 60f;
         }
         participant.rotation = rotation;
+        if(input != null) participant.lookY = input.getLookY();
 
         boolean requestedMovement = Math.abs(targetVelocityX) + Math.abs(targetVelocityY)
                 > MOVING_EPSILON;
@@ -356,6 +367,7 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         private boolean floating;
         private float flightSpeed;
         private MovementState movementState = MovementState.IDLE;
+        private float lookY;
 
         private MutableMovement(MovementEntityDescriptor descriptor, MovementSpawn spawn) {
             this.descriptor = descriptor;
@@ -368,7 +380,7 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         private MovementEntityState snapshot() {
             return new MovementEntityState(descriptor.getEntityId(),
                     descriptor.getLifecycleSequence(), lastProcessedInputTick,
-                    x, y, z, velocityX, velocityY, velocityZ, rotation, movementState);
+                    x, y, z, velocityX, velocityY, velocityZ, rotation, movementState, lookY);
         }
 
         private void freeze() {

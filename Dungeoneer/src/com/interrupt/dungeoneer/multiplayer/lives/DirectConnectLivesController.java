@@ -1,11 +1,15 @@
 package com.interrupt.dungeoneer.multiplayer.lives;
 
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.Input;
 import com.interrupt.dungeoneer.GameInput;
 import com.interrupt.dungeoneer.entities.Actor;
 import com.interrupt.dungeoneer.entities.Player;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.input.Actions.Action;
 import com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.RemoteAvatar;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
@@ -35,6 +39,12 @@ public final class DirectConnectLivesController {
     private int intendedRevivalSlot;
     private float secondsSinceIntent;
     private String prompt;
+    private int spectatedSlot;
+    private boolean thirdPerson;
+    private SpectatorCamera spectatorCamera;
+    private RemoteAvatar hiddenForFirstPerson;
+    private boolean leftButtonHeld;
+    private boolean rightButtonHeld;
 
     public DirectConnectLivesController(DirectConnectPeer peer,
             DirectConnectMovementController movement) {
@@ -75,12 +85,90 @@ public final class DirectConnectLivesController {
         boolean incapacitated = local.getState() == PartyMemberState.DOWNED
                 || local.getState() == PartyMemberState.SPECTATING;
         game.player.setMultiplayerIncapacitated(incapacitated);
+        if(local.getState() == PartyMemberState.SPECTATING) {
+            releaseRevival();
+            updateSpectator(status, local);
+            return;
+        }
+        stopSpectating();
         if(incapacitated) {
             releaseRevival();
             prompt = incapacitatedPrompt(status, local);
             return;
         }
         updateRevival(game.player, input, status, local, deltaSeconds);
+    }
+
+    /** Borrowed viewpoint while spectating, or null when the local camera applies. */
+    public SpectatorCamera getSpectatorCamera() {
+        return spectatorCamera;
+    }
+
+    /** Spectators watch living teammates; left mouse toggles first/third person, right mouse cycles. */
+    private void updateSpectator(PartyStatusSnapshot status, PartyMemberStatus local) {
+        java.util.List<PartyMemberStatus> living = new java.util.ArrayList<PartyMemberStatus>();
+        for(PartyMemberStatus member : status.getMembers()) {
+            if(member == local || member.getEntityId() == null
+                    || member.getState() == PartyMemberState.SPECTATING) continue;
+            living.add(member);
+        }
+        if(living.isEmpty()) {
+            stopSpectating();
+            prompt = "NO LIVES REMAINING";
+            return;
+        }
+        boolean overlayOpen = com.interrupt.dungeoneer.overlays.OverlayManager.instance.current() != null;
+        // This libgdx has no isButtonJustPressed; detect press edges ourselves.
+        boolean leftDown = Gdx.input.isButtonPressed(Input.Buttons.LEFT);
+        boolean rightDown = Gdx.input.isButtonPressed(Input.Buttons.RIGHT);
+        boolean leftPressed = leftDown && !leftButtonHeld;
+        boolean rightPressed = rightDown && !rightButtonHeld;
+        leftButtonHeld = leftDown;
+        rightButtonHeld = rightDown;
+        if(!overlayOpen && leftPressed) thirdPerson = !thirdPerson;
+        int index = -1;
+        for(int i = 0; i < living.size(); i++) {
+            if(living.get(i).getCampaignSlot() == spectatedSlot) index = i;
+        }
+        if(index < 0) index = 0;
+        else if(!overlayOpen && (rightPressed
+                || Gdx.input.isKeyJustPressed(Input.Keys.N))) index = (index + 1) % living.size();
+        PartyMemberStatus watched = living.get(index);
+        spectatedSlot = watched.getCampaignSlot();
+
+        RemoteAvatar avatar = movement.getRemoteAvatar(participantId(watched));
+        MovementEntityState state = latestState(watched);
+        if(avatar == null || state == null) {
+            spectatorCamera = null;
+            return;
+        }
+        // The watched body must not fill a first-person view; third person shows it.
+        RemoteAvatar hide = thirdPerson ? null : avatar;
+        if(hiddenForFirstPerson != hide) {
+            if(hiddenForFirstPerson != null) hiddenForFirstPerson.hidden = false;
+            hiddenForFirstPerson = hide;
+        }
+        if(hide != null) hide.hidden = true;
+        spectatorCamera = SpectatorCamera.at(avatar.x, avatar.y, avatar.z, state.getRotation(),
+                state.getLookY(), thirdPerson, watched.getNickname());
+        prompt = "SPECTATING " + watched.getNickname()
+                + (thirdPerson ? "  [LMB] FIRST PERSON" : "  [LMB] THIRD PERSON")
+                + (living.size() > 1 ? "  [RMB] NEXT" : "");
+    }
+
+    private void stopSpectating() {
+        spectatorCamera = null;
+        spectatedSlot = 0;
+        if(hiddenForFirstPerson != null) {
+            hiddenForFirstPerson.hidden = false;
+            hiddenForFirstPerson = null;
+        }
+    }
+
+    private MovementEntityState latestState(PartyMemberStatus member) {
+        java.util.List<MovementSnapshot> snapshots = peer.getMovementSnapshots();
+        if(snapshots.isEmpty()) return null;
+        return snapshots.get(snapshots.size() - 1).getEntity(member.getEntityId());
     }
 
     /** Centered status line for the local Participant, or null. */
@@ -90,6 +178,7 @@ public final class DirectConnectLivesController {
 
     public void dispose(Game game) {
         releaseRevival();
+        stopSpectating();
         if(game == null || game.player == null) return;
         game.player.deathDeferredToAuthority = false;
         game.player.setMultiplayerIncapacitated(false);
@@ -171,8 +260,12 @@ public final class DirectConnectLivesController {
     private void presentRemote(PartyMemberStatus member, boolean local) {
         if(local) return;
         RemoteAvatar avatar = movement.getRemoteAvatar(participantId(member));
-        if(avatar != null) avatar.setIncapacitated(member.getState() == PartyMemberState.DOWNED
-                || member.getState() == PartyMemberState.SPECTATING);
+        if(avatar == null) return;
+        boolean exhausted = member.getState() == PartyMemberState.SPECTATING;
+        avatar.setIncapacitated(member.getState() == PartyMemberState.DOWNED || exhausted);
+        // A Spectator has no body on the floor; a Downed one lies where it fell.
+        if(exhausted) avatar.hidden = true;
+        else if(avatar != hiddenForFirstPerson) avatar.hidden = false;
     }
 
     /** A consumed Life: selected hotbar item stays behind and no temporary effect survives. */

@@ -90,6 +90,8 @@ public class GameOverScreen extends StatsScreen {
 
 	@Override
 	public void pause() {
+		// A Party Wipe screen must keep drawing in the unfocused window of a second instance.
+		if(GameApplication.isDirectConnectSession()) return;
 		running = false;
 	}
 
@@ -207,6 +209,8 @@ public class GameOverScreen extends StatsScreen {
         delayTimer = new Timer();
         delayTimer.scheduleTask(startFade, 0.1f);
         delayTimer.start();
+        // libgdx pauses Timer while a window is unfocused; a multiplayer peer must not wait on it.
+        if(GameApplication.isDirectConnectSession()) startFade.run();
 
         if(gameOver) {
             splashLevel = "levels/death-screen-splash.bin";
@@ -313,6 +317,11 @@ public class GameOverScreen extends StatsScreen {
     public void startGameOver() {
         freeBackgroundLevel();
 
+        if(GameApplication.isDirectConnectSession()) {
+            // Defeated Co-op Campaign: nothing to reload; leaving the session ends this instance.
+            Gdx.app.exit();
+            return;
+        }
         if(!gameOver) {
             GameApplication.ShowMainMenuScreen();
         }

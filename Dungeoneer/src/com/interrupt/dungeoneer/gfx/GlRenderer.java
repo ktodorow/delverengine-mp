@@ -473,6 +473,19 @@ public class GlRenderer {
         }
 
 		rot = game.player.rot;
+		float pitch = game.player.yrot;
+		float incapacitatedLerp = game.player.incapacitatedCameraLerp;
+		com.interrupt.dungeoneer.multiplayer.lives.SpectatorCamera spectator =
+				GameApplication.instance == null ? null
+						: GameApplication.instance.getDirectConnectSpectatorCamera();
+		if (spectator != null) {
+			xPos = spectator.x;
+			yPos = spectator.y;
+			zPos = spectator.z;
+			rot = spectator.yaw;
+			pitch = spectator.pitch;
+			incapacitatedLerp = 0f;
+		}
 
 		camera.far = viewDistance;
 		camera.up.set(0, 1, 0);
@@ -493,7 +506,6 @@ public class GlRenderer {
 			if (headRoll != 0) camera.rotate(Vector3.Z, headRoll);
 
 			// Multiplayer Downed: collapse to the floor while still free to look around.
-			float incapacitatedLerp = game.player.incapacitatedCameraLerp;
 			if (incapacitatedLerp > 0.001f) {
 				camera.position.y -= 0.3f * incapacitatedLerp;
 				camera.rotate(Vector3.Z, 35f * incapacitatedLerp);
@@ -507,7 +519,7 @@ public class GlRenderer {
 				camera.rotate(game.player.dyingAnimation.curRotation.z, 0, 0, 1);
 			}
 
-			camera.rotate(game.player.yrot * RADIAN_UNIT, 1f, 0, 0);
+			camera.rotate(pitch * RADIAN_UNIT, 1f, 0, 0);
 			camera.rotate((rot + 3.14f) * RADIAN_UNIT, 0, 1f, 0);
 
 			rightDirection.set(camera.direction).crs(camera.up).nor();
@@ -571,7 +583,7 @@ public class GlRenderer {
 		renderMeshes();
 		renderDecals();
 
-		if(!inCutscene) {
+		if(!inCutscene && spectator == null) {
 			// Draw held items
 			Gdx.gl.glDepthFunc(GL20.GL_ALWAYS);
 
@@ -606,9 +618,9 @@ public class GlRenderer {
 			Game.flashColor.set(DEATH_COLOR);
 			Game.flashColor.a = Math.min(game.player.dyingAnimation.timeMod() * game.player.dyingAnimation.timeMod() * 1.5f, 1f);
 			drawFlashOverlay(Game.flashColor);
-		} else if (game.player.incapacitatedCameraLerp > 0.001f) {
+		} else if (incapacitatedLerp > 0.001f) {
 			Game.flashColor.set(DEATH_COLOR);
-			Game.flashColor.a = 0.45f * game.player.incapacitatedCameraLerp;
+			Game.flashColor.a = 0.45f * incapacitatedLerp;
 			drawFlashOverlay(Game.flashColor);
 		} else {
 			if (Game.flashTimer > 0) {
@@ -1720,7 +1732,8 @@ public class GlRenderer {
 		float y = camera2D.viewportHeight / 2f - uiSize * 0.45f;
 		String livesPrompt = application.getDirectConnectLivesPrompt();
 		if(livesPrompt != null) {
-			drawCenteredText(livesPrompt, camera2D.viewportHeight * 0.1f, fontSize * 1.2f,
+			// Low on screen so it never covers the action or the crosshair.
+			drawCenteredText(livesPrompt, -camera2D.viewportHeight * 0.3f, fontSize * 1.2f,
 					Color.WHITE, Color.BLACK);
 		}
 		if(communication.getPauseSession().isPaused()) {

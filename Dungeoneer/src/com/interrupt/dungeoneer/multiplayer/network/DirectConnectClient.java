@@ -527,6 +527,19 @@ public final class DirectConnectClient implements DirectConnectPeer {
         partyCommunication = partyCommunication.withPauseRequest(delivery.request);
     }
 
+    private volatile boolean partyWiped;
+
+    @Override
+    public boolean isPartyWiped() { return partyWiped; }
+
+    private synchronized void partyWipe(DirectConnectWire.PartyWipeMessage delivery) {
+        if(sessionId == null || !sessionId.equals(delivery.sessionId)) {
+            fail("Party Wipe belongs to another session.");
+            return;
+        }
+        partyWiped = true;
+    }
+
     private synchronized void pauseSession(PauseSessionStateMessage delivery) {
         if(!isReadySession(delivery.sessionId)) {
             fail("Host returned Pause Session state outside current session.");
@@ -1350,6 +1363,9 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof PauseRequestedMessage && sessionId != null
                     && campaignSlot != 0) {
                 pauseRequested((PauseRequestedMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.PartyWipeMessage && sessionId != null) {
+                partyWipe((DirectConnectWire.PartyWipeMessage)message);
             }
             else if(message instanceof PauseSessionStateMessage && sessionId != null
                     && campaignSlot != 0) {

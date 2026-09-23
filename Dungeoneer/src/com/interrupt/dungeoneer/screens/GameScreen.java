@@ -81,6 +81,13 @@ public class GameScreen implements Screen {
 					|| canAdvanceDirectConnectGameplay(directConnect.getStatus().getPhase());
 			if(!directConnectReady) reportStoppedDirectConnect(directConnect);
 			handlePartyControls(directConnect);
+			if(directConnect != null && directConnect.isPartyWiped() && !partyWipeShown
+					&& game != null && !game.gameOver) {
+				// Terminal campaign defeat: native game over for every peer, no resume.
+				partyWipeShown = true;
+				GameApplication.ShowGameOverScreen(false);
+				return;
+			}
 
 			if(resetDelta) {
 				resetDelta = false;
@@ -283,6 +290,7 @@ public class GameScreen implements Screen {
     }
 
     private com.interrupt.dungeoneer.multiplayer.lives.DirectConnectLivesController networkLivesController;
+    private boolean partyWipeShown;
 
     public void setNetworkLivesController(
             com.interrupt.dungeoneer.multiplayer.lives.DirectConnectLivesController controller) {

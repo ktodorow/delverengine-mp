@@ -353,6 +353,12 @@ public class GameApplication extends Game {
         completedScreen.dispose();
     }
 
+    /** Spectator viewpoint replacing the local camera, or null. */
+    public com.interrupt.dungeoneer.multiplayer.lives.SpectatorCamera getDirectConnectSpectatorCamera() {
+        return directConnectLivesController == null ? null
+                : directConnectLivesController.getSpectatorCamera();
+    }
+
     /** Centered Downed, bleedout or Revival line for local Participant, or null. */
     public String getDirectConnectLivesPrompt() {
         return directConnectLivesController == null ? null

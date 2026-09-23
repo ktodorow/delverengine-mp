@@ -143,7 +143,20 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
                 }
             }
         }
-        return level.isFree(x, y, z, collision, STEP_HEIGHT, false, null);
+        return level.isFree(x, y, z, collision, stepHeight(x, y, z), false, null);
+    }
+
+    /** Native Player raises its step height in water so it can climb out. */
+    private float stepHeight(float x, float y, float z) {
+        float surface = getWaterSurfaceZ(x, y, z);
+        return Float.isNaN(surface) ? STEP_HEIGHT : 0.3499f + (surface - z);
+    }
+
+    @Override
+    public float getWaterSurfaceZ(float x, float y, float z) {
+        if(!finite(x) || !finite(y) || !finite(z)) return Float.NaN;
+        com.interrupt.dungeoneer.tiles.Tile water = level.findWaterTile(x, y, z, collision);
+        return water == null ? Float.NaN : water.floorHeight + 0.5f;
     }
 
     public void setWorldObstacles(java.util.List<MovementObstacle> obstacles) {
