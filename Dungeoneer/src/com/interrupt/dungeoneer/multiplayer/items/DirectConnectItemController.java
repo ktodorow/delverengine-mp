@@ -419,6 +419,14 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         if(item instanceof Gold) host.getItemWorld().registerGold(state.entityId);
         host.getItemWorld().registerKind(state.entityId, kindOf(item));
         host.getItemWorld().registerEquipment(state.entityId, item.GetEquipLoc(), false);
+        if(item instanceof ItemStack) {
+            host.getItemWorld().registerStack(state.entityId, ((ItemStack)item).stackType, key);
+        }
+        else if(item instanceof Missile) {
+            Missile missile = (Missile)item;
+            host.getItemWorld().registerStack(state.entityId, missile.stackType,
+                    remember(missile.createRecoveredStack()));
+        }
     }
 
     static ItemKind kindOf(Item item) {
@@ -561,6 +569,13 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             if(revision != null && revision >= state.revision
                     && (host != null || state.owner != null)) continue;
             Item item = nativeItems.get(state.entityId);
+            // Host converts a picked-up loose missile into its native inventory bundle.
+            if(item instanceof Missile && templates.get(state.templateId) instanceof ItemStack) {
+                item.isActive = false;
+                if(game.player.ownsPhysicalItem(item)) game.player.removeAuthoritativeItem(item);
+                itemIds.remove(item);
+                item = null;
+            }
             if(item == null) {
                 Item template = templates.get(state.templateId);
                 if(template == null) {
@@ -578,7 +593,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             int condition = alreadyOwnedLocally ? Math.min(item.itemCondition.ordinal(),
                     state.properties.condition) : state.properties.condition;
             int quantity = state.properties.quantity;
-            if(alreadyOwnedLocally && item instanceof ItemStack) quantity = Math.min(quantity, ((ItemStack)item).count);
+            // Ammo spending and merging are Host-owned; accept both decreases and pickup increases.
             if(alreadyOwnedLocally && item instanceof Wand) quantity = Math.min(quantity, ((Wand)item).charges);
             if(!applyProperties(item, condition, quantity, state.properties)) return;
             if(!ownedLocally && game.player.ownsPhysicalItem(item)) {
@@ -948,9 +963,13 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     private String remember(Item item) {
         String key = templateKey(item);
-        if(!templates.containsKey(key)) templates.put(key, ItemManager.Copy(item.getClass(), item));
+        boolean newTemplate = !templates.containsKey(key);
+        if(newTemplate) templates.put(key, ItemManager.Copy(item.getClass(), item));
         if(item.enchantment != null) modifications.put(item.enchantment.name, item.enchantment);
         if(item.prefixEnchantment != null) modifications.put(item.prefixEnchantment.name, item.prefixEnchantment);
+        // Monster hits create a bundle named after the missile, unlike the original ammo stack.
+        // Register once: recovered stacks refer back to this missile through their nested item.
+        if(newTemplate && item instanceof Missile) remember(((Missile)item).createRecoveredStack());
         // Stacked native ammo becomes a standalone physical item once it is fired, dropped or bought.
         if(item instanceof ItemStack) {
             Item stacked = ((ItemStack)item).item;

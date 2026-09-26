@@ -17,22 +17,22 @@ public class EconomyRulesTest {
     private final ParticipantId sniper = new ParticipantId("campaign-slot-4");
 
     @Test
-    public void nearbyLivingParticipantsAndLivingKillerShareExperience() {
+    public void onlyLivingKillerReceivesExperienceEvenWithNearbyPlayers() {
         List<ParticipantId> recipients = EconomyRules.experienceRecipients(10f, 10f, Arrays.asList(
                 new EconomyRules.Candidate(near, 14f, 10f, true),
                 new EconomyRules.Candidate(far, 40f, 10f, true),
                 new EconomyRules.Candidate(downed, 10f, 11f, false),
                 new EconomyRules.Candidate(sniper, 60f, 60f, true)), sniper);
 
-        assertEquals(Arrays.asList(near, sniper), recipients);
+        assertEquals(Collections.singletonList(sniper), recipients);
     }
 
     @Test
-    public void edgeOfNativeDeathSoundRadiusStillCounts() {
+    public void unattributedDeathAwardsNobodyEvenWhenNearby() {
         List<ParticipantId> recipients = EconomyRules.experienceRecipients(0f, 0f, Collections.singletonList(
-                new EconomyRules.Candidate(near, EconomyRules.SHARED_EXPERIENCE_RADIUS, 0f, true)), null);
+                new EconomyRules.Candidate(near, 1f, 0f, true)), null);
 
-        assertEquals(Collections.singletonList(near), recipients);
+        assertTrue(recipients.isEmpty());
     }
 
     @Test

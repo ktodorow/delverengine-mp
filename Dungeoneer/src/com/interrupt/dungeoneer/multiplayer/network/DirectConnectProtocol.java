@@ -5,11 +5,13 @@ import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
 /** Stable, explicitly bounded protocol constants for Direct Connect session traffic. */
 public final class DirectConnectProtocol {
     public static final int MAGIC = 0x444D5031; // DMP1
-    public static final int VERSION = 42;
-    public static final String BUILD_ID = "mp-v108-prototype-death-drop-43";
+    public static final int VERSION = 43;
+    public static final String BUILD_ID = "mp-v108-prototype-floor-gate-48";
     public static final int DEFAULT_PORT = 37777;
 
     public static final int MAX_TCP_FRAME_BYTES = 1024;
+    // Full 64-monster / 68-combatant snapshot with maximum UTF-8 identity fields.
+    public static final int MAX_COMBAT_SNAPSHOT_BYTES = 16 * 1024;
     public static final int MAX_UDP_DATAGRAM_BYTES = 1024;
     public static final int MAX_BUILD_ID_BYTES = 64;
     public static final int MAX_CONTENT_FORMAT_BYTES = 64;

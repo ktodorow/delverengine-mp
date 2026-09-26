@@ -44,6 +44,13 @@ public final class AuthoritativeItemWorld {
     private final java.util.Set<Long> keys = new java.util.HashSet<Long>();
     private final java.util.Set<Long> gold = new java.util.HashSet<Long>();
     private final Map<Long, ItemKind> kinds = new LinkedHashMap<Long, ItemKind>();
+    private final Map<Long, StackDefinition> stacks = new LinkedHashMap<Long, StackDefinition>();
+    private static final class StackDefinition {
+        final String type, inventoryTemplate;
+        StackDefinition(String type, String inventoryTemplate) {
+            this.type = type; this.inventoryTemplate = inventoryTemplate;
+        }
+    }
     private final Map<ParticipantId, Long> wielded = new LinkedHashMap<ParticipantId, Long>();
     private int partyKeys;
     private long keyRevision;
@@ -130,8 +137,14 @@ public final class AuthoritativeItemWorld {
                         item.templateId, null, item.x, item.y, item.z, item.properties, true));
                 return Outcome.ACCEPTED;
             }
+            StackDefinition stack = stacks.get(item.entityId);
+            if(stack != null && mergeStack(item, actor, stack)) return Outcome.ACCEPTED;
             if(backpackCount(actor) >= capacities.get(actor)) return Outcome.INVENTORY_FULL;
-            replace(item, actor, item.x, item.y, item.z);
+            if(stack != null) {
+                items.put(item.entityId, new PhysicalItemState(item.entityId, ++revision,
+                        stack.inventoryTemplate, actor, item.x, item.y, item.z, item.properties));
+            }
+            else replace(item, actor, item.x, item.y, item.z);
         }
         else if(request.action == ItemAction.EQUIP || request.action == ItemAction.STOW) {
             if(!actor.equals(item.owner)) return Outcome.NOT_OWNER;
@@ -184,6 +197,34 @@ public final class AuthoritativeItemWorld {
     public synchronized ItemKind getKind(long id) {
         ItemKind kind = kinds.get(id);
         return kind == null ? ItemKind.OTHER : kind;
+    }
+
+    /** Host-native stack type, including the bundle template used when picking up a loose missile. */
+    public synchronized void registerStack(long id, String type, String inventoryTemplate) {
+        if(!items.containsKey(id) || type == null || type.isEmpty() || type.length() > 128
+                || inventoryTemplate == null || inventoryTemplate.isEmpty() || inventoryTemplate.length() > 128) {
+            throw new IllegalArgumentException("Invalid native stack definition.");
+        }
+        stacks.put(id, new StackDefinition(type, inventoryTemplate));
+    }
+
+    private boolean mergeStack(PhysicalItemState source, ParticipantId owner, StackDefinition stack) {
+        for(PhysicalItemState target : items.values()) {
+            StackDefinition other = stacks.get(target.entityId);
+            if(target.entityId == source.entityId || target.consumed || !owner.equals(target.owner)
+                    || !target.equipmentSlot.isEmpty() || other == null
+                    || !stack.type.equalsIgnoreCase(other.type)
+                    || source.properties.quantity > 1000000 - target.properties.quantity) continue;
+            ItemProperties p = target.properties;
+            ItemProperties combined = new ItemProperties(p.condition, p.level, p.suffix, p.prefix,
+                    p.quantity + source.properties.quantity, p.potionType);
+            items.put(target.entityId, new PhysicalItemState(target.entityId, ++revision,
+                    other.inventoryTemplate, owner, target.x, target.y, target.z, combined));
+            items.put(source.entityId, new PhysicalItemState(source.entityId, ++revision,
+                    source.templateId, null, source.x, source.y, source.z, source.properties, true));
+            return true;
+        }
+        return false;
     }
 
     /** Entity the Participant holds in hand, or 0. Only an owned item can be wielded. */

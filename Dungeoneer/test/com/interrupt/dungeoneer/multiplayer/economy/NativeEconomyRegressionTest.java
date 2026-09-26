@@ -14,6 +14,7 @@ import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.LocalizedString;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeCombatAuthority;
+import com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController;
 import com.interrupt.dungeoneer.multiplayer.items.AuthoritativeItemWorld;
 import com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController;
 import com.interrupt.dungeoneer.multiplayer.items.ItemAction;
@@ -93,6 +94,7 @@ public class NativeEconomyRegressionTest {
     private StubItemManager itemManager;
     private DirectConnectItemController items;
     private DirectConnectEconomyController controller;
+    private DirectConnectCombatController combat;
 
     private static final class StubItemManager extends ItemManager {
         int monsterLootRolls;
@@ -185,21 +187,21 @@ public class NativeEconomyRegressionTest {
     }
 
     @Test
-    public void hostSharesNativeKillExperienceWithNearbyLivingParticipantsOnly() throws Exception {
+    public void hostKillLevelsOnlyHostDespiteNearbyClient() throws Exception {
         start(true, alpha).prepare(game);
-        Monster monster = monster(2f, 2f);
+        Monster monster = creditedMonster(alpha, 2f, 2f);
 
         assertTrue(game.player.requestExperienceAward(monster, 8));
 
         assertEquals(8, economy.get(alpha).experience);
-        assertEquals(8, economy.get(beta).experience);
+        assertEquals(0, economy.get(beta).experience);
         assertEquals(0, economy.get(gamma).experience);
-        assertEquals(2, economy.get(beta).level);
-        assertEquals(1, economy.get(beta).pendingStatChoices);
+        assertEquals(1, economy.get(beta).level);
+        assertEquals(0, economy.get(beta).pendingStatChoices);
         assertEquals("Native Host Player.addExperience must not run", 1, game.player.level);
         assertTrue(levelUps.isEmpty());
         assertTrue(restored(alpha));
-        assertTrue(restored(beta));
+        assertFalse(restored(beta));
         assertFalse(restored(gamma));
 
         controller.update(game);
@@ -212,17 +214,17 @@ public class NativeEconomyRegressionTest {
     }
 
     @Test
-    public void downedAndDistantParticipantsReceiveNoKillExperience() throws Exception {
+    public void downedKillerAndUnattributedDeathsAwardNobody() throws Exception {
         states[1] = PartyMemberState.DOWNED;
         start(true, alpha).prepare(game);
 
-        game.player.requestExperienceAward(monster(5f, 2f), 8);
-        assertEquals(8, economy.get(alpha).experience);
+        game.player.requestExperienceAward(creditedMonster(beta, 5f, 2f), 8);
+        assertEquals(0, economy.get(alpha).experience);
         assertEquals(0, economy.get(beta).experience);
 
         game.player.requestExperienceAward(monster(80f, 80f), 4);
         assertEquals(0, economy.get(gamma).experience);
-        assertEquals(8, economy.get(alpha).experience);
+        assertEquals(0, economy.get(alpha).experience);
     }
 
     @Test
@@ -481,6 +483,37 @@ public class NativeEconomyRegressionTest {
         assertSame(elixer, game.player.inventory.get(0));
     }
 
+    /** Supply Host-accepted kill attribution; reward delivery still enters native Player boundary. */
+    @SuppressWarnings("unchecked")
+    private Monster creditedMonster(ParticipantId killer, float x, float y) throws Exception {
+        Monster monster = monster(x, y);
+        Field attackers = DirectConnectCombatController.class.getDeclaredField("lastParticipantAttackers");
+        attackers.setAccessible(true);
+        ((Map<Monster, ParticipantId>)attackers.get(combat)).put(monster, killer);
+        return monster;
+    }
+
+    @Test
+    public void clientKillLevelsOnlyClientAndOpensOnlyItsUpgradeChoice() throws Exception {
+        start(true, alpha).prepare(game);
+        game.player.requestExperienceAward(creditedMonster(beta, 2f, 2f), 8);
+        controller.update(game);
+        assertEquals(0, economy.get(alpha).experience);
+        assertEquals(0, economy.get(alpha).pendingStatChoices);
+        assertEquals(8, economy.get(beta).experience);
+        assertEquals(1, economy.get(beta).pendingStatChoices);
+        assertFalse(restored(alpha));
+        assertTrue(restored(beta));
+        assertTrue(levelUps.isEmpty());
+
+        clientProgress.addAll(economy.progressSnapshot());
+        start(false, beta).prepare(game);
+        controller.update(game);
+        assertEquals(8, game.player.exp);
+        assertEquals(2, game.player.level);
+        assertEquals(1, levelUps.size());
+    }
+
     private DirectConnectEconomyController start(boolean hostRole, ParticipantId local) throws Exception {
         DirectConnectPeer peer = peer(hostRole);
         items = new DirectConnectItemController(peer);
@@ -490,7 +523,8 @@ public class NativeEconomyRegressionTest {
         set("localId", local);
         set("nextRequest", 1L);
         game.player.setItemAuthorityListener(items);
-        controller = new DirectConnectEconomyController(peer, items, null,
+        combat = new DirectConnectCombatController(peer, false);
+        controller = new DirectConnectEconomyController(peer, items, combat,
                 new DirectConnectEconomyController.NativeInterface() {
                     @Override public void showLevelUp(Player player, Runnable closed) { levelUps.add(closed); }
                     @Override public void showShop(TriggeredShop shop, String dialogueFile,

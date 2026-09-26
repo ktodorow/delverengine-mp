@@ -109,6 +109,56 @@ public class NativeItemCatalogueTest {
     }
 
     @Test
+    public void arrowRecoveredFromMonsterMaterializesFromNativeAmmoCatalogue() {
+        assertEquals("fb80dc5bb5436d3ffb436c5a9434ab52f13875ee5007506dc2da32cffb887b73",
+                assertRecoveredAmmoMaterializes("Arrow", 73, "ARROW", "item"));
+    }
+
+    @Test
+    public void recoveredAmmoUsesNativeVariantNameTextureAtlasAndStackType() {
+        assertRecoveredAmmoMaterializes("Test Bolt", 92, "BOLT", "test-ammo");
+    }
+
+    private String assertRecoveredAmmoMaterializes(String name, int texture, String stackType,
+            String atlas) {
+        StringManager.localizedStrings.put("items.ItemStack.defaultNameText",
+                new LocalizedString("Arrows", ""));
+        com.interrupt.dungeoneer.entities.projectiles.Missile arrow =
+                new com.interrupt.dungeoneer.entities.projectiles.Missile();
+        arrow.name = name;
+        arrow.tex = texture;
+        arrow.stackType = stackType;
+        arrow.spriteAtlas = atlas;
+        com.interrupt.dungeoneer.entities.items.ItemStack ammunition =
+                new com.interrupt.dungeoneer.entities.items.ItemStack(arrow, 12, stackType);
+        com.interrupt.managers.ItemManager manager = new com.interrupt.managers.ItemManager();
+        manager.junk = new com.badlogic.gdx.utils.Array<com.interrupt.dungeoneer.entities.Item>();
+        manager.junk.add(ammunition);
+
+        com.interrupt.dungeoneer.entities.Monster worm = new com.interrupt.dungeoneer.entities.Monster();
+        arrow.addArrowLootToMonster(worm);
+        arrow.addArrowLootToMonster(worm);
+        assertEquals(1, worm.loot.size);
+        DirectConnectItemController.ItemDescription dropped =
+                new DirectConnectItemController(null).describe(worm.loot.first());
+
+        Game client = catalogueClient(manager, new PhysicalItemState(7L, 1L,
+                dropped.templateId, null, 1, 1, 0, dropped.properties));
+        assertEquals("Recovered arrow stack missing from Client world", 1, client.level.entities.size);
+        com.interrupt.dungeoneer.entities.items.ItemStack recovered =
+                (com.interrupt.dungeoneer.entities.items.ItemStack)client.level.entities.first();
+        assertEquals(name, recovered.name);
+        assertEquals(texture, recovered.tex);
+        assertEquals(atlas, recovered.spriteAtlas);
+        assertEquals(2, recovered.count);
+        assertEquals(stackType, recovered.stackType);
+        assertTrue(recovered.item instanceof com.interrupt.dungeoneer.entities.projectiles.Missile);
+        assertEquals(name, recovered.item.name);
+        assertEquals(texture, recovered.item.tex);
+        return dropped.templateId;
+    }
+
+    @Test
     public void generatedQuestItemMaterializesWithoutExistingOnInitialFloor() {
         com.interrupt.dungeoneer.entities.items.QuestItem orb =
                 new com.interrupt.dungeoneer.entities.items.QuestItem();
@@ -139,6 +189,7 @@ public class NativeItemCatalogueTest {
                     new MovementEntityDescriptor(1L, new NetworkEntityId(2L),
                             new ParticipantId("campaign-slot-2"), 2, "Client", "humanoid-2"));
             if(method.getName().equals("getPhysicalItems")) return Collections.singletonList(state);
+            if(method.getName().equals("failNativePresentation")) throw new AssertionError(args[0]);
             if(method.getReturnType() == List.class) return Collections.emptyList();
             if(method.getReturnType() == int.class) return 0;
             if(method.getReturnType() == boolean.class) return false;

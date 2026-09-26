@@ -64,6 +64,12 @@ task runDirectClient(dependsOn: classes, type: JavaExec) {
     if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
     if(project.hasProperty("ownedCopy")) args "--owned-copy=" + project.property("ownedCopy")
     if(project.hasProperty("devTools")) args "--dev-tools"
+    if(project.hasProperty("networkSimulation")) {
+        if(project.property("networkSimulation") != "gate" || project.findProperty("devTools") != "true") {
+            throw new GradleException("Use -PnetworkSimulation=gate with -PdevTools=true on Client only.")
+        }
+        systemProperty "delver.networkSimulation", "gate"
+    }
 }
 
 task discoverPrivateSessions(dependsOn: classes, type: JavaExec) {

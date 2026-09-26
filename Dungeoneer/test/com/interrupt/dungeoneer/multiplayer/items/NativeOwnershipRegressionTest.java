@@ -21,6 +21,33 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class NativeOwnershipRegressionTest {
+    @Test public void looseArrowConvertsToInventoryStackAndAcceptsLaterHostMerge() throws Exception {
+        com.interrupt.dungeoneer.entities.projectiles.Missile arrow =
+                new com.interrupt.dungeoneer.entities.projectiles.Missile();
+        arrow.name = "Arrow";
+        String loose = controller.rememberTemplate(arrow);
+        String stacked = controller.rememberTemplate(arrow.createRecoveredStack());
+        states.add(new PhysicalItemState(1, 1, loose, null, 1, 1, 0));
+        this.<Map<Long, Item>>field("nativeItems").put(1L, arrow);
+        this.<Map<Item, Long>>field("itemIds").put(arrow, 1L);
+        game.level.entities.add(arrow);
+        controller.prepare(game);
+        states.set(0, new PhysicalItemState(1, 2, stacked, owner, 1, 1, 0));
+        controller.prepare(game);
+        Item item = game.player.inventory.get(0);
+        assertTrue(item instanceof com.interrupt.dungeoneer.entities.items.ItemStack);
+        assertFalse(arrow.isActive);
+        assertEquals(1L, controller.physicalIdentity(item));
+        states.set(0, new PhysicalItemState(1, 3, stacked, owner, 1, 1, 0,
+                new ItemProperties(2, 1, "", "", 4)));
+        controller.prepare(game);
+        controller.update(game);
+        assertEquals(4, ((com.interrupt.dungeoneer.entities.items.ItemStack)item).count);
+        assertFalse(requests.contains(ItemAction.SPEND));
+        assertFalse(requests.contains(ItemAction.CONSUME));
+        assertTrue(compatibilityFailures.isEmpty());
+    }
+
     private final ParticipantId owner = new ParticipantId("alpha");
     private final List<PhysicalItemState> states = new ArrayList<>();
     private final List<ItemAction> requests = new ArrayList<>();

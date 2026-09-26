@@ -9,6 +9,50 @@ import static org.junit.Assert.*;
 import static com.interrupt.dungeoneer.multiplayer.items.AuthoritativeItemWorld.Outcome.*;
 
 public class AuthoritativeItemWorldTest {
+    @Test public void ammoPickupMergesWithFullBackpackAndCannotBeCreditedTwice() {
+        world.registerParticipant(alpha.getParticipantId(), 1);
+        PhysicalItemState bundle = world.spawn("arrows", alpha.getParticipantId(), 1, 1, 0,
+                new ItemProperties(2, 1, "", "", 8));
+        world.registerStack(bundle.entityId, "ARROW", "arrows");
+        PhysicalItemState loose = world.spawn("loose-arrow", null, 1, 1, 0);
+        world.registerStack(loose.entityId, "arrow", "recovered-arrows");
+        assertEquals(ACCEPTED, request(alpha, 1, ItemAction.PICKUP, loose.entityId));
+        assertEquals(9, world.get(bundle.entityId).properties.quantity);
+        assertTrue(world.get(loose.entityId).consumed);
+        assertEquals(1, world.inventory(alpha.getParticipantId()).size());
+        assertEquals(DUPLICATE, request(alpha, 1, ItemAction.PICKUP, loose.entityId));
+        assertEquals(UNKNOWN_ENTITY, request(beta, 1, ItemAction.PICKUP, loose.entityId));
+        assertEquals(9, world.get(bundle.entityId).properties.quantity);
+        assertEquals(ACCEPTED, request(alpha, 2, ItemAction.DROP, bundle.entityId));
+        assertEquals(ACCEPTED, request(beta, 2, ItemAction.PICKUP, bundle.entityId));
+        assertEquals(9, world.inventory(beta.getParticipantId()).get(0).properties.quantity);
+        assertTrue(world.spendNativeUnit(beta.getParticipantId(), bundle.entityId));
+        assertEquals(8, world.get(bundle.entityId).properties.quantity);
+    }
+
+    @Test public void firstLooseArrowBecomesBundleAndDifferentStackTypesStaySeparate() {
+        PhysicalItemState loose = world.spawn("loose-arrow", null, 1, 1, 0);
+        world.registerStack(loose.entityId, "ARROW", "recovered-arrows");
+        assertEquals(ACCEPTED, request(alpha, 1, ItemAction.PICKUP, loose.entityId));
+        assertEquals("recovered-arrows", world.get(loose.entityId).templateId);
+        PhysicalItemState bolt = world.spawn("bolt", null, 1, 1, 0);
+        world.registerStack(bolt.entityId, "BOLT", "bolts");
+        assertEquals(ACCEPTED, request(alpha, 2, ItemAction.PICKUP, bolt.entityId));
+        assertEquals(2, world.inventory(alpha.getParticipantId()).size());
+    }
+
+    @Test public void stackOverflowRejectsWithoutLosingEitherPhysicalItem() {
+        world.registerParticipant(alpha.getParticipantId(), 1);
+        PhysicalItemState bundle = world.spawn("arrows", alpha.getParticipantId(), 1, 1, 0,
+                new ItemProperties(2, 1, "", "", 1000000));
+        world.registerStack(bundle.entityId, "ARROW", "arrows");
+        PhysicalItemState loose = world.spawn("arrow", null, 1, 1, 0);
+        world.registerStack(loose.entityId, "ARROW", "arrows");
+        assertEquals(INVENTORY_FULL, request(alpha, 1, ItemAction.PICKUP, loose.entityId));
+        assertSame(loose, world.get(loose.entityId));
+        assertEquals(1000000, world.get(bundle.entityId).properties.quantity);
+    }
+
     private final AuthoritativeItemWorld world = new AuthoritativeItemWorld();
     private final SharedPartyProgression progression = new SharedPartyProgression();
     private final ParticipantContext alpha = participant("alpha", 2);

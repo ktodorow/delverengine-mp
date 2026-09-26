@@ -77,6 +77,72 @@ public class DirectConnectIntegrationTest {
 
     private int campaignStoreCounter;
 
+    @Test public void fullFloorCombatRecoversThroughGateConditionsAndMalformedPeer() throws Exception {
+        String previous = System.getProperty(DirectConnectNetworkSimulation.PROPERTY);
+        System.setProperty(DirectConnectNetworkSimulation.PROPERTY, "gate");
+        DirectConnectCompatibility compatibility = compatibility("full-floor-gate");
+        HostFixture fixture = host(compatibility, 2, "full-floor-gate");
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient client = null, returning = null;
+        try {
+            client = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
+                    0, tokens, compatibility);
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            for(int i = 1; i <= CombatSnapshot.MAX_MONSTERS; i++) {
+                fixture.host.bindNativeMonster(i == 1 ? AuthoritativeCombatEncounter.SHARED_MONSTER_ID
+                                : AuthoritativeCombatEncounter.monsterTargetId(i),
+                        12, 24, 4f, 6f, 0.5f);
+            }
+            String last = AuthoritativeCombatEncounter.monsterTargetId(64);
+            assertEquals(64, fixture.host.getCombatSnapshot().getMonsters().size());
+            assertNotNull(fixture.host.getCombatSnapshot().getCombatant(last));
+            awaitCombatHealth(client, last, 12);
+            assertEquals(64, client.getCombatSnapshot().getMonsters().size());
+
+            // A malformed separate connection must not stop the listen server or healthy peer.
+            try(Socket malformed = new Socket("127.0.0.1", fixture.host.getBoundPort())) {
+                malformed.setSoTimeout((int)TIMEOUT_MILLIS);
+                DataOutputStream bytes = new DataOutputStream(malformed.getOutputStream());
+                bytes.writeInt(13);
+                bytes.writeInt(DirectConnectProtocol.MAGIC);
+                bytes.writeByte(DirectConnectWire.COMBAT_STATE_PART);
+                bytes.writeInt(DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES + 1);
+                bytes.writeInt(0);
+                bytes.flush();
+                Message rejection = readTcp(malformed);
+                assertTrue(rejection instanceof ServerRejected);
+                assertEquals(DirectConnectWire.RejectCode.MALFORMED_HANDSHAKE,
+                        ((ServerRejected)rejection).code);
+                assertEquals(-1, malformed.getInputStream().read());
+            }
+            fixture.host.synchronizeNativeMonster(last, 7, 24, 5f, 6f, 0.5f);
+            awaitCombatHealth(client, last, 7);
+            fixture.host.synchronizeNativeMonster(last, 0, 24, 5f, 6f, 0.5f, true);
+            awaitCombatHealth(client, last, 0);
+            assertTrue(client.getCombatSnapshot().getMonster(last).isGibbed());
+
+            client.close();
+            returning = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
+                    0, tokens, compatibility);
+            awaitPhase(returning, DirectConnectPhase.READY);
+            assertEquals(64, returning.getCombatSnapshot().getMonsters().size());
+            assertEquals(0, combatHealth(returning, last));
+            assertTrue(returning.getCombatSnapshot().getMonster(last).isGibbed());
+            assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
+        }
+        finally {
+            if(client != null) client.close();
+            if(returning != null) returning.close();
+            fixture.close();
+            if(previous == null) System.clearProperty(DirectConnectNetworkSimulation.PROPERTY);
+            else System.setProperty(DirectConnectNetworkSimulation.PROPERTY, previous);
+        }
+    }
+
     @Test public void nativeParticipantDamageUsesResistanceStatusAndHealingForBothRoles() throws Exception {
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<String, LocalizedString>();
@@ -1119,6 +1185,111 @@ public class DirectConnectIntegrationTest {
             com.interrupt.dungeoneer.game.Game.hud = previousHud;
             StringManager.localizedStrings = previousStrings;
         }
+    }
+
+    @Test public void clientRecoveredArrowsMergeIntoNativeStackWithoutLosingAmmo() throws Exception {
+        com.interrupt.dungeoneer.game.Game previousGame = com.interrupt.dungeoneer.game.Game.instance;
+        com.badlogic.gdx.Application previousApp = com.badlogic.gdx.Gdx.app;
+        com.interrupt.dungeoneer.game.Options previousOptions = com.interrupt.dungeoneer.game.Options.instance;
+        com.interrupt.managers.HUDManager previousHudManager =
+                com.interrupt.dungeoneer.game.Game.hudManager;
+        com.interrupt.dungeoneer.ui.Hud previousHud = com.interrupt.dungeoneer.game.Game.hud;
+        HashMap<String, LocalizedString> previousStrings = StringManager.localizedStrings;
+        DirectConnectCompatibility compatibility = compatibility("native-ammo-stacking");
+        HostFixture fixture = host(compatibility, 2, "native-ammo-stacking");
+        DirectConnectClient client = null;
+        try {
+            com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{com.badlogic.gdx.Application.class},
+                    (proxy, method, args) -> null);
+            com.interrupt.dungeoneer.game.Options.instance = new com.interrupt.dungeoneer.game.Options();
+            com.interrupt.dungeoneer.game.Game.hudManager = new com.interrupt.managers.HUDManager();
+            com.interrupt.dungeoneer.game.Game.hudManager.quickSlots =
+                    new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() { } };
+            com.interrupt.dungeoneer.game.Game.hudManager.backpack =
+                    new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() { } };
+            com.interrupt.dungeoneer.game.Game.hud =
+                    new com.interrupt.dungeoneer.ui.Hud() {
+                        @Override public void refresh() { }
+                        @Override public void refreshEquipLocations() { }
+                    };
+            StringManager.localizedStrings = new HashMap<String, LocalizedString>();
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            awaitMovementSnapshots(fixture.host, 1);
+            com.interrupt.dungeoneer.game.Game hostGame = economyGame(nativeWeaponShop());
+            com.interrupt.dungeoneer.entities.projectiles.Missile arrow =
+                    new com.interrupt.dungeoneer.entities.projectiles.Missile();
+            arrow.name = "Arrow"; arrow.tex = 73; arrow.stackType = "ARROW";
+            com.interrupt.dungeoneer.entities.items.ItemStack starter = arrow.createRecoveredStack();
+            starter.name = "Arrows"; starter.count = 8;
+            hostGame.player.inventory.set(0, starter);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController hostItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            com.interrupt.dungeoneer.game.Game.instance = hostGame;
+            hostItems.prepare(hostGame);
+            ParticipantId remote = new ParticipantId("campaign-slot-2");
+            com.interrupt.dungeoneer.game.Game clientGame = economyGame(nativeWeaponShop());
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController clientItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client);
+            clientItems.rememberTemplate(starter);
+            com.interrupt.dungeoneer.game.Game.instance = clientGame;
+            clientItems.prepare(clientGame);
+
+            // Both loose fired arrows and singular monster-loot bundles merge into original Arrows.
+            for(int pickup = 0; pickup < 2; pickup++) {
+                com.interrupt.dungeoneer.entities.Item recovered = pickup == 0 ? arrow : arrow.createRecoveredStack();
+                if(recovered instanceof com.interrupt.dungeoneer.entities.items.ItemStack)
+                    ((com.interrupt.dungeoneer.entities.items.ItemStack)recovered).count = 2;
+                MovementEntityState remotePosition = fixture.host.getMovementSnapshots().get(0).getEntities().get(1);
+                recovered.x = remotePosition.getX(); recovered.y = remotePosition.getY(); recovered.z = remotePosition.getZ();
+                recovered.isActive = true;
+                hostGame.level.entities.add(recovered);
+                com.interrupt.dungeoneer.game.Game.instance = hostGame;
+                hostItems.prepare(hostGame);
+                long pickedId = hostItems.physicalIdentity(recovered);
+                assertTrue(pickedId > 0);
+                client.submitItemAction(pickup + 1L, ItemAction.PICKUP, pickedId, 0, 0);
+                long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+                int expected = pickup == 0 ? 9 : 11;
+                while(System.currentTimeMillis() < deadline) {
+                    com.interrupt.dungeoneer.game.Game.instance = hostGame;
+                    hostItems.prepare(hostGame); hostItems.update(hostGame);
+                    com.interrupt.dungeoneer.game.Game.instance = clientGame;
+                    clientItems.prepare(clientGame); clientItems.update(clientGame);
+                    java.util.List<PhysicalItemState> owned = fixture.host.getItemWorld().inventory(remote);
+                    if(owned.size() == 1 && owned.get(0).properties.quantity == expected
+                            && nativeAmmoCount(clientGame.player) == expected) break;
+                    Thread.sleep(10L);
+                }
+                assertEquals("Recovered arrows must merge, not occupy another slot", 1,
+                        fixture.host.getItemWorld().inventory(remote).size());
+                assertEquals(expected, fixture.host.getItemWorld().inventory(remote).get(0).properties.quantity);
+                assertEquals(expected, nativeAmmoCount(clientGame.player));
+                assertTrue("Recovered physical identity must be tombstoned after merge",
+                        fixture.host.getItemWorld().get(pickedId).consumed);
+            }
+        }
+        finally {
+            if(client != null) client.close();
+            fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previousGame;
+            com.badlogic.gdx.Gdx.app = previousApp;
+            com.interrupt.dungeoneer.game.Options.instance = previousOptions;
+            com.interrupt.dungeoneer.game.Game.hudManager = previousHudManager;
+            com.interrupt.dungeoneer.game.Game.hud = previousHud;
+            StringManager.localizedStrings = previousStrings;
+        }
+    }
+
+    private static int nativeAmmoCount(com.interrupt.dungeoneer.entities.Player player) {
+        int count = 0;
+        for(com.interrupt.dungeoneer.entities.Item item : player.inventory) {
+            if(item instanceof com.interrupt.dungeoneer.entities.items.ItemStack)
+                count += ((com.interrupt.dungeoneer.entities.items.ItemStack)item).count;
+        }
+        return count;
     }
 
     @Test public void clientNativeGoldPickupIsDividedByHostAndConvergesOnBothPeers() throws Exception {
@@ -2521,6 +2692,49 @@ public class DirectConnectIntegrationTest {
         finally {
             if(client != null) client.close();
             fixture.close();
+        }
+    }
+
+    @Test public void gateConditionsPreserveBuildAndContentRejectionReasons() throws Exception {
+        String previous = System.getProperty(DirectConnectNetworkSimulation.PROPERTY);
+        System.setProperty(DirectConnectNetworkSimulation.PROPERTY, "gate");
+        try { explicitBuildAndContentMismatchesAreRejectedBeforeSlotClaim(); }
+        finally {
+            if(previous == null) System.clearProperty(DirectConnectNetworkSimulation.PROPERTY);
+            else System.setProperty(DirectConnectNetworkSimulation.PROPERTY, previous);
+        }
+    }
+
+    @Test public void gateConditionsExplainReconnectAfterGraceExpires() throws Exception {
+        String previous = System.getProperty(DirectConnectNetworkSimulation.PROPERTY);
+        System.setProperty(DirectConnectNetworkSimulation.PROPERTY, "gate");
+        DirectConnectCompatibility compatibility = compatibility("late-reconnect");
+        HostFixture fixture = host(compatibility, 2, "late-reconnect",
+                temporaryFolder.newFolder("late-reconnect-store"), 8L);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient client = null, returning = null;
+        try {
+            client = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
+                    0, tokens, compatibility);
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            fixture.host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            client.close();
+            awaitPartyState(fixture.host, 2, PartyMemberState.DISCONNECTED);
+            returning = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
+                    0, tokens, compatibility);
+            awaitPhase(returning, DirectConnectPhase.REJECTED);
+            assertTrue(returning.getStatus().getMessage().contains("grace"));
+            assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
+        }
+        finally {
+            if(client != null) client.close();
+            if(returning != null) returning.close();
+            fixture.close();
+            if(previous == null) System.clearProperty(DirectConnectNetworkSimulation.PROPERTY);
+            else System.setProperty(DirectConnectNetworkSimulation.PROPERTY, previous);
         }
     }
 

@@ -587,15 +587,19 @@ public class Missile extends Item implements Directional {
 
         // Don't add twice
         if (!addedArrow) {
-            ItemStack stack = new ItemStack(this, 1, name);
-            stack.tex = tex;
-            stack.spriteAtlas = spriteAtlas;
-            stack.stackType = stackType;
-            stack.name = name;
-
-            m.loot.add(stack);
-            stack.collidesWith = CollidesWith.staticOnly;
+            m.loot.add(createRecoveredStack());
         }
+    }
+
+    /** Native bundle used when a surviving arrow is recovered from monster loot. */
+    public ItemStack createRecoveredStack() {
+        ItemStack stack = new ItemStack(this, 1, name);
+        stack.tex = tex;
+        stack.spriteAtlas = spriteAtlas;
+        stack.stackType = stackType;
+        stack.name = name;
+        stack.collidesWith = CollidesWith.staticOnly;
+        return stack;
     }
 
     @Override

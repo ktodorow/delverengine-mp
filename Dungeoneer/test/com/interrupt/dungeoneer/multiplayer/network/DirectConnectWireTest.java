@@ -53,6 +53,102 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class DirectConnectWireTest {
+    @Test public void malformedCombatFragmentsAreRejectedBeforePublishingState() {
+        assertBadFragments(fragment(16385, 0, 1011)); // Allocation bound.
+        assertBadFragments(fragment(2048, 1, 1011)); // No first part.
+        assertBadFragments(fragment(2048, 0, 0)); // Empty part.
+        assertBadFragments(fragment(2048, 0, 1011), fragment(2048, 0, 1011)); // Duplicate.
+        assertBadFragments(fragment(2048, 0, 1011), fragment(2048, 1012, 1011)); // Gap.
+        assertBadFragments(fragment(2048, 0, 1011), fragment(2049, 1011, 1011)); // Changed total.
+        ByteBuf unrelated = fragment(2048, 0, 1011);
+        unrelated.setByte(21, 1); // ClientHello inside fragment instead of combat state.
+        assertBadFragments(unrelated);
+        ByteBuf interrupted = Unpooled.buffer();
+        interrupted.writeInt(5).writeInt(DirectConnectProtocol.MAGIC).writeByte(1);
+        assertBadFragments(fragment(2048, 0, 1011), interrupted);
+    }
+
+    private ByteBuf fragment(int total, int offset, int size) {
+        ByteBuf bytes = Unpooled.buffer();
+        bytes.writeInt(13 + size).writeInt(DirectConnectProtocol.MAGIC)
+                .writeByte(DirectConnectWire.COMBAT_STATE_PART).writeInt(total).writeInt(offset);
+        if(size >= 5) bytes.writeInt(DirectConnectProtocol.MAGIC).writeByte(27).writeZero(size - 5);
+        else bytes.writeZero(size);
+        return bytes;
+    }
+
+    private void assertBadFragments(ByteBuf... frames) {
+        EmbeddedChannel channel = new EmbeddedChannel();
+        DirectConnectWire.configureTcp(channel.pipeline());
+        try {
+            for(ByteBuf frame : frames) channel.writeInbound(frame);
+            fail("Malformed fragment accepted");
+        }
+        catch(io.netty.handler.codec.DecoderException expected) {
+            assertNull(channel.readInbound());
+        }
+        finally {
+            for(ByteBuf frame : frames) if(frame.refCnt() > 0) frame.release();
+            channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void fullFloorCombatStateFitsBoundedTcpFrames() {
+        assertFullFloorRoundTrip(false);
+        assertFullFloorRoundTrip(true);
+    }
+
+    private void assertFullFloorRoundTrip(boolean maximumIds) {
+        List<MonsterSnapshot> monsters = new ArrayList<>();
+        List<CombatantSnapshot> actors = new ArrayList<>();
+        String target = maximumIds ? repeat('t') : "participant:campaign-slot-2";
+        for(int slot = 1; slot <= 4; slot++) actors.add(new CombatantSnapshot(
+                "participant:campaign-slot-" + slot, CombatantKind.PARTICIPANT, 8, 8));
+        for(int i = 0; i < CombatSnapshot.MAX_MONSTERS; i++) {
+            String id = maximumIds ? String.format("%064d", i + 1) : "monster:" + (i + 1);
+            monsters.add(new MonsterSnapshot(id, target, i, 2f, 0.5f, i == 0));
+            actors.add(new CombatantSnapshot(id, CombatantKind.MONSTER, i == 0 ? 0 : 12, 24));
+        }
+        EmbeddedChannel outbound = new EmbeddedChannel();
+        EmbeddedChannel inbound = new EmbeddedChannel();
+        DirectConnectWire.configureTcp(outbound.pipeline());
+        DirectConnectWire.configureTcp(inbound.pipeline());
+        try {
+            assertTrue(outbound.writeOutbound(new DirectConnectWire.CombatStateMessage(
+                    "session", new CombatSnapshot(4L, 61L, monsters, actors))));
+            ByteBuf framed = Unpooled.buffer();
+            ByteBuf bytes;
+            while((bytes = outbound.readOutbound()) != null) {
+                framed.writeBytes(bytes);
+                bytes.release();
+            }
+            try {
+                while(framed.isReadable()) {
+                    int length = framed.getInt(framed.readerIndex());
+                    assertTrue(length > 0 && length <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES);
+                    inbound.writeInbound(framed.readRetainedSlice(length + 4));
+                    if(framed.isReadable()) assertNull("Partial snapshot escaped", inbound.readInbound());
+                }
+            }
+            finally { framed.release(); }
+            DirectConnectWire.CombatStateMessage state = inbound.readInbound();
+            assertNotNull(state);
+            assertEquals(64, state.snapshot.getMonsters().size());
+            assertEquals(68, state.snapshot.getCombatants().size());
+            String first = maximumIds ? String.format("%064d", 1) : "monster:1";
+            String last = maximumIds ? String.format("%064d", 64) : "monster:64";
+            assertEquals(target, state.snapshot.getMonster(last).getTargetId());
+            assertTrue(state.snapshot.getMonster(first).isGibbed());
+            assertEquals(12, state.snapshot.getCombatant(last).getHealth());
+            assertNull(inbound.readInbound());
+        }
+        finally {
+            outbound.finishAndReleaseAll();
+            inbound.finishAndReleaseAll();
+        }
+    }
+
     @Test
     public void framedHelloRoundTripsThroughExplicitCodec() {
         DirectConnectCompatibility compatibility =

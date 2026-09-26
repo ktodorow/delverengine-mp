@@ -224,6 +224,9 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     private void start() {
+        if(DirectConnectNetworkSimulation.enabled()) {
+            System.out.println("[Network simulation] Client: +110 ms RTT on TCP/UDP; 2% UDP loss each way.");
+        }
         Bootstrap tcp = new Bootstrap();
         tcp.group(networkGroup)
                 .channel(NioSocketChannel.class)
@@ -234,6 +237,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
                     @Override
                     protected void initChannel(SocketChannel channel) {
                         DirectConnectWire.configureTcp(channel.pipeline());
+                        if(DirectConnectNetworkSimulation.enabled()) channel.pipeline().addLast(
+                                "gateNetworkSimulation", new DirectConnectNetworkSimulation(false));
                         channel.pipeline().addLast("directConnectClient", new ClientTcpHandler());
                     }
                 });
@@ -360,6 +365,12 @@ public final class DirectConnectClient implements DirectConnectPeer {
                 .channel(NioDatagramChannel.class)
                 .option(ChannelOption.SO_BROADCAST, false)
                 .handler(new SimpleChannelInboundHandler<DatagramPacket>() {
+                    @Override
+                    public void handlerAdded(ChannelHandlerContext context) {
+                        if(DirectConnectNetworkSimulation.enabled()) context.pipeline().addBefore(
+                                context.name(), "gateNetworkSimulation", new DirectConnectNetworkSimulation(true));
+                    }
+
                     @Override
                     protected void channelRead0(ChannelHandlerContext context,
                             DatagramPacket packet) {

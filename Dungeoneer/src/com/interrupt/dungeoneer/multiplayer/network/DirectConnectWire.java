@@ -51,10 +51,11 @@ import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.codec.LengthFieldPrepender;
-import io.netty.handler.codec.MessageToByteEncoder;
+import io.netty.handler.codec.MessageToMessageEncoder;
 import io.netty.handler.codec.MessageToMessageDecoder;
 
 import java.nio.ByteBuffer;
@@ -117,6 +118,11 @@ final class DirectConnectWire {
     private static final int REVIVE_INTENT = 49;
     private static final int PARTY_WIPE = 50;
     private static final int NATIVE_MONSTER_SPAWN = 51;
+    // TCP-only fragments of one complete combat snapshot; never partial gameplay state.
+    static final int COMBAT_STATE_PART = 52;
+    private static final int COMBAT_PART_HEADER_BYTES = 13; // magic, type, total, offset
+    private static final int COMBAT_PART_BYTES =
+            DirectConnectProtocol.MAX_TCP_FRAME_BYTES - COMBAT_PART_HEADER_BYTES;
 
     private DirectConnectWire() { }
 
@@ -2638,21 +2644,90 @@ final class DirectConnectWire {
     }
 
     private static final class TcpMessageDecoder extends MessageToMessageDecoder<ByteBuf> {
+        private byte[] combatBytes;
+        private int combatOffset;
+
         @Override
         protected void decode(io.netty.channel.ChannelHandlerContext context, ByteBuf input,
                 List<Object> output) throws Exception {
-            output.add(DirectConnectWire.decode(input));
+            int start = input.readerIndex();
+            boolean part = input.readableBytes() >= 5
+                    && input.getInt(start) == DirectConnectProtocol.MAGIC
+                    && input.getUnsignedByte(start + 4) == COMBAT_STATE_PART;
+            if(!part) {
+                if(combatBytes != null) throw new ProtocolException("Interrupted combat snapshot.");
+                output.add(DirectConnectWire.decode(input));
+                return;
+            }
+            requireReadable(input, COMBAT_PART_HEADER_BYTES, "combat fragment header");
+            input.skipBytes(5);
+            int total = input.readInt();
+            int offset = input.readInt();
+            int size = input.readableBytes();
+            if(total <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES
+                    || total > DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES
+                    || offset < 0 || offset >= total
+                    || size != Math.min(COMBAT_PART_BYTES, total - offset)
+                    || (combatBytes == null ? offset != 0
+                            : total != combatBytes.length || offset != combatOffset)) {
+                throw new ProtocolException("Malformed or out-of-order combat fragment.");
+            }
+            if(combatBytes == null) {
+                // Reject fragments of unrelated messages before allocating the assembly.
+                if(size < 5 || input.getInt(input.readerIndex()) != DirectConnectProtocol.MAGIC
+                        || input.getUnsignedByte(input.readerIndex() + 4) != COMBAT_STATE) {
+                    throw new ProtocolException("Only combat snapshots may be fragmented.");
+                }
+                combatBytes = new byte[total];
+                combatOffset = 0;
+            }
+            input.readBytes(combatBytes, combatOffset, size);
+            combatOffset += size;
+            if(combatOffset == total) {
+                ByteBuf assembled = Unpooled.wrappedBuffer(combatBytes);
+                combatBytes = null;
+                combatOffset = 0;
+                try { output.add(DirectConnectWire.decode(assembled)); }
+                finally { assembled.release(); }
+            }
+        }
+
+        @Override
+        public void channelInactive(io.netty.channel.ChannelHandlerContext context) throws Exception {
+            combatBytes = null;
+            combatOffset = 0;
+            super.channelInactive(context);
         }
     }
 
-    private static final class TcpMessageEncoder extends MessageToByteEncoder<Message> {
+    private static final class TcpMessageEncoder extends MessageToMessageEncoder<Message> {
         @Override
         protected void encode(io.netty.channel.ChannelHandlerContext context, Message message,
-                ByteBuf output) throws Exception {
-            DirectConnectWire.encode(message, output);
-            if(output.readableBytes() > DirectConnectProtocol.MAX_TCP_FRAME_BYTES) {
-                throw new ProtocolException("TCP frame exceeded protocol size bound.");
+                List<Object> output) throws Exception {
+            ByteBuf encoded = context.alloc().buffer(128);
+            try {
+                DirectConnectWire.encode(message, encoded);
+                int total = encoded.readableBytes();
+                if(total <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES) {
+                    output.add(encoded.retain());
+                    return;
+                }
+                if(!(message instanceof CombatStateMessage)
+                        || total > DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES) {
+                    throw new ProtocolException("TCP frame exceeded protocol size bound.");
+                }
+                for(int offset = 0; offset < total; offset += COMBAT_PART_BYTES) {
+                    int size = Math.min(COMBAT_PART_BYTES, total - offset);
+                    ByteBuf part = context.alloc().buffer(COMBAT_PART_HEADER_BYTES + size);
+                    part.writeInt(DirectConnectProtocol.MAGIC);
+                    part.writeByte(COMBAT_STATE_PART);
+                    part.writeInt(total);
+                    part.writeInt(offset);
+                    part.writeBytes(encoded, offset, size);
+                    output.add(part);
+                }
             }
+            finally { encoded.release(); }
         }
     }
 }
