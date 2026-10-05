@@ -228,7 +228,9 @@ public class Corpse extends Entity {
 		this.networkReplica = networkReplica;
 		if(networkReplica) {
 			networkOriginalDynamic = isDynamic;
-			isDynamic = false;
+			// Replica tick never runs physics. Staying dynamic keeps the native lightmap: a
+			// non-dynamic sprite is drawn as static, unlit and bright, unlike Host's corpse.
+			xa = ya = za = 0f;
 			networkStateInitialized = false;
 			networkX = x;
 			networkY = y;
@@ -267,6 +269,13 @@ public class Corpse extends Entity {
         if(!networkReplica) return;
         if(recovery) { hidden = true; isDynamic = false; isSolid = false; }
         else gib();
+    }
+
+    /** Cold-resume outcome; hides corpse without replaying gib particles or decals. */
+    public void restoreAuthoritativeGib() {
+        hidden = true;
+        isDynamic = false;
+        isSolid = false;
     }
 
 	public void gib() {

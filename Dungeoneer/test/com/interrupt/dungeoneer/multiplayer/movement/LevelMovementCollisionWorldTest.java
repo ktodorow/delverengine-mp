@@ -37,6 +37,34 @@ public class LevelMovementCollisionWorldTest {
     }
 
     @Test
+    public void hostCopyTakesWaterAndClosedTilesFromTheInitializedLiveFloor() {
+        // A floor read from its file has default tile rules until Level.init; Host movement keeps
+        // such a copy, so without the live floor's rules it has no water and no closed tiles.
+        Level hostCopy = flatFloor(), live = flatFloor();
+        com.interrupt.dungeoneer.tiles.TileData water = new com.interrupt.dungeoneer.tiles.TileData();
+        water.isWater = true;
+        live.tiles[2 + 2 * live.width].data = water;
+        live.tiles[4 + 2 * live.width].blockMotion = true;
+        LevelMovementCollisionWorld world = new LevelMovementCollisionWorld(hostCopy);
+        assertTrue(Float.isNaN(world.getWaterSurfaceZ(2.5f, 2.5f, 0f)));
+
+        world.adoptTileRules(live);
+
+        assertEquals(0f, world.getWaterSurfaceZ(2.5f, 2.5f, -0.4f), 0.0001f);
+        assertEquals("Native water floor sits 0.4 lower", -0.4f,
+                world.getTileFloorZ(2.5f, 2.5f, 0f), 0.0001f);
+        assertFalse(world.canOccupy(4.5f, 2.5f, 0f));
+    }
+
+    private static Level flatFloor() {
+        Level level = new Level(8, 5);
+        for(int index = 0; index < level.tiles.length; index++) level.tiles[index] = new Tile();
+        level.playerStartX = 1;
+        level.playerStartY = 2;
+        return level;
+    }
+
+    @Test
     public void concurrentCeilingQueryCannotLiftAuthoritativeFloorAboveMap() throws Exception {
         checkConcurrentCeilingQuery(false);
     }

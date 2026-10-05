@@ -1783,7 +1783,7 @@ public class GlRenderer {
 		int firstChat = Math.max(0, chatHistory.size() - 4);
 		for(int index = firstChat; index < chatHistory.size(); index++) {
 			PartyChatMessage message = chatHistory.get(index);
-			drawText(message.getNickname() + ": " + message.getText(), left, y,
+			drawText(message.getDisplayText(), left, y,
 					fontSize, Color.WHITE, Color.BLACK);
 			y -= uiSize * 0.25f;
 		}

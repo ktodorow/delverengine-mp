@@ -26,6 +26,7 @@ public final class DirectConnectMovementController {
             new MovementSnapshotInterpolator();
     private final Map<NetworkEntityId, RemoteAvatar> remoteAvatars =
             new LinkedHashMap<NetworkEntityId, RemoteAvatar>();
+    private final NativeMovementBodies bodies = new NativeMovementBodies();
     private long nextInputTick = 1L;
     private long lastReconciledSnapshot;
     private float inputAccumulator;
@@ -36,6 +37,7 @@ public final class DirectConnectMovementController {
     private float observedY;
     private float observedZ;
     private boolean observed;
+    private boolean jumpRequested;
     private Level attachedLevel;
 
     public DirectConnectMovementController(DirectConnectPeer peer) {
@@ -52,9 +54,10 @@ public final class DirectConnectMovementController {
         MovementEntityState authoritative = latest.getEntity(localId);
         if(authoritative == null) return false;
         player.setPosition(authoritative.getX(), authoritative.getY(), authoritative.getZ());
-        player.xa = authoritative.getVelocityX();
-        player.ya = authoritative.getVelocityY();
-        player.za = authoritative.getVelocityZ();
+        // Snapshots carry units per second; native Player velocity is per 60 Hz tick.
+        player.xa = authoritative.getVelocityX() / 60f;
+        player.ya = authoritative.getVelocityY() / 60f;
+        player.za = authoritative.getVelocityZ() / 60f;
         player.rot = authoritative.getRotation();
         nextInputTick = Math.max(nextInputTick, authoritative.getLastProcessedInputTick() + 1L);
         reconciler.reset();
@@ -78,11 +81,13 @@ public final class DirectConnectMovementController {
             // Host froze this body; unsent ticks would outrun its accepted input lead.
             unsampledDeltaX = unsampledDeltaY = unsampledDeltaZ = 0f;
             inputAccumulator = 0f;
+            jumpRequested = false;
         }
         else sampleInputs(player, input, boundedDelta);
         reconcileLocalPlayer(player);
         applyCorrection(player, boundedDelta);
         updateRemoteAvatars(game.level, boundedDelta);
+        bodies.updateParticipants(remoteAvatars.values(), peer.getCurrentMovementStates());
 
         observedX = player.x;
         observedY = player.y;
@@ -92,7 +97,13 @@ public final class DirectConnectMovementController {
 
     public void dispose() {
         detachRemoteAvatars();
+        if(attachedLevel != null && attachedLevel.movementBodies == bodies) attachedLevel.movementBodies = null;
         attachedLevel = null;
+    }
+
+    /** Native body blocking between this peer's movers and bodies other peers simulate. */
+    public NativeMovementBodies getMovementBodies() {
+        return bodies;
     }
 
     public int getRemoteAvatarCount() {
@@ -121,6 +132,10 @@ public final class DirectConnectMovementController {
     }
 
     private void sampleInputs(Player player, GameInput input, float deltaSeconds) {
+        boolean catchesInput = OverlayManager.instance.current() != null
+                && OverlayManager.instance.current().catchInput;
+        // Native jump fires on the frame it is pressed; keep it for the next input sample.
+        jumpRequested |= !catchesInput && input.isJumpPressed();
         inputAccumulator += deltaSeconds;
         int samples = Math.min(4, (int)(inputAccumulator / INPUT_STEP_SECONDS));
         if(samples <= 0) return;
@@ -133,8 +148,6 @@ public final class DirectConnectMovementController {
         unsampledDeltaY = 0f;
         unsampledDeltaZ = 0f;
 
-        boolean catchesInput = OverlayManager.instance.current() != null
-                && OverlayManager.instance.current().catchInput;
         float forward = catchesInput ? 0f
                 : (input.isMoveForwardPressed() ? 1f : 0f)
                 - (input.isMoveBackwardsPressed() ? 1f : 0f);
@@ -146,7 +159,8 @@ public final class DirectConnectMovementController {
             forward /= length;
             strafe /= length;
         }
-        boolean jump = !catchesInput && input.isJumpPressed();
+        boolean jump = jumpRequested;
+        jumpRequested = false;
 
         for(int i = 0; i < samples; i++) {
             long tick = nextInputTick++;
@@ -170,25 +184,50 @@ public final class DirectConnectMovementController {
         Reconciliation result = reconciler.reconcile(authoritative,
                 player.x, player.y, player.z);
         if(result.isSnapRequired()) {
-            player.setPosition(result.getTargetX(), result.getTargetY(),
-                    result.getTargetZ());
+            float x = result.getTargetX(), y = result.getTargetY(), z = result.getTargetZ();
+            // Replayed input can land inside a wall the Host never entered; Host's own spot is safe.
+            if(attachedLevel != null && !canStand(attachedLevel, player, x, y, z)) {
+                x = authoritative.getX();
+                y = authoritative.getY();
+                z = authoritative.getZ();
+            }
+            player.setPosition(x, y, z);
             player.xa = 0f;
             player.ya = 0f;
             player.za = 0f;
         }
     }
 
+    /**
+     * Native Player physics lifts a Player whose box overlaps a higher floor straight onto it,
+     * however high, so a correction only moves the box where native walking could: never into a
+     * wall (a push of 0.001 into a 1.4 high block put the Player on top) or a solid object.
+     */
     private void applyCorrection(Player player, float deltaSeconds) {
         CorrectionStep correction = reconciler.advance(deltaSeconds);
-        player.x += correction.getX();
-        player.y += correction.getY();
         player.z += correction.getZ();
+        Level level = attachedLevel;
+        if(correction.getX() != 0f) {
+            float x = player.x + correction.getX();
+            if(level == null || canStand(level, player, x, player.y, player.z)) player.x = x;
+        }
+        if(correction.getY() != 0f) {
+            float y = player.y + correction.getY();
+            if(level == null || canStand(level, player, player.x, y, player.z)) player.y = y;
+        }
+    }
+
+    private static boolean canStand(Level level, Player player, float x, float y, float z) {
+        return level.isFree(x, y, z, player.collision, player.getMovementStepHeight(), false, null)
+                && level.checkEntityCollision(x, y, z, player.collision, player) == null;
     }
 
     private void attachToLevel(Level level) {
         detachRemoteAvatars();
+        if(attachedLevel != null && attachedLevel.movementBodies == bodies) attachedLevel.movementBodies = null;
         interpolator.reset();
         attachedLevel = level;
+        level.movementBodies = bodies;
     }
 
     private void updateRemoteAvatars(Level level, float deltaSeconds) {

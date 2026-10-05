@@ -112,4 +112,32 @@ public final class ActorEffectsSnapshot {
         }
         return true;
     }
+
+    /** Rebuilds ongoing authoritative effects from current state without replaying start cues. */
+    public void restoreAuthoritative(Actor actor) {
+        if(actor == null || !actor.hasStatusEffectAuthority()) return;
+        actor.clearStatusEffects();
+        if(actor.statusEffects == null) {
+            actor.statusEffects = new com.badlogic.gdx.utils.Array<StatusEffect>();
+        }
+        for(NativeStatusEffectState state : effects) {
+            StatusEffect effect = state.createPresentation();
+            state.apply(effect);
+            effect.restoreMultiplayerCursor(state.instanceId, state.elapsed, state.pulses);
+            boolean particles = effect.showParticleEffect;
+            effect.showParticleEffect = false;
+            effect.onStatusBegin(actor);
+            effect.showParticleEffect = particles;
+            effect.beginPresentation(actor);
+            actor.statusEffects.add(effect);
+        }
+        actor.invisible = invisible;
+        actor.floating = floating;
+        actor.drunkMod = drunk;
+        actor.actorTimeScale = actorTimeScale;
+        if(actor instanceof com.interrupt.dungeoneer.entities.Monster && animation != null) {
+            ((com.interrupt.dungeoneer.entities.Monster)actor)
+                    .restoreAuthoritativeNativeAnimation(animation);
+        }
+    }
 }

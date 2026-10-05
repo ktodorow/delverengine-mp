@@ -57,13 +57,23 @@ public class Level {
 
     /** Render-thread native explosion authority. Never persisted with campaign content. */
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionListener nativeExplosionListener;
+	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeProjectileTargets nativeProjectileTargets;
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeDynamicListener nativeDynamicListener;
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentationListener nativeSpellPresentationListener;
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeMeleePresentationListener nativeMeleePresentationListener;
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentationListener nativeRangedPresentationListener;
+	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawnerListener nativeMonsterSpawnerListener;
+	public transient com.interrupt.dungeoneer.multiplayer.items.TriggerPresentationListener nativeTriggerPresentationListener;
 
-	/** Multiplayer only: builds this floor identically on every peer. Cleared once loadFromEditor finishes. */
+	/** Multiplayer only: builds this floor identically on every peer. Cleared after prepared build. */
 	public transient SharedFloorBuild sharedFloorBuild;
+
+	/** Host only: this floor is a Campaign Save checkpoint, loaded like a single-player save. */
+	public transient boolean restoredCampaignFloor;
+
+	/** Direct Connect: bodies simulated by another peer that still block native Player or Monster movement. */
+	public transient com.interrupt.dungeoneer.multiplayer.movement.MovementBodies movementBodies;
+	private transient Array<Entity> movementBodyCache = new Array<Entity>();
 
 
     public enum DungeonTheme {
@@ -311,7 +321,24 @@ public class Level {
 	}
 	
 	public void loadFromEditor() {
-		needsSaving = false;
+		loadPreparedLevel(false);
+	}
+
+	/** Build a preselected campaign floor without enabling DelvEdit play-test semantics. */
+	public void loadForCampaign() {
+		if(!restoredCampaignFloor) {
+			loadPreparedLevel(true);
+			return;
+		}
+		// Already built and played: resume it the way a single-player save loads a level.
+		needsSaving = true;
+		spawnMonsters = false;
+		sharedFloorBuild = null;
+		init(Source.LEVEL_LOAD);
+	}
+
+	private void loadPreparedLevel(boolean campaign) {
+		needsSaving = campaign;
 		spawnMonsters = false;
 		
 		fogStart = 10f;
@@ -2762,6 +2789,9 @@ public class Level {
 				}
 			}
 		}
+
+		if(movementBodies != null) movementBodies.addColliding(x, y, z, checking.collision.x,
+				checking.collision.y, checking.collision.z, checking, collisionCache);
 		
 		return collisionCache;
 	}
@@ -2848,7 +2878,7 @@ public class Level {
 			}
 		}
 		
-		return null;
+		return movementBody(x, y, z, widthX, widthY, height, checking, null);
 	}
 	
 	public Entity checkEntityCollision(float x, float y, float z, float widthX, float widthY, float height, Entity checking, Entity ignore)
@@ -2889,6 +2919,19 @@ public class Level {
 			}
 		}
 		
+		return movementBody(x, y, z, widthX, widthY, height, checking, ignore);
+	}
+
+	/** First Direct Connect body blocking this native mover, if any. */
+	private Entity movementBody(float x, float y, float z, float widthX, float widthY, float height,
+			Entity checking, Entity ignore) {
+		if(movementBodies == null || checking == null) return null;
+		if(movementBodyCache == null) movementBodyCache = new Array<Entity>();
+		movementBodyCache.clear();
+		movementBodies.addColliding(x, y, z, widthX, widthY, height, checking, movementBodyCache);
+		for(int i = 0; i < movementBodyCache.size; i++) {
+			if(movementBodyCache.get(i) != ignore) return movementBodyCache.get(i);
+		}
 		return null;
 	}
 	

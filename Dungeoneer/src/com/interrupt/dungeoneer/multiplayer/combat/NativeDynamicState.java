@@ -20,6 +20,13 @@ public final class NativeDynamicState {
         read(null);
     }
     public byte[] bytes() { return payload.clone(); }
+    /** The same state marked gone: clients remove what they drew for it. */
+    public NativeDynamicState inactive() {
+        byte[] gone = payload.clone();
+        gone[16] = 0; // after the entity and item identities
+        try { return new NativeDynamicState(gone); }
+        catch(IOException impossible) { throw new IllegalStateException(impossible); }
+    }
     public boolean sameState(NativeDynamicState other) { return other != null && java.util.Arrays.equals(payload, other.payload); }
     public static boolean supports(Entity entity) {
         if(entity == null) return false;

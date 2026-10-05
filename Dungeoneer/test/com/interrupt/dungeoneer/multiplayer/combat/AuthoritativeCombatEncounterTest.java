@@ -515,6 +515,39 @@ public class AuthoritativeCombatEncounterTest {
                 AuthoritativeCombatEncounter.participantTargetId(participant(1))).getHealth());
     }
 
+    @Test
+    public void retiredMonsterGivesUpItsSlotAndIdsKeepCountingPastSixtyFour() {
+        AuthoritativeCombatEncounter encounter = encounter();
+        int before = encounter.getMonsterCount();
+        EventOutput output = new EventOutput();
+        encounter.bindNativeMonster(1L, "monster:7", 0, 4, 2f, 2f, 0.5f, false, output);
+        encounter.bindNativeMonster(1L, "monster:8", 4, 4, 3f, 3f, 0.5f, false, output);
+
+        assertTrue(encounter.retireMonster("monster:7"));
+        org.junit.Assert.assertFalse("Already gone", encounter.retireMonster("monster:7"));
+        assertEquals(before + 1, encounter.getMonsterCount());
+        assertEquals("monster:65", AuthoritativeCombatEncounter.monsterTargetId(65));
+    }
+
+    @Test
+    public void goneNativeProjectileKeepsItsIdentity() throws Exception {
+        java.util.HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> previousStrings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        if(previousStrings == null) com.interrupt.managers.StringManager.localizedStrings =
+                new java.util.HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
+        try {
+            NativeDynamicState flying = NativeDynamicState.capture(9L, 0L,
+                    new com.interrupt.dungeoneer.entities.projectiles.Missile());
+            NativeDynamicState gone = flying.inactive();
+            assertTrue(flying.active);
+            org.junit.Assert.assertFalse(gone.active);
+            assertEquals(9L, gone.id);
+        }
+        finally {
+            com.interrupt.managers.StringManager.localizedStrings = previousStrings;
+        }
+    }
+
     private AuthoritativeCombatEncounter encounter() {
         return encounter(new RectangularMovementCollisionWorld(32f, 32f, 1f, 1f, 0.5f));
     }

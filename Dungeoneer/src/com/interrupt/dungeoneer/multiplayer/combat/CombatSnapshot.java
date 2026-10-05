@@ -9,6 +9,8 @@ import java.util.Map;
 /** Complete observed state for small authoritative encounter. */
 public final class CombatSnapshot {
     public static final int MAX_MONSTERS = 64;
+    /** Every Host encounter also holds the legacy shared combatant, so native Monsters get one less. */
+    public static final int MAX_NATIVE_MONSTERS = MAX_MONSTERS - 1;
     public static final int MAX_COMBATANTS = 68;
     private final long sequence;
     private final long hostTick;

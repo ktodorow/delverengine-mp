@@ -22,6 +22,7 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
     /** Immutable obstacle set with a per-tile grid, swapped whole by the render thread. */
     private static final class ObstacleIndex {
         final java.util.List<MovementObstacle> sight;
+        final java.util.List<MovementObstacle> ladders;
         final java.util.List<MovementObstacle>[] grid;
         final int width, height;
 
@@ -31,7 +32,12 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
             this.height = height;
             grid = new java.util.List[width * height];
             java.util.List<MovementObstacle> sightBlocking = new java.util.ArrayList<MovementObstacle>();
+            java.util.List<MovementObstacle> climbAreas = new java.util.ArrayList<MovementObstacle>();
             for(MovementObstacle obstacle : obstacles) {
+                if(obstacle.climbable) {
+                    climbAreas.add(obstacle);
+                    continue;
+                }
                 if(obstacle.blocksSight) sightBlocking.add(obstacle);
                 int fromX = clampTile(obstacle.minX, width), toX = clampTile(obstacle.maxX, width);
                 int fromY = clampTile(obstacle.minY, height), toY = clampTile(obstacle.maxY, height);
@@ -44,6 +50,7 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
                 }
             }
             sight = java.util.Collections.unmodifiableList(sightBlocking);
+            ladders = java.util.Collections.unmodifiableList(climbAreas);
         }
 
         java.util.List<MovementObstacle> at(int tileX, int tileY) {
@@ -57,6 +64,10 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
     }
 
     private volatile ObstacleIndex obstacles;
+    /** Host Monsters, replaced every frame; native Player physics collides with them. */
+    private volatile java.util.List<MovementObstacle> actors =
+            java.util.Collections.<MovementObstacle>emptyList();
+    public static final int MAX_ACTOR_OBSTACLES = 256;
     private final Level level;
     private final Vector3 collision = new Vector3(RADIUS, RADIUS, HEIGHT);
     private final float baseSpawnX;
@@ -169,6 +180,110 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
 
     public void setDoorObstacles(java.util.List<MovementObstacle> obstacles) {
         setWorldObstacles(obstacles);
+    }
+
+    /** Current bounds of the floor's Monsters; they block and bounce Participants like Actors. */
+    public void setActorObstacles(java.util.List<MovementObstacle> monsters) {
+        if(monsters == null || monsters.size() > MAX_ACTOR_OBSTACLES) {
+            throw new IllegalArgumentException("Monster obstacle count is outside bounds.");
+        }
+        actors = java.util.Collections.unmodifiableList(new java.util.ArrayList<MovementObstacle>(monsters));
+    }
+
+    /**
+     * Native tile rules (water, pits, friction, closed tiles) only exist once a floor is
+     * initialized, so the Host takes them from the live Active Floor it built from the same file.
+     */
+    public void adoptTileRules(Level initialized) {
+        if(initialized == null || initialized.tiles == null || level.tiles == null
+                || initialized.width != level.width || initialized.height != level.height) {
+            throw new IllegalArgumentException("Live Active Floor does not match Host movement floor.");
+        }
+        for(int index = 0; index < level.tiles.length; index++) {
+            Tile tile = level.tiles[index], live = initialized.tiles[index];
+            if(tile == null || live == null) continue;
+            tile.data = live.data;
+            tile.blockMotion = live.blockMotion;
+        }
+    }
+
+    @Override
+    public boolean isTileFree(float x, float y, float z, float stepHeight) {
+        if(!finite(x) || !finite(y) || !finite(z) || !finite(stepHeight)) return false;
+        return level.isFree(x, y, z, collision, stepHeight, false, null);
+    }
+
+    @Override
+    public float getTileFloorZ(float x, float y, float z) {
+        if(!finite(x) || !finite(y)) return z;
+        return level.maxFloorHeight(x, y, z, RADIUS) + 0.5f;
+    }
+
+    @Override
+    public float getPointFloorZ(float x, float y) {
+        return level.getTile((int)Math.floor(x), (int)Math.floor(y)).getFloorHeight(x, y) + 0.5f;
+    }
+
+    /** Native Level.getSlope without its render-thread vector pool. */
+    @Override
+    public void getFloorNormal(float x, float y, float z, float[] normal) {
+        float xx0 = x - RADIUS, xx1 = x + RADIUS, yy0 = y - RADIUS, yy1 = y + RADIUS;
+        int x0 = (int)Math.floor(xx0), x1 = (int)Math.floor(xx1);
+        int y0 = (int)Math.floor(yy0), y1 = (int)Math.floor(yy1);
+        float height1 = level.getTile(x0, y0).getFloorHeight(xx0, yy0);
+        float height2 = level.getTile(x1, y0).getFloorHeight(xx1, yy0);
+        float height3 = level.getTile(x0, y1).getFloorHeight(xx0, yy1);
+        float height4 = level.getTile(x1, y1).getFloorHeight(xx1, yy1);
+        float maxHeight = Math.max(Math.max(height1, height2), Math.max(height3, height4));
+        Vector3 result = new Vector3();
+        if(maxHeight == height1) level.getTile(x0, y0).getFloorNormal(xx0, yy0, result);
+        else if(maxHeight == height2) level.getTile(x1, y0).getFloorNormal(xx1, yy0, result);
+        else if(maxHeight == height3) level.getTile(x0, y1).getFloorNormal(xx0, yy1, result);
+        else level.getTile(x1, y1).getFloorNormal(xx1, yy1, result);
+        normal[0] = result.x;
+        normal[1] = result.y;
+        normal[2] = result.z;
+    }
+
+    @Override
+    public float getFloorFriction(float x, float y) {
+        Tile current = level.getTileOrNull((int)x, (int)y);
+        return (current == null ? Tile.solidWall : current).data.friction;
+    }
+
+    @Override
+    public java.util.List<MovementObstacle> getObstacles(float x, float y) {
+        ObstacleIndex index = obstacles;
+        java.util.List<MovementObstacle> found = null;
+        for(int tileY = (int)Math.floor(y - RADIUS); tileY <= (int)Math.floor(y + RADIUS); tileY++) {
+            for(int tileX = (int)Math.floor(x - RADIUS); tileX <= (int)Math.floor(x + RADIUS); tileX++) {
+                java.util.List<MovementObstacle> cell = index.at(tileX, tileY);
+                if(cell == null) continue;
+                if(found == null) found = new java.util.ArrayList<MovementObstacle>(cell.size());
+                for(MovementObstacle obstacle : cell) {
+                    if(!containsSame(found, obstacle)) found.add(obstacle);
+                }
+            }
+        }
+        for(MovementObstacle actor : actors) {
+            if(!actor.under(x, y, RADIUS)) continue;
+            if(found == null) found = new java.util.ArrayList<MovementObstacle>(2);
+            found.add(actor);
+        }
+        return found == null ? java.util.Collections.<MovementObstacle>emptyList() : found;
+    }
+
+    @Override
+    public boolean isOnLadder(float x, float y, float z) {
+        for(MovementObstacle ladder : obstacles.ladders) {
+            if(ladder.overlaps(x, y, z, RADIUS, HEIGHT)) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsSame(java.util.List<MovementObstacle> obstacles, MovementObstacle wanted) {
+        for(MovementObstacle obstacle : obstacles) if(obstacle == wanted) return true;
+        return false;
     }
 
     @Override

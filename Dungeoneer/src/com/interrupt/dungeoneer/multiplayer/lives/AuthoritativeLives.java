@@ -148,10 +148,15 @@ public final class AuthoritativeLives {
         return needsBody;
     }
 
-    /** Party Wipe: no Campaign Slot in play can ever return. */
-    public synchronized boolean isPartyWiped() {
-        for(MutableSlot slot : slots.values()) {
-            if(slot.condition != Condition.EXHAUSTED) return false;
+    /**
+     * Party Wipe: no Campaign Slot still in play can return. A slot that left after its
+     * reconnect grace does not keep the Campaign alive with the Lives it took away.
+     */
+    public synchronized boolean isPartyWiped(Collection<ParticipantId> present) {
+        if(present == null || present.isEmpty()) return false;
+        for(ParticipantId participant : present) {
+            MutableSlot slot = slots.get(participant);
+            if(slot != null && slot.condition != Condition.EXHAUSTED) return false;
         }
         return true;
     }
@@ -232,6 +237,33 @@ public final class AuthoritativeLives {
     /** Changes on every transition, never on plain countdown. */
     public synchronized long getRevision() {
         return revision;
+    }
+
+    /** Applies one validated slot outcome without ticking or repeating Revival/Life-loss events. */
+    public synchronized void restore(ParticipantId participant, int remainingLives,
+            Condition condition, int bleedoutTicks, int revivalTicks,
+            ParticipantId reviver, int lifeLosses) {
+        MutableSlot slot = slots.get(participant);
+        if(slot == null || remainingLives < 0 || remainingLives > MAXIMUM_STARTING_LIVES
+                || condition == null || lifeLosses < 0
+                || bleedoutTicks < 0 || bleedoutTicks > BLEEDOUT_TICKS
+                || revivalTicks < 0 || revivalTicks > REVIVAL_TICKS
+                || (condition == Condition.EXHAUSTED) != (remainingLives == 0)
+                || condition != Condition.DOWNED
+                        && (bleedoutTicks != 0 || revivalTicks != 0 || reviver != null)
+                || (revivalTicks > 0) != (reviver != null)) {
+            throw new IllegalArgumentException("Saved Lives state is inconsistent.");
+        }
+        if(reviver != null && (!slots.containsKey(reviver) || reviver.equals(participant))) {
+            throw new IllegalArgumentException("Saved Revival references unknown Participant.");
+        }
+        slot.lives = remainingLives;
+        slot.lifeLosses = lifeLosses;
+        slot.condition = condition;
+        slot.bleedoutTicks = bleedoutTicks;
+        slot.revivalTicks = revivalTicks;
+        slot.reviver = reviver;
+        revision++;
     }
 
     private static final class MutableSlot {

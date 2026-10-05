@@ -48,6 +48,7 @@ public class GameScreen implements Screen {
     public OverlayManager overlayManager = OverlayManager.instance;
 
 	private Level editorLevel = null;
+    private Game.PreparedLevelMode preparedLevelMode = Game.PreparedLevelMode.EDITOR;
     private Game.StartMode startMode = Game.StartMode.NORMAL;
     private DirectConnectMovementController networkMovementController;
     private DirectConnectCombatController networkCombatController;
@@ -58,6 +59,15 @@ public class GameScreen implements Screen {
     	this.gameManager = gameManager;
 		this.input = input;
 		this.editorLevel  = level;
+    }
+
+    public GameScreen(Level level, GameManager gameManager, GameInput input,
+            Game.PreparedLevelMode preparedLevelMode) {
+        this(level, gameManager, input);
+        if(preparedLevelMode == null) {
+            throw new IllegalArgumentException("Prepared Level mode cannot be null.");
+        }
+        this.preparedLevelMode = preparedLevelMode;
     }
 	
 	public GameScreen(GameManager gameManager, GameInput input) {
@@ -115,6 +125,10 @@ public class GameScreen implements Screen {
 						game.progression.updatePlaytime(delta);
 					}
 				}
+			}
+			else if(directConnect != null) {
+				// Party pause or a stopped session holds the world still, never the Esc menu.
+				gameManager.pollEscape();
 			}
 
 			if(game != null)
@@ -230,7 +244,10 @@ public class GameScreen implements Screen {
 			Gdx.app.log("DelverGameScreen", "Starting game");
 			
             if(editorLevel == null) gameManager.startGame(saveLoc, startMode);
-			else gameManager.startGame(editorLevel);
+			else if(preparedLevelMode == Game.PreparedLevelMode.CAMPAIGN) {
+                gameManager.startCampaign(editorLevel);
+            }
+            else gameManager.startGame(editorLevel);
 			
 			didStart = true;
 		}
@@ -265,7 +282,9 @@ public class GameScreen implements Screen {
 		if(Game.isMobile) Gdx.input.setCatchBackKey( false );
 		Audio.stopLoopingSounds();
 		
-		if(editorLevel != null) GameApplication.editorRunning = false;
+		if(editorLevel != null && preparedLevelMode == Game.PreparedLevelMode.EDITOR) {
+            GameApplication.editorRunning = false;
+        }
 	}
 
 	@Override
@@ -276,7 +295,9 @@ public class GameScreen implements Screen {
         if(networkEconomyController != null) networkEconomyController.dispose();
         if(networkItemController != null) networkItemController.dispose();
 		Audio.disposeAudio(null);
-		if(editorLevel != null) GameApplication.editorRunning = false;
+		if(editorLevel != null && preparedLevelMode == Game.PreparedLevelMode.EDITOR) {
+            GameApplication.editorRunning = false;
+        }
 	}
 
     public void setNetworkMovementController(

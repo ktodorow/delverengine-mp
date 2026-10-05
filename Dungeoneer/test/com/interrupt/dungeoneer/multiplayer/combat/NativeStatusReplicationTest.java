@@ -32,6 +32,76 @@ public class NativeStatusReplicationTest {
         monster.applyNetworkState(20, 20, 1, 1, 0);
         return monster;
     }
+    @Test public void replicaDamagePresentationIncludesNativeBloodBurst() {
+        Monster observer = replica();
+        int before = Game.instance.level.non_collidable_entities.size;
+
+        observer.playNetworkDamagePresentation();
+
+        assertTrue(Game.instance.level.non_collidable_entities.size > before);
+        assertEquals("Presentation cannot replay damage", 20, observer.hp);
+    }
+    @Test public void replicaHitLeavesNativeWoundMarkButKillingHitLeavesItToDeath() {
+        Monster observer = replica();
+
+        observer.playNetworkDamagePresentation();
+        assertEquals("Client sees the blood splatter Host's native hit left", 1, decals());
+
+        observer.applyNetworkState(0, 20, 1, 1, 0);
+        observer.playNetworkDamagePresentation();
+        assertEquals(1, decals());
+    }
+
+    @Test public void woundedReplicaDripsBloodLikeANativeMonster() {
+        Monster observer = replica();
+        observer.applyNetworkState(8, 20, 1, 1, 0);
+        int before = Game.instance.level.non_collidable_entities.size;
+
+        for(int tick = 0; tick < 200; tick++) observer.tick(Game.instance.level, 1f);
+
+        assertTrue("Below half health a native Monster bleeds",
+                Game.instance.level.non_collidable_entities.size > before);
+    }
+
+    @Test public void rejoiningClientCorpseIsLitAndTakesItsPoolFromHost() throws Exception {
+        Monster observer = slimeReplica();
+        observer.applyNetworkState(0, 20, 2, 3, 0, false);
+
+        observer.tick(Game.instance.level, 1);
+
+        assertEquals("Host sends its own pool with its other floor marks", 0, decals());
+        Corpse corpse = observer.getMultiplayerCorpse();
+        assertNotNull(corpse);
+        assertTrue("A non-dynamic sprite is drawn static and unlit, brighter than Host's corpse",
+                corpse.isDynamic);
+    }
+
+    @Test public void monsterDyingInFrontOfClientLeavesNativeBloodPool() throws Exception {
+        Monster observer = slimeReplica();
+        observer.applyNetworkState(20, 20, 2, 3, 0, false);
+        observer.tick(Game.instance.level, 1);
+        observer.applyNetworkState(0, 20, 2, 3, 0, false);
+
+        observer.tick(Game.instance.level, 1);
+
+        assertEquals(1, decals());
+    }
+
+    private Monster slimeReplica() throws Exception {
+        Monster observer = new Monster(); observer.maxHp = observer.hp = 20;
+        java.lang.reflect.Field death = Monster.class.getDeclaredField("dieAnimation");
+        death.setAccessible(true);
+        death.set(observer, new com.interrupt.dungeoneer.gfx.animation.SpriteAnimation(16, 19, 30, null));
+        observer.setNetworkReplica(true);
+        return observer;
+    }
+
+    private int decals() {
+        int found = 0;
+        for(Entity entity : Game.instance.level.entities) if(entity instanceof ProjectedDecal) found++;
+        return found;
+    }
+
     @Test public void recoveryRestoresCurrentDrunkAndCameraWithoutReplayingTimeRules() {
         Actor host = new Actor(); host.hp = host.maxHp = 20;
         host.drunkMod = 4.25f;
@@ -53,6 +123,23 @@ public class NativeStatusReplicationTest {
         assertEquals(0, observer.drunkMod, 0);
         presentation.clear(observer);
         assertEquals(0, observer.drunkMod, 0);
+    }
+
+    @Test public void coldResumeRestoresAuthoritativeCursorWithoutReplayingPulse() {
+        Actor actor = new Actor(); actor.hp = actor.maxHp = 20;
+        NativeStatusEffectState poison = new NativeStatusEffectState(44L,
+                NativeStatusEffectState.Kind.POISON, 240f, 1f, "", false,
+                75f, 1f, 6L);
+        new ActorEffectsSnapshot("participant:campaign-slot-1", 3L, false,
+                Collections.singletonList(poison)).restoreAuthoritative(actor);
+
+        assertEquals(20, actor.hp);
+        assertEquals(1, actor.statusEffects.size);
+        StatusEffect restored = actor.statusEffects.first();
+        assertEquals(44L, restored.getMultiplayerInstanceId());
+        assertEquals(75f, restored.multiplayerElapsed, 0f);
+        assertEquals(6L, restored.getMultiplayerPulseCount());
+        assertEquals(240f, restored.timer, 0f);
     }
 
     @Test public void remotePersonalTickUsesCapturedWorldClockDespiteEarlierEffectMutation() throws Exception {

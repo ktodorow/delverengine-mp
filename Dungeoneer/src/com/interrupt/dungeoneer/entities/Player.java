@@ -2501,6 +2501,16 @@ public class Player extends Actor {
 		}*/
 	}
 
+	/** Height this Player may currently step up (raised in water so it can climb out). */
+	public float getMovementStepHeight() {
+		return stepHeight;
+	}
+
+	/** getWalkSpeed() before status effects: Speed stat and equipment weight or enchantments. */
+	public float getUnaffectedWalkSpeed() {
+		return (0.10f + stats.SPD * 0.015f) * GetEquippedSpeedMod();
+	}
+
 	public float getWalkSpeed() {
 		float baseSpeed = 0.10f + stats.SPD * 0.015f;
 		if(statusEffects == null || statusEffects.size <= 0) return baseSpeed * GetEquippedSpeedMod();

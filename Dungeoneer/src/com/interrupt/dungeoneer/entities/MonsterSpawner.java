@@ -29,6 +29,12 @@ public class MonsterSpawner extends DirectionalEntity {
 
 	public void spawn(Level level) {
 		if(isActive) {
+			if(level.nativeMonsterSpawnerListener != null
+					&& !level.nativeMonsterSpawnerListener.allowSpawn(this)) {
+				if(destroyAfterSpawn) isActive = false;
+				return;
+			}
+
 			for (int i = 0; i < spawnAmount; i++) {
 				Monster m;
 				if (monsterName.equals(""))

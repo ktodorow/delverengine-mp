@@ -303,6 +303,8 @@ public class Missile extends Item implements Directional {
 
     public Array<Entity> lineCollidesWithEntities(Vector3 position, Vector3 nextPosition, Vector3 levelHitLocation) {
         Array<Entity> possibles = Game.instance.level.getEntitiesAlongLine(position.x, position.z, nextPosition.x, nextPosition.z);
+        if(Game.instance.level.nativeProjectileTargets != null)
+            Game.instance.level.nativeProjectileTargets.addLineTargets(this, possibles);
         entityHitList.clear();
 
         // Calculate distance to world hit.

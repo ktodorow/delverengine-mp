@@ -10,6 +10,8 @@ public interface CombatWeaponResolver {
     long identity(Weapon weapon);
     default long physicalIdentity(Entity entity) { return 0L; }
     default Entity physicalEntity(long entityId) { return null; }
+    /** Item the Participant holds in hand on Host, or null. */
+    default Entity wieldedItem(ParticipantId participant) { return null; }
 
     default long worldObjectIdentity(Entity entity) { return 0L; }
 

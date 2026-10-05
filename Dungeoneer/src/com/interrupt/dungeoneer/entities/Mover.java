@@ -54,6 +54,10 @@ public class Mover extends Model {
 	private transient boolean pressureStart = false;
 
 	private boolean wasMoving = false;
+
+	/** Direct Connect client: shows the Host's Mover and never starts or moves by itself. */
+	private transient boolean networkReplica = false;
+	private transient boolean networkMoving = false;
 	
 	private transient Vector3 rotationVelocity = new Vector3();
 	
@@ -75,9 +79,44 @@ public class Mover extends Model {
 		}
 	}
 	
+	public void setNetworkReplica(boolean replica) {
+		networkReplica = replica;
+		if(replica) {
+			animation = null;
+			delayTimer = 0;
+			xa = ya = za = 0;
+		}
+	}
+
+	public boolean isNetworkReplica() {
+		return networkReplica;
+	}
+
+	/** Host is animating it: started and not yet finished or waiting. */
+	public boolean isMovingForNetwork() {
+		return animation != null && !animation.isDonePlaying();
+	}
+
+	/** Host's transform for this replica, with the native start and end sounds as motion changes. */
+	public void applyNetworkState(float x, float y, float z, float rotationX, float rotationY,
+			float rotationZ, boolean moving) {
+		if(!networkReplica) return;
+		this.x = x;
+		this.y = y;
+		this.z = z;
+		rotation.set(rotationX, rotationY, rotationZ);
+		if(moving && !networkMoving && startSound != null) Audio.playPositionedSound(startSound, new Vector3(x,y,z), 0.7f, 14f);
+		else if(!moving && networkMoving && endSound != null) Audio.playPositionedSound(endSound, new Vector3(x,y,z), 0.7f, 14f);
+		networkMoving = moving;
+	}
+
 	@Override
 	public void tick(Level level, float delta) {
 		isDynamic = false;
+		if(networkReplica) {
+			xa = ya = za = 0;
+			return;
+		}
 		squishDamageTimer += delta;
 		if(delayTimer > 0) {
 			delayTimer -= delta * 0.016f;
@@ -342,6 +381,7 @@ public class Mover extends Model {
 	
 	@Override
 	public void onTrigger(Entity instigator, String value) {
+		if(networkReplica) return;
 		if(animation == null) startMoving();
 		else if(animation.isDonePlaying()) animation.reverse();
 	}
@@ -349,6 +389,7 @@ public class Mover extends Model {
 	@Override
 	public void encroached(Player player)
 	{
+		if(networkReplica) return;
 		if(moverMode == MoverStartMode.ON_PLAYER_TOUCH || moverMode == MoverStartMode.ON_ANY_TOUCH) {
 			hasSomethingOn = true;
 			if(animation == null)
@@ -359,6 +400,7 @@ public class Mover extends Model {
 	@Override
 	public void encroached(Entity hit)
 	{
+		if(networkReplica) return;
 		if(moverMode == MoverStartMode.ON_ANY_TOUCH) {
 			hasSomethingOn = true;
 			if(animation == null)

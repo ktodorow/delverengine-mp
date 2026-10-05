@@ -39,4 +39,15 @@ public class PartyCommunicationStateTest {
         new PartyChatMessage(1L, 1, "Host", "line one\nline two");
     }
 
+    @Test
+    public void systemNoticeRendersWithoutChatSpeakerPrefix() {
+        PartyChatMessage joined = PartyChatMessage.system(
+                1L, 2, "Friend", "Friend joined");
+
+        assertTrue(joined.isSystem());
+        assertEquals("Friend joined", joined.getDisplayText());
+        assertEquals("Host: Regroup.",
+                new PartyChatMessage(2L, 1, "Host", "Regroup.").getDisplayText());
+    }
+
 }

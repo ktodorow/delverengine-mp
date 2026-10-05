@@ -376,6 +376,28 @@ public final class AuthoritativeItemWorld {
         return Collections.unmodifiableList(new ArrayList<PhysicalItemState>(items.values()));
     }
 
+    /** Replaces current item registry with a validated save without replaying item actions. */
+    public synchronized void restore(List<PhysicalItemState> saved) {
+        if(saved == null || saved.size() > MAX_ITEMS) {
+            throw new IllegalArgumentException("Saved physical item count is outside bounds.");
+        }
+        Map<Long, PhysicalItemState> restored = new LinkedHashMap<Long, PhysicalItemState>();
+        long restoredRevision = 0L, restoredNextId = 1L;
+        for(PhysicalItemState item : saved) {
+            if(item == null || restored.put(item.entityId, item) != null) {
+                throw new IllegalArgumentException("Saved physical item identity is duplicate or invalid.");
+            }
+            restoredRevision = Math.max(restoredRevision, item.revision);
+            restoredNextId = Math.max(restoredNextId, item.entityId + 1L);
+        }
+        items.clear();
+        items.putAll(restored);
+        revision = restoredRevision;
+        nextEntityId = restoredNextId;
+        lastRequests.clear();
+        wielded.clear();
+    }
+
     public synchronized List<PhysicalItemState> inventory(ParticipantId owner) {
         if(owner == null) throw new IllegalArgumentException("Inventory requires an owner.");
         List<PhysicalItemState> inventory = new ArrayList<PhysicalItemState>();

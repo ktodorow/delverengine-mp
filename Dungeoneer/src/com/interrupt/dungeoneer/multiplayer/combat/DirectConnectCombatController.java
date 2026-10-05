@@ -13,7 +13,9 @@ import com.interrupt.dungeoneer.entities.Corpse;
 import com.interrupt.dungeoneer.entities.Door;
 import com.interrupt.dungeoneer.entities.Monster;
 import com.interrupt.dungeoneer.entities.Monster.MultiplayerAttackKind;
+import com.interrupt.dungeoneer.entities.MonsterSpawner;
 import com.interrupt.dungeoneer.entities.Player;
+import com.interrupt.dungeoneer.entities.ProjectedDecal;
 import com.interrupt.dungeoneer.entities.Spikes;
 import com.interrupt.dungeoneer.entities.items.Bow;
 import com.interrupt.dungeoneer.entities.items.Gun;
@@ -60,12 +62,37 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     private final Map<ParticipantId, CombatAction> participantActions =
             new LinkedHashMap<ParticipantId, CombatAction>();
     private final Map<String, Monster> monsters = new LinkedHashMap<String, Monster>();
+    private static final int WALK_SPEED_INTERVAL_FRAMES = 15;
+    private int walkSpeedFrames;
+    /** Host frame a tracked Monster was first seen dead; its slot frees after RETIRE_AFTER_FRAMES. */
+    private final Map<Monster, Integer> monsterDeathFrames = new IdentityHashMap<Monster, Integer>();
+    private static final int RETIRE_AFTER_FRAMES = 120;
+    private int monsterFrame;
     private final Map<Monster, String> monsterIds = new IdentityHashMap<Monster, String>();
     private final Set<String> boundMonsterIds = new LinkedHashSet<String>();
+    private final Set<String> restoredAuthoritativeActors = new LinkedHashSet<String>();
     /** Floor whose initial hostile Monsters have been keyed; later arrivals get Host-assigned ids. */
     private Level monstersAttachedLevel;
     private int monsterIndexCounter;
+    private int nativeDecalCounter;
+    /** Floor whose saved late Monsters Host has recreated after a cold resume. */
+    private Level lateMonstersRestoredLevel;
+    /** Floor MonsterSpawners keyed by placement at attach, before any of them can move or fire. */
+    private final Map<MonsterSpawner, String> monsterSpawnerKeys =
+            new IdentityHashMap<MonsterSpawner, String>();
     private final Map<Monster, String> devSpawnThemes = new IdentityHashMap<Monster, String>();
+    /** Host: dead Monsters whose slot went to newer ones; never announced again. */
+    private final Map<Monster, Boolean> retiredMonsters = new IdentityHashMap<Monster, Boolean>();
+    /**
+     * Host: resumed combatants with no native Monster left to track, oldest first. A floor
+     * checkpoint keeps only living Monsters, so one that died before the save stays in the
+     * encounter and effects table as dead until its slot is needed.
+     */
+    private final List<String> orphanedMonsterIds = new ArrayList<String>();
+    private int orphansAdoptedFrame;
+    private final Set<String> loggedPresentationFailures = new LinkedHashSet<String>();
+    /** Host: native dynamics that could not be described; skipped so they never stop the session. */
+    private final Map<Entity, Boolean> unpresentableDynamics = new IdentityHashMap<Entity, Boolean>();
     private final Map<Monster, CombatAction> lastMonsterActions =
             new IdentityHashMap<Monster, CombatAction>();
     private final Map<String, Spikes> traps = new LinkedHashMap<String, Spikes>();
@@ -107,6 +134,8 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         if(peer == null) throw new IllegalArgumentException("Direct Connect peer cannot be null.");
         this.peer = peer;
         this.movementController = movementController;
+        // A client's own Player stops at replica Monsters as native Player stops at Monsters.
+        if(movementController != null) movementController.getMovementBodies().setReplicaMonsters(monsters.values());
         nativeAuthority = peer instanceof NativeCombatAuthority
                 ? (NativeCombatAuthority)peer : null;
         nextRequestId = peer.getNextCombatRequestId();
@@ -121,12 +150,20 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         if(attachedLevel != game.level) attachToLevel(game.level);
         if(attachedPlayer != game.player) attachToPlayer(game.player);
         attachNativeMonstersIfPresent();
-        if(nativeAuthority != null) attachLateNativeMonsters();
-        else materializeNativeMonsterSpawns(game);
+        if(nativeAuthority != null) {
+            restoreLateNativeMonsters(game);
+            attachLateNativeMonsters();
+        }
+        else {
+            materializeNativeMonsterSpawns(game);
+            discardUnannouncedNativeMonsters();
+            materializeNativeDecals();
+        }
         attachNativeTrapsIfPresent();
         attachNativeProjectiles();
         if(nativeAuthority == null) applyNativeDynamicStates(game.level);
         applySnapshot(peer.getCombatSnapshot());
+        restoreAuthoritativeEffects();
         synchronizeWorldTime(game);
     }
 
@@ -163,8 +200,10 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 nativeAuthority.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(
                         AuthoritativeCombatEncounter.participantTargetId(avatar.getDescriptor().getParticipantId()),
                         1, avatar));
+            synchronizeNativeWalkSpeeds();
             attachNativeProjectiles();
             synchronizeNativeDynamics();
+            synchronizeNativeDecals();
         }
         applySnapshot(peer.getCombatSnapshot());
         synchronizeWorldTime(game);
@@ -456,7 +495,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                     (Missile)projectile));
         }
         catch(IllegalArgumentException invalid) {
-            nativeAuthority.failNativePresentation(invalid.getMessage());
+            skipNativePresentation(invalid);
         }
     }
 
@@ -475,7 +514,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                         hit != null, impactX, impactY, impactZ));
             }
             catch(IllegalArgumentException invalid) {
-                nativeAuthority.failNativePresentation(invalid.getMessage());
+                skipNativePresentation(invalid);
             }
         }
         ProjectilePresentation presentation = projectilePresentations.get(projectile);
@@ -650,7 +689,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                     request.getWeaponEntityId(), new Vector3(source.x, source.y, source.z)));
         }
         catch(IllegalArgumentException invalid) {
-            nativeAuthority.failNativePresentation(invalid.getMessage());
+            skipNativePresentation(invalid);
         }
     }
 
@@ -719,7 +758,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                     kind, position, direction));
         }
         catch(IllegalArgumentException invalid) {
-            nativeAuthority.failNativePresentation(invalid.getMessage());
+            skipNativePresentation(invalid);
         }
     }
 
@@ -817,6 +856,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             publishNativeDynamic(entry.getValue(), itemId, entry.getKey(), false);
             nativeDynamicIds.remove(entry.getKey());
             nativeDynamicItemIds.remove(entry.getValue());
+            unpresentableDynamics.remove(entry.getKey());
         }
     }
 
@@ -830,14 +870,14 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                         && !child.nativePresentationReplica && NativeDynamicState.supports(child)) {
                     seen.add(child);
                     Long childId = ensureNativeDynamicIdentity(child);
-                    if(childId == null) return;
+                    if(childId == null || unpresentableDynamics.containsKey(child)) continue;
                     publishNativeDynamic(childId, 0L, child, child.isActive);
                 }
             }
             if(!NativeDynamicState.supports(entity)) continue;
             seen.add(entity);
             Long id = ensureNativeDynamicIdentity(entity);
-            if(id == null) return;
+            if(id == null || unpresentableDynamics.containsKey(entity)) continue;
             long itemId = nativeDynamicItemIds.containsKey(id) ? nativeDynamicItemIds.get(id) : 0L;
             // A spawned arrow becomes a physical item only once it lands; observers must then
             // present the item instead of a second synthetic arrow.
@@ -854,7 +894,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         if(id != null) return id;
         if(nativeDynamicIds.size() >= com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES
                 || nextNativeDynamicId == Long.MAX_VALUE) {
-            nativeAuthority.failNativePresentation("Native dynamic entity count exceeded.");
+            // More projectiles in flight than clients draw: this one stays Host-only until room frees.
             return null;
         }
         id = nextNativeDynamicId++;
@@ -864,13 +904,35 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         return id;
     }
 
+    /**
+     * Client presentation (projectile, impact, explosion, spell, swing, cue) is cosmetic; Host
+     * alone applies its effect. One Host cannot describe is logged once, never ends the session.
+     */
+    private void skipNativePresentation(IllegalArgumentException invalid) {
+        String reason = String.valueOf(invalid.getMessage());
+        if(loggedPresentationFailures.size() >= 64 || !loggedPresentationFailures.add(reason)) return;
+        if(com.badlogic.gdx.Gdx.app == null) return;
+        Throwable cause = invalid.getCause() == null ? invalid : invalid.getCause();
+        com.badlogic.gdx.Gdx.app.error("DelverMultiplayer", "Not shown to clients: " + reason + " (" + cause + ")");
+    }
+
+    /**
+     * Projectiles, bombs and fires are presentation for clients; Host alone applies their damage.
+     * One that cannot be described (an out-of-range value) is logged once and left Host-only,
+     * instead of stopping the session for everyone.
+     */
     private void publishNativeDynamic(long id, long itemId, Entity entity, boolean active) {
         try {
             nativeAuthority.synchronizeNativeDynamicState(
                     NativeDynamicState.capture(id, itemId, entity, active));
         }
         catch(IllegalArgumentException invalid) {
-            nativeAuthority.failNativePresentation(invalid.getMessage());
+            if(unpresentableDynamics.put(entity, Boolean.TRUE) == null) {
+                skipNativePresentation(new IllegalArgumentException("native "
+                        + entity.getClass().getSimpleName() + ": " + invalid.getMessage(), invalid));
+            }
+            // Clients drop whatever they drew of it before.
+            nativeAuthority.retireNativeDynamicState(id);
         }
     }
 
@@ -939,8 +1001,8 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 || (!(projectile instanceof Projectile)
                         && !(projectile instanceof Missile))) return;
         if(!NativeDynamicState.supports(projectile)) {
-            nativeAuthority.failNativePresentation("Unsupported native projectile class: "
-                    + projectile.getClass().getName());
+            skipNativePresentation(new IllegalArgumentException("Unsupported native projectile class: "
+                    + projectile.getClass().getName()));
             return;
         }
         if(projectilePresentations.containsKey(projectile)) return;
@@ -1026,6 +1088,28 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 || !participantId.equals(localParticipantId())) return null;
         Item held = attachedPlayer.GetHeldItem();
         return held instanceof Weapon ? (Weapon)held : null;
+    }
+
+    /**
+     * Host movement walks each Participant at its native Player speed: Speed stat, equipment
+     * and the held item's enchantments, before status effects, which reach it with the effects.
+     */
+    private void synchronizeNativeWalkSpeeds() {
+        if(walkSpeedFrames++ % WALK_SPEED_INTERVAL_FRAMES != 0) return;
+        ParticipantId local = localParticipantId();
+        if(attachedPlayer != null && local != null) pushWalkSpeed(local, attachedPlayer.getUnaffectedWalkSpeed());
+        for(RemoteAvatar avatar : attachedRemoteAvatars) {
+            ParticipantId participant = avatar.getDescriptor().getParticipantId();
+            Player stats = authoritativePlayer(participant);
+            Entity held = weaponResolver == null ? null : weaponResolver.wieldedItem(participant);
+            if(held instanceof Item) stats.calculatedStats.addItemStats((Item)held);
+            pushWalkSpeed(participant, stats.getUnaffectedWalkSpeed());
+        }
+    }
+
+    private void pushWalkSpeed(ParticipantId participant, float walkSpeed) {
+        if(Float.isNaN(walkSpeed) || Float.isInfinite(walkSpeed)) return;
+        nativeAuthority.setNativeParticipantWalkSpeed(participant, Math.max(0f, Math.min(1f, walkSpeed)));
     }
 
     private Player authoritativePlayer(ParticipantId participantId) {
@@ -1178,7 +1262,19 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                 return compared != 0 ? compared : Integer.compare(left.levelOrder, right.levelOrder);
             }
         });
-        int count = Math.min(candidates.size(), CombatSnapshot.MAX_MONSTERS);
+        if(attachedLevel.restoredCampaignFloor) {
+            // Host floor checkpoint: bound Monsters kept the ids clients derive from a fresh build.
+            // One without a saved id is keyed as a late arrival and announced.
+            for(MonsterCandidate candidate : candidates) {
+                String saved = candidate.monster.multiplayerIdentity;
+                if(monsterIndex(saved) < 1 || monsters.containsKey(saved)
+                        || nativeMonsterSlotsFull()) continue;
+                trackMonster(saved, candidate.monster);
+                monsterIndexCounter = Math.max(monsterIndexCounter, monsterIndex(saved));
+            }
+            return;
+        }
+        int count = Math.min(candidates.size(), CombatSnapshot.MAX_NATIVE_MONSTERS);
         for(int index = 0; index < count; index++) {
             trackMonster(AuthoritativeCombatEncounter.monsterTargetId(index + 1),
                     candidates.get(index).monster);
@@ -1189,6 +1285,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     private void trackMonster(String monsterId, Monster monster) {
         monsters.put(monsterId, monster);
         monsterIds.put(monster, monsterId);
+        monster.multiplayerIdentity = monsterId;
         lastMonsterActions.put(monster, CombatAction.MELEE);
         if(nativeAuthority == null) {
             monster.setNetworkReplica(true);
@@ -1215,8 +1312,9 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         collectMonsters(attachedLevel.static_entities, candidates, seen, order);
         for(MonsterCandidate candidate : candidates) {
             Monster monster = candidate.monster;
-            if(monsterIds.containsKey(monster) || !monster.isActive) continue;
-            if(monsters.size() >= CombatSnapshot.MAX_MONSTERS) return;
+            if(monsterIds.containsKey(monster) || !monster.isActive || monster.hp <= 0
+                    || retiredMonsters.containsKey(monster)) continue;
+            if(nativeMonsterSlotsFull() && !retireLongestDeadMonster()) return;
             String monsterId = AuthoritativeCombatEncounter.monsterTargetId(++monsterIndexCounter);
             trackMonster(monsterId, monster);
             String theme = devSpawnThemes.remove(monster);
@@ -1228,7 +1326,9 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                         state.x, state.y, state.z, nativeHealth(monster), nativeMaximumHealth(monster)));
             }
             catch(IllegalArgumentException invalid) {
-                nativeAuthority.failNativePresentation("Native monster spawn: " + invalid.getMessage());
+                // Clients ignore combat state for a Monster they never materialized.
+                skipNativePresentation(new IllegalArgumentException("Native monster spawn: "
+                        + invalid.getMessage(), invalid));
             }
         }
     }
@@ -1264,6 +1364,194 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             if(monster != null) return monster;
         }
         return null;
+    }
+
+    /**
+     * Host cold resume: a rebuilt floor holds only its initial Monsters. Late ones (spawner,
+     * trigger, egg, dev menu) return from the save under their saved ids; binding applies saved
+     * health, position and corpse outcome. Clients get the same ids from the replayed spawns.
+     */
+    private void restoreLateNativeMonsters(Game game) {
+        if(attachedLevel == null || monstersAttachedLevel != attachedLevel
+                || lateMonstersRestoredLevel == attachedLevel) return;
+        lateMonstersRestoredLevel = attachedLevel;
+        // New late arrivals must never reuse an id the save already owns.
+        CombatSnapshot saved = peer.getCombatSnapshot();
+        if(saved != null) {
+            for(MonsterSnapshot monster : saved.getMonsters()) {
+                monsterIndexCounter = Math.max(monsterIndexCounter, monsterIndex(monster.getId()));
+            }
+        }
+        List<NativeMonsterSpawn> restored = nativeAuthority.getRestoredNativeMonsterSpawns();
+        for(NativeMonsterSpawn spawn : restored) {
+            monsterIndexCounter = Math.max(monsterIndexCounter, monsterIndex(spawn.monsterId));
+        }
+        // A floor checkpoint already holds its living late Monsters natively.
+        if(!attachedLevel.restoredCampaignFloor) restoreLateNativeMonsters(game, restored);
+        adoptOrphanedMonsters(saved);
+    }
+
+    private void restoreLateNativeMonsters(Game game, List<NativeMonsterSpawn> restored) {
+        for(NativeMonsterSpawn spawn : restored) {
+            if(monsters.containsKey(spawn.monsterId)) continue;
+            if(nativeMonsterSlotsFull()) return;
+            Monster monster = game.monsterManager == null ? null
+                    : lookupMonsterTemplate(game, spawn.theme, spawn.name);
+            if(monster == null) {
+                nativeAuthority.failNativePresentation("Saved monster is unavailable in local content: "
+                        + spawn.theme + "/" + spawn.name);
+                return;
+            }
+            monster.spawnChance = 1f;
+            monster.x = spawn.x;
+            monster.y = spawn.y;
+            monster.z = spawn.z;
+            monster.Init(attachedLevel, game.player.level);
+            // Host admitted this Monster before the save; the rebuilt floor must not veto it.
+            monster.isActive = true;
+            monster.maxHp = spawn.maximumHealth;
+            attachedLevel.SpawnEntity(monster);
+            trackMonster(spawn.monsterId, monster);
+        }
+    }
+
+    /**
+     * Saved Monsters this floor has no native body for. A dead one keeps its slot, so clients
+     * still draw its corpse, until a new Monster needs it; a living one cannot be simulated.
+     */
+    private void adoptOrphanedMonsters(CombatSnapshot saved) {
+        if(saved == null) return;
+        List<String> dead = new ArrayList<String>();
+        for(CombatantSnapshot combatant : saved.getCombatants()) {
+            String id = combatant.getId();
+            if(combatant.getKind() != CombatantKind.MONSTER || monsterIndex(id) < 1
+                    || monsters.containsKey(id)) continue;
+            if(combatant.getHealth() > 0) nativeAuthority.retireNativeMonster(id);
+            else dead.add(id);
+        }
+        Collections.sort(dead, new Comparator<String>() {
+            @Override
+            public int compare(String left, String right) {
+                return Integer.compare(monsterIndex(left), monsterIndex(right));
+            }
+        });
+        orphanedMonsterIds.addAll(dead);
+        orphansAdoptedFrame = monsterFrame;
+    }
+
+    private boolean nativeMonsterSlotsFull() {
+        return monsters.size() + orphanedMonsterIds.size() >= CombatSnapshot.MAX_NATIVE_MONSTERS;
+    }
+
+    private static int monsterIndex(String monsterId) {
+        String prefix = AuthoritativeCombatEncounter.MONSTER_ID_PREFIX;
+        if(monsterId == null || !monsterId.startsWith(prefix)) return 0;
+        try { return Integer.parseInt(monsterId.substring(prefix.length())); }
+        catch(NumberFormatException ignored) { return 0; }
+    }
+
+    /** Client: Host announces every Monster; one this peer's own floor logic added is not in play. */
+    private void discardUnannouncedNativeMonsters() {
+        if(attachedLevel == null || monstersAttachedLevel != attachedLevel) return;
+        discardUnannouncedNativeMonsters(attachedLevel.entities);
+        discardUnannouncedNativeMonsters(attachedLevel.non_collidable_entities);
+        discardUnannouncedNativeMonsters(attachedLevel.static_entities);
+    }
+
+    private void discardUnannouncedNativeMonsters(Array<Entity> entities) {
+        for(Entity entity : entities) {
+            if(!(entity instanceof Monster)) continue;
+            Monster monster = (Monster)entity;
+            if(monster.hostile && monster.isActive && !monsterIds.containsKey(monster)) {
+                monster.isActive = false;
+            }
+        }
+    }
+
+    private static final String DECAL_IDENTITY = "decal:";
+    /** A decal every peer's own build of the floor already has. */
+    private static final String FLOOR_DECAL = "decal:floor";
+
+    /**
+     * Host: marks made in play (blood, sword, scorch) live in level entities. Ones restored from
+     * a floor checkpoint go to clients connected now, which never saw them made; any other
+     * decal already there came with the floor build every peer makes.
+     */
+    private void keyNativeDecals(Level level) {
+        nativeDecalCounter = 0;
+        for(int index = 0; index < level.entities.size; index++) {
+            Entity entity = level.entities.get(index);
+            if(!(entity instanceof ProjectedDecal)) continue;
+            int saved = decalIndex(entity.multiplayerIdentity);
+            if(saved > 0) {
+                nativeDecalCounter = Math.max(nativeDecalCounter, saved);
+                recordNativeDecal((ProjectedDecal)entity, true);
+            }
+            else entity.multiplayerIdentity = FLOOR_DECAL;
+        }
+    }
+
+    /** Host: live clients drew this mark from its presentation; only later joiners need it. */
+    private void synchronizeNativeDecals() {
+        if(attachedLevel == null) return;
+        for(int index = 0; index < attachedLevel.entities.size; index++) {
+            Entity entity = attachedLevel.entities.get(index);
+            if(!(entity instanceof ProjectedDecal) || entity.multiplayerIdentity != null) continue;
+            entity.multiplayerIdentity = DECAL_IDENTITY + (++nativeDecalCounter);
+            recordNativeDecal((ProjectedDecal)entity, false);
+        }
+    }
+
+    private void recordNativeDecal(ProjectedDecal decal, boolean announce) {
+        try {
+            nativeAuthority.recordNativeDecal(NativeDecalState.capture(decal), announce);
+        }
+        catch(IllegalArgumentException outsideBounds) {
+            // Presentation only: a mark the wire cannot carry stays on Host alone.
+        }
+    }
+
+    private static int decalIndex(String identity) {
+        if(identity == null || !identity.startsWith(DECAL_IDENTITY)) return 0;
+        try { return Integer.parseInt(identity.substring(DECAL_IDENTITY.length())); }
+        catch(NumberFormatException floor) { return 0; }
+    }
+
+    /** Client: Host's marks from before this peer joined, rebuilt on its own floor. */
+    private void materializeNativeDecals() {
+        if(attachedLevel == null) return;
+        for(NativeDecalState decal : peer.drainNativeDecals()) {
+            attachedLevel.entities.add(decal.materialize());
+        }
+    }
+
+    /** Same key on every build of this floor; repeated placements get their level-order ordinal. */
+    private void keyNativeMonsterSpawners(Level level) {
+        monsterSpawnerKeys.clear();
+        Map<String, Integer> repeats = new LinkedHashMap<String, Integer>();
+        keyNativeMonsterSpawners(level.entities, repeats);
+        keyNativeMonsterSpawners(level.non_collidable_entities, repeats);
+        keyNativeMonsterSpawners(level.static_entities, repeats);
+    }
+
+    private void keyNativeMonsterSpawners(Array<Entity> entities, Map<String, Integer> repeats) {
+        for(Entity entity : entities) {
+            if(!(entity instanceof MonsterSpawner) || monsterSpawnerKeys.containsKey(entity)) continue;
+            String key = com.interrupt.dungeoneer.multiplayer.floor.SharedFloorIdentity.placementKey(entity);
+            Integer seen = repeats.get(key);
+            repeats.put(key, seen == null ? 1 : seen + 1);
+            monsterSpawnerKeys.put((MonsterSpawner)entity, seen == null ? key : key + "#" + (seen + 1));
+        }
+    }
+
+    private boolean allowNativeMonsterSpawn(MonsterSpawner spawner) {
+        // Host announces every Monster a spawner adds; a client never adds its own.
+        if(nativeAuthority == null) return false;
+        String key = monsterSpawnerKeys.get(spawner);
+        if(key == null) return true;
+        if(nativeAuthority.isNativeMonsterSpawnerConsumed(key)) return false;
+        if(spawner.destroyAfterSpawn) nativeAuthority.consumeNativeMonsterSpawner(key);
+        return true;
     }
 
     /**
@@ -1307,9 +1595,14 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         int count = Math.min(candidates.size(), CombatSnapshot.MAX_MONSTERS);
         for(int index = 0; index < count; index++) {
             Spikes trap = candidates.get(index).trap;
-            String trapId = "hazard:" + (index + 1);
+            String saved = trap.multiplayerIdentity;
+            // A restored Host floor keeps each hazard's id even if one before it is gone.
+            String trapId = attachedLevel.restoredCampaignFloor && saved != null
+                    && saved.startsWith("hazard:") && !traps.containsKey(saved)
+                    ? saved : "hazard:" + (index + 1);
             traps.put(trapId, trap);
             trapIds.put(trap, trapId);
+            trap.multiplayerIdentity = trapId;
             if(nativeAuthority == null) {
                 trap.setNetworkReplica(true);
             }
@@ -1344,6 +1637,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
 
     private void bindNativeMonster(String monsterId, Monster monster) {
         if(boundMonsterIds.contains(monsterId) || nativeAuthority == null || monster == null) return;
+        restoreAuthoritativeMonster(monsterId, monster);
         Entity stateEntity = nativeMonsterStateEntity(monster);
         nativeAuthority.bindNativeMonster(monsterId, nativeHealth(monster),
                 nativeMaximumHealth(monster), stateEntity.x, stateEntity.y, stateEntity.z,
@@ -1351,10 +1645,84 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         boundMonsterIds.add(monsterId);
     }
 
-    private void synchronizeNativeMonsters() {
-        for(Map.Entry<String, Monster> entry : monsters.entrySet()) {
-            synchronizeNativeMonster(entry.getKey(), entry.getValue());
+    private void restoreAuthoritativeMonster(String monsterId, Monster monster) {
+        // A floor checkpoint restored the Monster natively; the saved combat record is older.
+        if(attachedLevel != null && attachedLevel.restoredCampaignFloor) return;
+        String key = "state:" + monsterId;
+        if(restoredAuthoritativeActors.contains(key)) return;
+        CombatSnapshot snapshot = peer.getCombatSnapshot();
+        if(snapshot == null) return;
+        MonsterSnapshot movement = snapshot.getMonster(monsterId);
+        CombatantSnapshot combatant = snapshot.getCombatant(monsterId);
+        if(movement == null || combatant == null) return;
+        monster.restoreMultiplayerAuthorityState(combatant.getHealth(),
+                combatant.getMaximumHealth(), movement.getX(), movement.getY(),
+                movement.getZ(), movement.isGibbed(), attachedLevel);
+        restoredAuthoritativeActors.add(key);
+    }
+
+    private void restoreAuthoritativeEffects() {
+        if(nativeAuthority == null) return;
+        for(ActorEffectsSnapshot effects : peer.getActorEffects()) {
+            String key = "effects:" + effects.monsterId;
+            if(restoredAuthoritativeActors.contains(key)) continue;
+            com.interrupt.dungeoneer.entities.Actor actor = monsters.get(effects.monsterId);
+            if(actor == null) {
+                actor = effects.monsterId.equals(localCombatantId())
+                        ? attachedPlayer : remoteAvatar(effects.monsterId);
+            }
+            if(actor == null) continue;
+            effects.restoreAuthoritative(actor);
+            restoredAuthoritativeActors.add(key);
         }
+    }
+
+    private void synchronizeNativeMonsters() {
+        monsterFrame++;
+        for(Map.Entry<String, Monster> entry : monsters.entrySet()) {
+            Monster monster = entry.getValue();
+            if(monster != null && monster.hp <= 0 && !monsterDeathFrames.containsKey(monster)) {
+                monsterDeathFrames.put(monster, monsterFrame);
+            }
+            synchronizeNativeMonster(entry.getKey(), monster);
+        }
+    }
+
+    /**
+     * Frees the slot of the Monster dead longest, once every client has had two seconds of
+     * combat state showing it dead; clients keep its corpse. Without this, the 65th Monster to
+     * enter a floor was never announced and stayed invisible to clients.
+     */
+    private boolean retireLongestDeadMonster() {
+        // Resumed clients get two seconds of combat state to draw the orphans' corpses too.
+        if(!orphanedMonsterIds.isEmpty() && monsterFrame - orphansAdoptedFrame >= RETIRE_AFTER_FRAMES) {
+            nativeAuthority.retireNativeMonster(orphanedMonsterIds.remove(0));
+            return true;
+        }
+        String retiredId = null;
+        Monster retired = null;
+        int earliest = Integer.MAX_VALUE;
+        for(Map.Entry<String, Monster> entry : monsters.entrySet()) {
+            Integer died = monsterDeathFrames.get(entry.getValue());
+            if(died == null || monsterFrame - died < RETIRE_AFTER_FRAMES || died >= earliest) continue;
+            earliest = died;
+            retiredId = entry.getKey();
+            retired = entry.getValue();
+        }
+        if(retiredId == null) return false;
+        monsters.remove(retiredId);
+        monsterIds.remove(retired);
+        boundMonsterIds.remove(retiredId);
+        retired.clearMultiplayerAttackListener(this);
+        retired.clearMultiplayerDamageListener(this);
+        retired.clearMultiplayerTarget();
+        lastMonsterActions.remove(retired);
+        lastParticipantAttackers.remove(retired);
+        devSpawnThemes.remove(retired);
+        monsterDeathFrames.remove(retired);
+        retiredMonsters.put(retired, Boolean.TRUE);
+        nativeAuthority.retireNativeMonster(retiredId);
+        return true;
     }
 
     private void synchronizeNativeMonster(String monsterId, Monster monster) {
@@ -1450,6 +1818,15 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             current = current.owner;
         }
         return null;
+    }
+
+    /**
+     * A Monster's or the world's shot hits a remote Participant as native shots hit the Player;
+     * a Participant's own shot never hits a teammate, and a Spectator leaves no body behind.
+     */
+    private boolean projectileMayHit(Entity projectile, RemoteAvatar avatar) {
+        return avatar.isActive && !(avatar.isIncapacitated() && avatar.hidden)
+                && projectile.owner != avatar && participantId(projectile) == null;
     }
 
     private Entity participantEntity(ParticipantId participantId) {
@@ -1591,10 +1968,32 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
 
     private void attachToLevel(Level level) {
         detachFromLevel();
+        restoredAuthoritativeActors.clear();
         attachedLevel = level;
         if(nativeAuthority != null) nativeAuthority.beginNativeWorld();
         // Host announces every late Monster; a client must not roll ambient spawns of its own.
         else level.spawnMonsters = false;
+        keyNativeMonsterSpawners(level);
+        attachedLevel.nativeMonsterSpawnerListener = this::allowNativeMonsterSpawn;
+        if(nativeAuthority != null) keyNativeDecals(level);
+        if(nativeAuthority != null) attachedLevel.nativeProjectileTargets = new NativeProjectileTargets() {
+            @Override public Entity collidingTarget(Entity projectile, float x, float y, float z,
+                    float widthX, float widthY, float height) {
+                for(RemoteAvatar avatar : attachedRemoteAvatars) {
+                    if(!projectileMayHit(projectile, avatar)) continue;
+                    if(x > avatar.x - avatar.collision.x - widthX && x < avatar.x + avatar.collision.x + widthX
+                            && y > avatar.y - avatar.collision.y - widthY
+                            && y < avatar.y + avatar.collision.y + widthY
+                            && z > avatar.z - height && z < avatar.z + avatar.collision.z) return avatar;
+                }
+                return null;
+            }
+            @Override public void addLineTargets(Entity projectile, Array<Entity> candidates) {
+                for(RemoteAvatar avatar : attachedRemoteAvatars) {
+                    if(projectileMayHit(projectile, avatar) && !candidates.contains(avatar, true)) candidates.add(avatar);
+                }
+            }
+        };
         attachedLevel.nativeExplosionListener = new NativeExplosionListener() {
             @Override public boolean isSimulationAuthority() { return nativeAuthority != null; }
             @Override public void addTargets(com.interrupt.dungeoneer.entities.Explosion explosion, Array<Entity> targets) {
@@ -1616,7 +2015,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                     return true;
                 }
                 catch(IllegalArgumentException incompatible) {
-                    nativeAuthority.failNativePresentation(incompatible.getMessage());
+                    skipNativePresentation(incompatible);
                     return false;
                 }
             }
@@ -1624,7 +2023,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         attachedLevel.nativeAnimationListener = (owner, action) -> {
             if(nativeAuthority == null) return;
             try { nativeAuthority.publishNativeAnimationCue(NativeAnimationCue.capture(owner, action)); }
-            catch(IllegalArgumentException invalid) { nativeAuthority.failNativePresentation(invalid.getMessage()); }
+            catch(IllegalArgumentException invalid) { skipNativePresentation(invalid); }
         };
         attachedLevel.nativeDynamicListener = bomb -> {
             if(nativeAuthority == null) return;
@@ -1636,7 +2035,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                                 ? nativeDynamicItemIds.get(id) : 0L, bomb));
             }
             catch(IllegalArgumentException invalid) {
-                nativeAuthority.failNativePresentation(invalid.getMessage());
+                skipNativePresentation(invalid);
             }
         };
         attachedLevel.nativeSpellPresentationListener = (owner, spell, position, zap) -> {
@@ -1648,7 +2047,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                         sourceId, nativeSpellItemId(owner), spell, position, zap));
             }
             catch(IllegalArgumentException invalid) {
-                nativeAuthority.failNativePresentation(invalid.getMessage());
+                skipNativePresentation(invalid);
             }
         };
         attachedLevel.nativeMeleePresentationListener = (owner, sword, kind, target, position, direction) -> {
@@ -1662,7 +2061,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                         sourceId, itemId, kind, position, direction, targetObjectId));
             }
             catch(IllegalArgumentException invalid) {
-                nativeAuthority.failNativePresentation(invalid.getMessage());
+                skipNativePresentation(invalid);
             }
         };
         attachedLevel.nativeRangedPresentationListener = (owner, bow, position) -> {
@@ -1674,7 +2073,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
                         sourceId, itemId, position));
             }
             catch(IllegalArgumentException invalid) {
-                nativeAuthority.failNativePresentation(invalid.getMessage());
+                skipNativePresentation(invalid);
             }
         };
         lastLocalHealth = -1;
@@ -1727,8 +2126,12 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         if(attachedLevel != null) attachedLevel.nativeSpellPresentationListener = null;
         if(attachedLevel != null) attachedLevel.nativeMeleePresentationListener = null;
         if(attachedLevel != null) attachedLevel.nativeRangedPresentationListener = null;
+        if(attachedLevel != null) attachedLevel.nativeMonsterSpawnerListener = null;
+        monsterSpawnerKeys.clear();
+        lateMonstersRestoredLevel = null;
         clearParticipantEffects();
         if(attachedLevel != null) attachedLevel.nativeExplosionListener = null;
+        if(attachedLevel != null) attachedLevel.nativeProjectileTargets = null;
         peer.drainNativeExplosions();
         peer.drainNativeAnimationCues();
         peer.drainNativeDynamicCues();
@@ -1749,6 +2152,9 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         monsters.clear();
         monsterIds.clear();
         boundMonsterIds.clear();
+        monsterDeathFrames.clear();
+        retiredMonsters.clear();
+        orphanedMonsterIds.clear();
         monstersAttachedLevel = null;
         monsterIndexCounter = 0;
         devSpawnThemes.clear();
@@ -1763,7 +2169,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
             clearNativeProjectile(projectile);
         }
         projectilePresentations.clear();
-        nativeDynamicIds.clear();
+        nativeDynamicIds.clear(); unpresentableDynamics.clear();
         nativeDynamicItemIds.clear();
         nextNativeDynamicId = 1L;
         authoritativePlayers.clear();

@@ -256,11 +256,45 @@ public class Trigger extends Entity {
 	public void doTriggerEvent(String value) {
 		Audio.playPositionedSound(triggerSound, new Vector3((float)x,(float)y,(float)z), 0.8f, 11f);
 		Game.instance.level.trigger(this, triggersId, triggerValue, triggeringParticipant);
-		if(message != null && !message.equals("")) Game.ShowMessage(message, messageTime, messageSize);
+		presentForActivator(value);
 	}
 
 	protected ParticipantContext getTriggeringParticipantContext() {
 		return triggeringParticipant;
+	}
+
+	/** This peer's own player set the chain off, or no Participant did (a Monster, a timer). */
+	protected boolean activatedHere() {
+		ParticipantContext participant = triggeringParticipant;
+		return participant == null || LocalPlayerCompatibilityAdapter.LOCAL_PARTICIPANT_ID
+				.equals(participant.getParticipantId());
+	}
+
+	/**
+	 * Screen-only effects belong to the activator: shown here, handed by Host to the client that
+	 * used this trigger, or skipped when that client runs its own copy (it walked into it).
+	 */
+	protected final void presentForActivator(String value) {
+		if(activatedHere()) {
+			presentToActivator(value, true);
+			return;
+		}
+		ParticipantContext participant = triggeringParticipant;
+		if(participant.isPresentedByActivator()) return;
+		Level level = Game.instance == null ? null : Game.instance.level;
+		if(level != null && level.nativeTriggerPresentationListener != null) {
+			level.nativeTriggerPresentationListener.deliver(this, participant.getParticipantId(),
+					value == null ? "" : value);
+		}
+	}
+
+	/**
+	 * Screen-only part of this trigger: message text here; overlays, flashes, music and
+	 * achievements in subclasses. {@code continuesChain} is false on a client shown a chain
+	 * Host already ran, so closing an overlay must not set anything off again.
+	 */
+	public void presentToActivator(String value, boolean continuesChain) {
+		if(message != null && !message.equals("")) Game.ShowMessage(message, messageTime, messageSize);
 	}
 
 	protected ParticipantContext localParticipant(Player player) {

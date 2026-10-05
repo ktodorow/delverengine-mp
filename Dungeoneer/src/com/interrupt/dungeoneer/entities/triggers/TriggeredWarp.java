@@ -82,6 +82,8 @@ public class TriggeredWarp extends Trigger {
 	@Override
 	public void doTriggerEvent(String value) {
 		triggerStatus=TriggerStatus.WAITING;
+		// A client's avatar cannot move Host's whole session; Party travel rules own that (#27).
+		if(!activatedHere()) return;
 
 		if(Game.inEditor) {
 			if(isExit) {

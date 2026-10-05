@@ -134,6 +134,10 @@ public class Projectile extends Entity {
 			
 			if (level.isFree(nextx, nexty, nextz, collision, 0, false, null)) {
 				Entity encroaching = level.checkEntityCollision(nextx, y, nextz, collision, null, this);
+				if(encroaching == null && level.nativeProjectileTargets != null) {
+					encroaching = level.nativeProjectileTargets.collidingTarget(this, nextx, y, nextz,
+							collision.x, collision.y, collision.z);
+				}
 
                 if(encroaching instanceof Projectile && ((Projectile) encroaching).owner == owner) {
                     // ignore this

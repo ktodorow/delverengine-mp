@@ -6,6 +6,7 @@ import java.io.File;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -93,6 +94,16 @@ public class DesktopLaunchOptionsTest {
         assertEquals("humanoid-2", client.avatarId);
         assertEquals(3, client.requestedSlot);
         assertFalse(client.directHost);
+    }
+
+    @Test
+    public void hostWithoutCampaignIdOpensCampaignLibrary() {
+        DesktopLaunchOptions options = DesktopLaunchOptions.parse(new String[] {
+                "--direct-host", "--campaign-capacity=3"
+        });
+
+        assertNull(options.campaignId);
+        assertEquals(3, options.campaignCapacity);
     }
 
     @Test

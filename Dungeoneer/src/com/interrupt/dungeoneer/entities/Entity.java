@@ -247,6 +247,12 @@ public class Entity {
 	/** Cosmetic network replica. Never participates in local gameplay simulation. */
 	public transient boolean nativePresentationReplica = false;
 
+	/**
+	 * Direct Connect id this Entity was bound to (world object, Monster or hazard). Saved with a
+	 * Host floor checkpoint so a restored floor keeps the ids clients derive from a fresh build.
+	 */
+	public String multiplayerIdentity = null;
+
 	public float slideEffectTimer = 0;
 
 	public transient Float drawUpdateTimer = null;

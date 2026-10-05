@@ -15,6 +15,7 @@ import com.interrupt.dungeoneer.multiplayer.combat.NativeStatusEffectState;
 import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
 import com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
@@ -44,6 +45,9 @@ public interface DirectConnectPeer extends AutoCloseable {
     List<MovementEntityDescriptor> getMovementEntities();
 
     List<MovementSnapshot> getMovementSnapshots();
+
+    /** Host only: every Participant's accepted position this instant; null on a client. */
+    default List<MovementEntityState> getCurrentMovementStates() { return null; }
 
     CombatSnapshot getCombatSnapshot();
 
@@ -84,11 +88,26 @@ public interface DirectConnectPeer extends AutoCloseable {
         return java.util.Collections.emptyList();
     }
 
+    /** Host transforms of the floor's native Movers. */
+    default List<com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot> getMoverSnapshots() {
+        return java.util.Collections.emptyList();
+    }
+
     default List<BreakableSnapshot> getBreakableSnapshots() {
         return java.util.Collections.emptyList();
     }
 
     /** Monsters Host bound after the floor's initial attach; clients materialize replicas once. */
+    /** Client: Host floor marks made before this peer joined, to rebuild on its own floor. */
+    default List<com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState> drainNativeDecals() {
+        return java.util.Collections.emptyList();
+    }
+
+    /** Client: screen-only effects of Host trigger chains this peer's Participant started. */
+    default List<com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation> drainTriggerPresentations() {
+        return java.util.Collections.emptyList();
+    }
+
     default List<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn> drainNativeMonsterSpawns() {
         return java.util.Collections.emptyList();
     }

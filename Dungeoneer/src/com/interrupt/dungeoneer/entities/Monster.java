@@ -1116,23 +1116,7 @@ public class Monster extends Actor implements Directional {
 			}
 
 			if(hp > 0) {
-				if(bloodSplatterDecal != null && bloodSplatterDecal.isActive) {
-					ProjectedDecal proj = new ProjectedDecal(bloodSplatterDecal);
-					proj.decalHeight -= Game.rand.nextFloat() * 0.2f;
-					proj.decalWidth = proj.decalHeight;
-					proj.x = x;
-					proj.y = y;
-					proj.z = z + 0.2f;
-
-					proj.direction = new Vector3(Game.rand.nextFloat() - 0.5f, Game.rand.nextFloat() - 0.5f, Game.rand.nextFloat() - 1f).nor();
-					proj.roll = Game.rand.nextFloat() * 360f;
-
-					proj.end = 1f;
-					proj.start = 0.01f;
-					proj.isOrtho = true;
-
-					Game.instance.level.entities.add(proj);
-				}
+				spawnBloodSplatter(Game.instance.level);
 
 				if(triggersWhenHurt != null && !triggersWhenHurt.isEmpty()) {
 					Game.GetLevel().trigger(this, triggersWhenHurt, name);
@@ -1238,21 +1222,7 @@ public class Monster extends Actor implements Directional {
 			spawnLoot(level);
 			spawnEntities(level);
 
-			if (bloodPoolDecal != null && bloodPoolDecal.isActive) {
-				ProjectedDecal proj = new ProjectedDecal(bloodPoolDecal);
-				proj.decalHeight -= Game.rand.nextFloat() * 0.2f;
-				proj.decalWidth = proj.decalHeight;
-				proj.x = x;
-				proj.y = y;
-				proj.z = z + 0.2f;
-				proj.direction = new Vector3(0.05f, 0, -0.95f).nor();
-				proj.roll = Game.rand.nextFloat() * 360f;
-				proj.end = 1f;
-				proj.start = 0.01f;
-				proj.isOrtho = true;
-
-				Game.instance.level.entities.add(proj);
-			}
+			spawnBloodPool(Game.instance.level);
 		}
 
 		if(walkAmbientSound != null) {
@@ -1273,6 +1243,44 @@ public class Monster extends Actor implements Directional {
 		if(triggersOnDeath != null && !triggersOnDeath.isEmpty()) {
 			level.trigger(this, triggersOnDeath, name);
 		}
+	}
+
+	/** Native wound mark left by a hit that did not kill. */
+	private void spawnBloodSplatter(Level level) {
+		if(level == null || bloodSplatterDecal == null || !bloodSplatterDecal.isActive) return;
+		ProjectedDecal proj = new ProjectedDecal(bloodSplatterDecal);
+		proj.decalHeight -= Game.rand.nextFloat() * 0.2f;
+		proj.decalWidth = proj.decalHeight;
+		proj.x = x;
+		proj.y = y;
+		proj.z = z + 0.2f;
+
+		proj.direction = new Vector3(Game.rand.nextFloat() - 0.5f, Game.rand.nextFloat() - 0.5f, Game.rand.nextFloat() - 1f).nor();
+		proj.roll = Game.rand.nextFloat() * 360f;
+
+		proj.end = 1f;
+		proj.start = 0.01f;
+		proj.isOrtho = true;
+
+		level.entities.add(proj);
+	}
+
+	/** Native pool left under a Monster that died without splattering. */
+	private void spawnBloodPool(Level level) {
+		if(level == null || bloodPoolDecal == null || !bloodPoolDecal.isActive) return;
+		ProjectedDecal proj = new ProjectedDecal(bloodPoolDecal);
+		proj.decalHeight -= Game.rand.nextFloat() * 0.2f;
+		proj.decalWidth = proj.decalHeight;
+		proj.x = x;
+		proj.y = y;
+		proj.z = z + 0.2f;
+		proj.direction = new Vector3(0.05f, 0, -0.95f).nor();
+		proj.roll = Game.rand.nextFloat() * 360f;
+		proj.end = 1f;
+		proj.start = 0.01f;
+		proj.isOrtho = true;
+
+		level.entities.add(proj);
 	}
 
 	public void bleed(Level level)
@@ -1464,6 +1472,8 @@ public class Monster extends Actor implements Directional {
 
 	public void encroached(Player player)
 	{
+		// A replica only shows the Host Monster; bumping it must not start a local attack.
+		if(networkReplica) return;
 		attack(player);
 	}
 
@@ -1712,6 +1722,40 @@ public class Monster extends Actor implements Directional {
         networkAnimation = next;
     }
 
+    /** Cold-resume animation cursor restore. Applies current cursor; never replays animation action. */
+    public void restoreAuthoritativeNativeAnimation(
+            com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState next) {
+        if(next == null) return;
+        if(next.kind == com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState.Kind.DEATH) {
+            if(multiplayerCorpse != null) multiplayerCorpse.applyNetworkAnimation(next);
+            return;
+        }
+        SpriteAnimation animation = animationFor(next.kind);
+        if(animation != null) {
+            animation.applyPresentationCursor(next.time, next.playing, next.looping, this, false);
+        }
+        else tex = next.texture;
+    }
+
+    /** Cold-resume authoritative outcome; suppresses native death, loot, and gib callbacks. */
+    public void restoreMultiplayerAuthorityState(int health, int maximumHealth,
+            float targetX, float targetY, float targetZ, boolean gibbed, Level level) {
+        maxHp = Math.max(1, maximumHealth);
+        hp = Math.max(0, Math.min(health, maxHp));
+        setPosition(targetX, targetY, targetZ);
+        if(hp <= 0) {
+            multiplayerDeathProcessed = true;
+            multiplayerDeathGibbed = gibbed;
+            isActive = false;
+            isSolid = false;
+            if(level != null && multiplayerCorpse == null && dieAnimation != null) {
+                multiplayerCorpse = new Corpse(this);
+                if(gibbed) multiplayerCorpse.restoreAuthoritativeGib();
+                level.entities.add(multiplayerCorpse);
+            }
+        }
+    }
+
     private transient com.interrupt.dungeoneer.multiplayer.combat.NativeStatusPresentation networkStatusPresentation;
 
     public void applyNetworkEffects(com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot state) {
@@ -1753,6 +1797,12 @@ public class Monster extends Actor implements Directional {
 
 	public boolean isNetworkReplica() {
 		return networkReplica;
+	}
+
+	/** Native solidity for movement; a replica keeps it though it is not solid locally. */
+	public boolean blocksNativeMovement() {
+		if(!isActive || hp <= 0) return false;
+		return networkReplica ? networkOriginalSolid && !networkDead : isSolid;
 	}
 
 	public void applyNetworkState(int health, int maximumHealth,
@@ -1814,7 +1864,13 @@ public class Monster extends Actor implements Directional {
 	}
 
 	public void playNetworkDamagePresentation() {
-		if(networkReplica && hurtAnimation != null) hurtAnimation.play();
+		if(!networkReplica) return;
+		if(hurtAnimation != null) hurtAnimation.play();
+		Level level = Game.GetLevel();
+		if(level == null) return;
+		hitEffect(level, DamageType.PHYSICAL);
+		// Same wound mark a native hit leaves; a killing hit presents its death instead.
+		if(!networkDead && hp > 0) spawnBloodSplatter(level);
 	}
 
 	private Entity getRuntimeTarget() {
@@ -1849,6 +1905,8 @@ public class Monster extends Actor implements Directional {
 				multiplayerDeathProcessed = true;
 				multiplayerDeathGibbed = networkGibbed || dieAnimation == null;
 				if(!networkDeathRecovery) dieEffect(level);
+				// Host's native death left this pool; a rejoining client gets Host's own instead.
+				if(!networkDeathRecovery) spawnBloodPool(level);
 				if(dieAnimation != null) {
 					Corpse corpse = new Corpse(this);
 					corpse.persists = false;
@@ -1869,6 +1927,10 @@ public class Monster extends Actor implements Directional {
 			isActive = false;
 			return;
 		}
+
+		// Native wounded Monsters drip blood; bleed paces drips by tickcount.
+		tickcount += delta;
+		if(hp <= maxHp / 2.0) bleed(level);
 
 		float oldX = x;
 		float oldY = y;

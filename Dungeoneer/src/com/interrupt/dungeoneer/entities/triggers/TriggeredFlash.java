@@ -16,8 +16,8 @@ public class TriggeredFlash extends Trigger {
 	public TriggeredFlash() { hidden = true; spriteAtlas = "editor"; tex = 11; }
 	
 	@Override
-	public void doTriggerEvent(String value) {
+	public void presentToActivator(String value, boolean continuesChain) {
 		Game.flash(flashColor, flashTime);
-		super.doTriggerEvent(value);
+		super.presentToActivator(value, continuesChain);
 	}
 }

@@ -7,6 +7,7 @@ import com.badlogic.gdx.graphics.g2d.TextureRegion;
 import com.badlogic.gdx.scenes.scene2d.utils.NinePatchDrawable;
 import com.interrupt.dungeoneer.Art;
 import com.interrupt.dungeoneer.annotations.EditorProperty;
+import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.overlays.DialogueOverlay;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
@@ -36,6 +37,16 @@ public class TriggeredDialogue extends Trigger {
 	
 	@Override
 	public void doTriggerEvent(String value) {
+		// A client activator sees this on its own screen; nothing here waits for it to close.
+		if(!activatedHere() && triggerIdAfter != null && !triggerIdAfter.isEmpty()) {
+			Game.instance.level.trigger(this, triggerIdAfter, "message",
+					getTriggeringParticipantContext());
+		}
+		super.doTriggerEvent(value);
+	}
+
+	@Override
+	public void presentToActivator(String value, boolean continuesChain) {
 		// Set a background, if one was given
 		NinePatchDrawable background = null;
 		if(backgroundImage != null && !backgroundImage.isEmpty()) {
@@ -46,10 +57,10 @@ public class TriggeredDialogue extends Trigger {
 		}
 
 		DialogueOverlay overlay = new DialogueOverlay(messageFile, background, textColor);
-		overlay.triggerOnClose = triggerIdAfter;
+		overlay.triggerOnClose = continuesChain ? triggerIdAfter : null;
 		overlay.pausesGame = pausesGame;
 		OverlayManager.instance.push(overlay);
 
-		super.doTriggerEvent(value);
+		super.presentToActivator(value, continuesChain);
 	}
 }

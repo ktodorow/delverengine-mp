@@ -13,8 +13,8 @@ public class TriggeredAchievement extends Trigger {
 	public String achievementName;
 	
 	@Override
-	public void doTriggerEvent(String value) {
+	public void presentToActivator(String value, boolean continuesChain) {
 		SteamApi.api.achieve(achievementName);
-		super.doTriggerEvent(value);
+		super.presentToActivator(value, continuesChain);
 	}
 }

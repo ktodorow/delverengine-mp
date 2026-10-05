@@ -8,6 +8,7 @@ import com.interrupt.dungeoneer.game.Level;
 import com.interrupt.dungeoneer.game.Options;
 import com.interrupt.dungeoneer.gfx.GlRenderer;
 import com.interrupt.dungeoneer.input.Actions;
+import com.interrupt.dungeoneer.overlays.Overlay;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
 import com.interrupt.dungeoneer.overlays.PauseOverlay;
 import com.interrupt.managers.StringManager;
@@ -54,14 +55,22 @@ public class GameManager {
 	}
 	
 	public void startGame(Level level) {
-		game = new Game(level);
+		startPreparedLevel(level, Game.PreparedLevelMode.EDITOR);
+	}
+
+	public void startCampaign(Level level) {
+		startPreparedLevel(level, Game.PreparedLevelMode.CAMPAIGN);
+	}
+
+	private void startPreparedLevel(Level level, Game.PreparedLevelMode mode) {
+		game = new Game(level, mode);
 		game.setInputHandler(myGameApp.input);
 		
 		gameHasStarted = true;
 		renderer.initHud();
 		
 		running = true;
-		GameApplication.editorRunning = true;
+		GameApplication.editorRunning = mode == Game.PreparedLevelMode.EDITOR;
 		
 		Options.instance.uiSize = 0.8f;
 	}
@@ -69,6 +78,53 @@ public class GameManager {
 	/** DelvEdit play-tests stop on Esc; a Direct Connect session opens the ordinary pause menu. */
 	static boolean escapeEndsEditorPlaytest() {
 		return Game.inEditor && !GameApplication.isDirectConnectSession();
+	}
+
+	/**
+	 * Esc or gamepad Pause while playing: close the top overlay or menu, otherwise open the pause
+	 * menu. Single-player never ticks under an overlay that pauses the game, so that overlay owns
+	 * Esc; a Direct Connect world keeps ticking under it and must leave Esc to it too, or the
+	 * still-held key closes the pause menu the frame after opening it.
+	 */
+	static void handleEscape(java.util.function.Supplier<Overlay> pauseMenu) {
+		if (OverlayManager.instance.shouldPauseGame()) return;
+
+		if (OverlayManager.instance.current() != null) {
+			Game.ignoreEscape = true;
+			OverlayManager.instance.pop();
+		}
+
+		if (Game.instance != null && (Game.instance.getShowingMenu() || Game.instance.getInteractMode())) {
+			Game.ignoreEscape = true;
+
+			if (Game.instance.getShowingMenu())
+				Game.instance.toggleInventory();
+			else if (Game.instance.getInteractMode())
+				Game.instance.toggleInteractMode();
+		}
+
+		if (!Game.ignoreEscape) {
+			OverlayManager.instance.push(pauseMenu.get());
+			Game.ignoreEscape = true;
+		}
+	}
+
+	/** Esc, Back and gamepad Pause. Direct Connect also polls this while its world is held still. */
+	public void pollEscape() {
+		if (game == null || game.player == null || game.player.isDead) return;
+		if (Game.isMobile && Gdx.input.isKeyPressed(Input.Keys.BACK)) {
+			OverlayManager.instance.push(new PauseOverlay());
+		} else if (Gdx.input.isKeyPressed(Input.Keys.ESCAPE) || this.myGameApp.input.gamepadManager.controllerState.buttonEvents.contains(Actions.Action.PAUSE, true)) {
+
+			if (escapeEndsEditorPlaytest()) {
+				GameApplication.editorRunning = false;
+				running = false;
+				GameManager.getGame().level.preSaveCleanup();
+			} else {
+				handleEscape(PauseOverlay::new);
+			}
+		} else if (!Gdx.input.isKeyPressed(Input.Keys.ESCAPE) && Game.ignoreEscape)
+			Game.ignoreEscape = false;
 	}
 
 	private float time_since_last_tick = 0f;
@@ -86,40 +142,7 @@ public class GameManager {
 
 			GameManager.renderer.clearLights();
 
-			if (game != null && game.player != null && !game.player.isDead) {
-				if (Game.isMobile && Gdx.input.isKeyPressed(Input.Keys.BACK)) {
-					OverlayManager.instance.push(new PauseOverlay());
-				} else if (Gdx.input.isKeyPressed(Input.Keys.ESCAPE) || this.myGameApp.input.gamepadManager.controllerState.buttonEvents.contains(Actions.Action.PAUSE, true)) {
-
-					if (escapeEndsEditorPlaytest()) {
-						GameApplication.editorRunning = false;
-						running = false;
-						GameManager.getGame().level.preSaveCleanup();
-					} else {
-
-						if (OverlayManager.instance.current() != null) {
-							Game.ignoreEscape = true;
-							OverlayManager.instance.pop();
-						}
-
-						if (Game.instance != null && (Game.instance.getShowingMenu() || Game.instance.getInteractMode())) {
-							Game.ignoreEscape = true;
-
-							if (Game.instance.getShowingMenu())
-								Game.instance.toggleInventory();
-							else if (Game.instance.getInteractMode())
-								Game.instance.toggleInteractMode();
-						}
-
-						if (!Game.ignoreEscape) {
-							OverlayManager.instance.push(new PauseOverlay());
-							// A Direct Connect world keeps ticking under the menu; the held key must not close it.
-							Game.ignoreEscape = true;
-						}
-					}
-				} else if (!Gdx.input.isKeyPressed(Input.Keys.ESCAPE) && Game.ignoreEscape)
-					Game.ignoreEscape = false;
-			}
+			pollEscape();
 
 			if (running) game.tick(delta);
 

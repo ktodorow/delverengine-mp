@@ -24,6 +24,15 @@ public interface NativeCombatAuthority {
     default void setNativeParticipantPosition(ParticipantId participant,
             float x, float y, float z) { }
 
+    /** Tells clients to drop a native projectile, bomb or fire they drew from an earlier state. */
+    default void retireNativeDynamicState(long id) { }
+
+    /** A dead Monster every client has seen die no longer needs a slot. */
+    default void retireNativeMonster(String monsterId) { }
+
+    /** Native walk speed before status effects, from Speed stat and equipment. */
+    default void setNativeParticipantWalkSpeed(ParticipantId participant, float walkSpeed) { }
+
     /** Accepted level/stat change from Campaign Slot progression; no presentation event. */
     default void setNativeParticipantMaximumHealth(ParticipantId participant,
             int maximumHealth, boolean restoreFull) { }
@@ -89,6 +98,22 @@ public interface NativeCombatAuthority {
 
     /** A Monster bound after the initial attach; replayed to reconnecting peers for this world. */
     default void publishNativeMonsterSpawn(NativeMonsterSpawn spawn) { }
+
+    /** Cold resume: late Monsters of this world, absent from the rebuilt floor until recreated. */
+    default List<NativeMonsterSpawn> getRestoredNativeMonsterSpawns() {
+        return java.util.Collections.emptyList();
+    }
+
+    /** Floor MonsterSpawner, by stable placement key, that already added its Monsters. */
+    default boolean isNativeMonsterSpawnerConsumed(String spawnerKey) { return false; }
+
+    default void consumeNativeMonsterSpawner(String spawnerKey) { }
+
+    /**
+     * A mark on the current floor. Kept for clients that join later; {@code announce} also sends
+     * it to connected clients, which did not see it made (a mark restored from a checkpoint).
+     */
+    default void recordNativeDecal(NativeDecalState decal, boolean announce) { }
 
     default void applyNativeEnvironmentalDamage(String sourceId, ParticipantId targetId,
             int damage, float originX, float originY, float originZ,

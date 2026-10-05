@@ -108,10 +108,12 @@ public class DesktopStarter {
                     launchOptions.nickname, launchOptions.avatarId);
             if(launchOptions.directHost) {
                 campaignRosterStore = new CampaignRosterStore();
-                campaignRoster = campaignRosterStore.loadOrCreate(
-                        launchOptions.campaignId, launchOptions.campaignCapacity,
-                        AvatarCatalog.ownedV108Humanoids(), launcherIdentity,
-                        slotPresentation);
+                if(launchOptions.campaignId != null) {
+                    campaignRoster = campaignRosterStore.loadOrCreate(
+                            launchOptions.campaignId, launchOptions.campaignCapacity,
+                            AvatarCatalog.ownedV108Humanoids(), launcherIdentity,
+                            slotPresentation);
+                }
             }
             else {
                 reconnectTokenStore = new ProfileReconnectTokenStore();
@@ -163,8 +165,12 @@ public class DesktopStarter {
 
         GameApplication gameApplication;
         if(launchOptions.directHost) {
-            gameApplication = GameApplication.forDirectConnectHost(launchOptions.sessionPort,
-                    campaignRoster, campaignRosterStore, launchOptions.directFloor);
+            gameApplication = campaignRoster == null
+                    ? GameApplication.forDirectConnectHostLibrary(launchOptions.sessionPort,
+                            campaignRosterStore, launcherIdentity, slotPresentation,
+                            launchOptions.campaignCapacity, launchOptions.directFloor)
+                    : GameApplication.forDirectConnectHost(launchOptions.sessionPort,
+                            campaignRoster, campaignRosterStore, launchOptions.directFloor);
         }
         else if(launchOptions.directConnectAddress != null) {
             gameApplication = GameApplication.forDirectConnectClient(

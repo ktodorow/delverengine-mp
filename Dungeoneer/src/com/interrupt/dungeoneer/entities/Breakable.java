@@ -124,6 +124,21 @@ public class Breakable extends Model {
 		nativePresentationReplica = true;
 	}
 
+	/** Cold resume on the authority: saved outcome without break, loot, trigger or gib; stays native. */
+	public void restoreAuthoritativeSnapshot(BreakableSnapshot snapshot) {
+		hp = snapshot.hp;
+		isActive = snapshot.active;
+		isSolid = snapshot.solid;
+		x = snapshot.x;
+		y = snapshot.y;
+		z = snapshot.z;
+		xa = snapshot.velocityX;
+		ya = snapshot.velocityY;
+		za = snapshot.velocityZ;
+		rotation.set(snapshot.rotationX, snapshot.rotationY, snapshot.rotationZ);
+		nativePresentationReplica = false;
+	}
+
 	/** Native break feedback only; never runs loot, triggers, or destruction gameplay. */
 	public void playNetworkBreakPresentation(Level level) {
 		gib(level, new Vector3());

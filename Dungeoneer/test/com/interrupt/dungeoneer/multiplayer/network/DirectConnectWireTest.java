@@ -364,6 +364,13 @@ public class DirectConnectWireTest {
         assertEquals("Friend", chat.message.getNickname());
         assertEquals("Watch left.", chat.message.getText());
 
+        DirectConnectWire.PartyChatDelivery system =
+                (DirectConnectWire.PartyChatDelivery)roundTrip(
+                        new DirectConnectWire.PartyChatDelivery("session",
+                                PartyChatMessage.system(2L, 2, "Friend", "Friend joined")));
+        assertTrue(system.message.isSystem());
+        assertEquals("Friend joined", system.message.getDisplayText());
+
         DirectConnectWire.PauseRequestedMessage request =
                 (DirectConnectWire.PauseRequestedMessage)roundTrip(
                         new DirectConnectWire.PauseRequestedMessage("session",
@@ -586,6 +593,19 @@ public class DirectConnectWireTest {
         assertEquals(1000000L, door.state.entityId);
         assertEquals(0.5f, door.state.animation, 0f);
         assertFalse(door.state.solid);
+    }
+
+    @Test
+    public void moverStateRoundTripsTransformAndMotion() throws Exception {
+        DirectConnectWire.MoverStateMessage mover = (DirectConnectWire.MoverStateMessage)
+                roundTrip(new DirectConnectWire.MoverStateMessage("session",
+                        new com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot(
+                                77L, 3L, 38.5f, 10.5f, 0.12f, 0f, 0f, 90f, true)));
+        assertEquals(77L, mover.state.entityId);
+        assertEquals(3L, mover.state.revision);
+        assertEquals(0.12f, mover.state.z, 0f);
+        assertEquals(90f, mover.state.rotationZ, 0f);
+        assertTrue(mover.state.moving);
     }
 
     @Test
@@ -831,6 +851,39 @@ public class DirectConnectWireTest {
         assertEquals("participant:campaign-slot-2", decoded.presentation.sourceId);
         assertEquals(73L, decoded.presentation.itemId);
         assertEquals(2.75f, decoded.presentation.y, 0f);
+    }
+
+    @Test
+    public void nativeDecalRoundTripsEverythingItIsDrawnWith() throws Exception {
+        com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState decal =
+                new com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState(1.5f, 2.5f, 0.2f,
+                        0.05f, 0f, -0.95f, 33f, 0f, 0f, 90f, 0.01f, 1f, 20f, 0.7f, 0.6f, true,
+                        com.interrupt.dungeoneer.entities.Entity.ArtType.sprite.ordinal(), 18, "sprite",
+                        0.2f, 0.9f, 0.3f, 1f);
+
+        DirectConnectWire.NativeDecalMessage decoded = (DirectConnectWire.NativeDecalMessage)roundTrip(
+                new DirectConnectWire.NativeDecalMessage("session", 3L, decal));
+
+        assertEquals(3L, decoded.generation);
+        assertEquals(18, decoded.decal.tex);
+        assertEquals("sprite", decoded.decal.atlas);
+        assertEquals(33f, decoded.decal.roll, 0f);
+        assertEquals(-0.95f, decoded.decal.directionZ, 0f);
+        assertEquals(0.6f, decoded.decal.height, 0f);
+        assertEquals(0.9f, decoded.decal.green, 0f);
+        assertTrue(decoded.decal.ortho);
+    }
+
+    @Test
+    public void triggerPresentationRoundTripsToItsActivator() throws Exception {
+        DirectConnectWire.TriggerPresentationMessage decoded =
+                (DirectConnectWire.TriggerPresentationMessage)roundTrip(
+                        new DirectConnectWire.TriggerPresentationMessage("session",
+                                new com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation(
+                                        4242L, "sign.dat")));
+
+        assertEquals(4242L, decoded.presentation.objectId);
+        assertEquals("sign.dat", decoded.presentation.value);
     }
 
     private DirectConnectWire.Message roundTrip(DirectConnectWire.Message message)

@@ -386,6 +386,7 @@ public class NativeOwnershipRegressionTest {
                             || method.getName().equals("drainItemActionResults")
                             || method.getName().equals("drainDoorFeedback")
                             || method.getName().equals("getDoorSnapshots")
+                            || method.getName().equals("getMoverSnapshots")
                             || method.getName().equals("getBreakableSnapshots")) {
                         return Collections.emptyList();
                     }

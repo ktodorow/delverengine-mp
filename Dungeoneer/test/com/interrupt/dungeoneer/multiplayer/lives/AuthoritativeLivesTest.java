@@ -179,7 +179,7 @@ public class AuthoritativeLivesTest {
         assertEquals(3, outcomes.size());
         for(Outcome outcome : outcomes) assertEquals(OutcomeKind.RESPAWNED, outcome.kind);
         assertEquals(1, lives.getRemainingLives(alpha));
-        assertFalse(lives.isPartyWiped());
+        assertFalse(lives.isPartyWiped(Arrays.asList(alpha, beta, gamma)));
     }
 
     @Test
@@ -196,14 +196,27 @@ public class AuthoritativeLivesTest {
     @Test
     public void partyWipeOnlyWhenNoSlotCanReturn() {
         AuthoritativeLives lives = lives(1);
+        List<ParticipantId> everyone = Arrays.asList(alpha, beta, gamma);
         lives.down(alpha);
         lives.down(beta);
         advance(lives, AuthoritativeLives.BLEEDOUT_TICKS);
-        assertFalse(lives.isPartyWiped());
+        assertFalse(lives.isPartyWiped(everyone));
 
         lives.down(gamma);
         advance(lives, AuthoritativeLives.BLEEDOUT_TICKS);
-        assertTrue(lives.isPartyWiped());
+        assertTrue(lives.isPartyWiped(everyone));
+    }
+
+    @Test
+    public void slotThatLeftDoesNotKeepTheCampaignAlive() {
+        AuthoritativeLives lives = lives(1);
+        lives.down(alpha);
+        lives.down(beta);
+        advance(lives, AuthoritativeLives.BLEEDOUT_TICKS);
+
+        // gamma still has its Life but left the session after its reconnect grace.
+        assertTrue(lives.isPartyWiped(Arrays.asList(alpha, beta)));
+        assertFalse("Still in grace, gamma can come back", lives.isPartyWiped(Arrays.asList(alpha, beta, gamma)));
     }
 
     @Test

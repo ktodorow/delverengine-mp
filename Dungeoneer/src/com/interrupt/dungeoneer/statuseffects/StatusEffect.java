@@ -118,6 +118,22 @@ public class StatusEffect {
 
     public long getMultiplayerPulseCount() { return multiplayerPulseCount; }
 
+    /** Cold-resume cursor restore; never emits a gameplay pulse or start callback. */
+    public void restoreMultiplayerCursor(long instanceId, float elapsed, long pulses) {
+        if(instanceId < 1L || elapsed < 0f || Float.isNaN(elapsed)
+                || Float.isInfinite(elapsed) || pulses < 0L) {
+            throw new IllegalArgumentException("Invalid saved status-effect cursor.");
+        }
+        multiplayerInstanceId = instanceId;
+        multiplayerElapsed = elapsed;
+        multiplayerPulseCount = pulses;
+        long current = nextMultiplayerInstanceId.get();
+        while(current < instanceId
+                && !nextMultiplayerInstanceId.compareAndSet(current, instanceId)) {
+            current = nextMultiplayerInstanceId.get();
+        }
+    }
+
     protected void noteMultiplayerPulse() {
         if(multiplayerPulseCount < Long.MAX_VALUE) multiplayerPulseCount++;
     }

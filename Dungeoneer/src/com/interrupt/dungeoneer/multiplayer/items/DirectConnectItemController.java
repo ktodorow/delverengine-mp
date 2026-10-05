@@ -15,10 +15,12 @@ import com.interrupt.dungeoneer.entities.Entity;
 import com.interrupt.dungeoneer.entities.Group;
 import com.interrupt.dungeoneer.entities.Breakable;
 import com.interrupt.dungeoneer.entities.Door;
+import com.interrupt.dungeoneer.entities.Mover;
 import com.interrupt.dungeoneer.entities.triggers.Trigger;
 import com.interrupt.dungeoneer.entities.triggers.BasicTrigger;
 import com.interrupt.dungeoneer.entities.triggers.ButtonModel;
 import com.interrupt.dungeoneer.entities.Item;
+import com.interrupt.dungeoneer.entities.ItemSpawner;
 import com.interrupt.dungeoneer.entities.Monster;
 import com.interrupt.dungeoneer.multiplayer.floor.SharedFloorIdentity;
 import com.interrupt.dungeoneer.entities.Player;
@@ -35,6 +37,7 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementObstacle;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
+import com.interrupt.dungeoneer.multiplayer.movement.RemoteAvatar;
 import com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantCharacterState;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext;
@@ -49,10 +52,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 /** Native inventory/world bridge. Only this render-thread boundary mutates engine Items. */
@@ -70,6 +75,9 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     private final Map<Entity, Long> objectIds = new IdentityHashMap<Entity, Long>();
     private final Map<Long, DoorSnapshot> publishedDoors = new LinkedHashMap<Long, DoorSnapshot>();
     private final Map<Long, DoorSnapshot> appliedDoors = new LinkedHashMap<Long, DoorSnapshot>();
+    private final Map<Long, MoverSnapshot> publishedMovers = new LinkedHashMap<Long, MoverSnapshot>();
+    private final Map<Long, MoverSnapshot> appliedMovers = new LinkedHashMap<Long, MoverSnapshot>();
+    private long moverRevision;
     private final Map<Long, BreakableSnapshot> publishedBreakables =
             new LinkedHashMap<Long, BreakableSnapshot>();
     private final Map<Long, BreakableSnapshot> appliedBreakables =
@@ -86,6 +94,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     }
     private final Map<Long, Long> pendingConsumption = new LinkedHashMap<Long, Long>();
     private final Map<Long, Vector3> pendingConsumptionAim = new LinkedHashMap<Long, Vector3>();
+    private final Set<Long> restoredNativeMetadata = new HashSet<Long>();
     public interface ConsumableConsumer {
         boolean consume(ParticipantId participant, Item item, Vector3 direction);
     }
@@ -165,6 +174,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             objectGeneration = generation;
             publishedDoors.clear();
             appliedDoors.clear();
+            appliedMovers.clear();
+            publishedMovers.clear();
             publishedBreakables.clear();
             appliedBreakables.clear();
         }
@@ -241,6 +252,16 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 appliedDoors.put(door.entityId, door);
             }
         }
+        List<MoverSnapshot> movers = host == null ? peer.getMoverSnapshots() : null;
+        if(movers != null) for(MoverSnapshot mover : movers) {
+            Entity entity = objects.get(mover.entityId);
+            MoverSnapshot previous = appliedMovers.get(mover.entityId);
+            if(entity instanceof Mover && (previous == null || previous.revision < mover.revision)) {
+                ((Mover)entity).applyNetworkState(mover.x, mover.y, mover.z, mover.rotationX,
+                        mover.rotationY, mover.rotationZ, mover.moving);
+                appliedMovers.put(mover.entityId, mover);
+            }
+        }
         if(host == null) for(BreakableSnapshot state : peer.getBreakableSnapshots()) {
             Entity entity = objects.get(state.entityId);
             BreakableSnapshot previous = appliedBreakables.get(state.entityId);
@@ -259,6 +280,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         reportEquipment();
         reportSpending();
         reportWield();
+        if(host == null) presentHostTriggerChains();
         if(host != null) {
             for(Map.Entry<Long, Item> entry : nativeItems.entrySet()) {
                 Item item = entry.getValue();
@@ -273,9 +295,20 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 }
             }
             host.publishPhysicalItems();
+            if(!peer.isSessionPaused()) fireTouchTriggersForRemoteParticipants();
             for(Map.Entry<Long, Entity> entry : objects.entrySet()) {
                 Entity entity = entry.getValue();
-                if(entity instanceof Door) {
+                if(entity instanceof Mover) {
+                    Mover mover = (Mover)entity;
+                    MoverSnapshot state = new MoverSnapshot(entry.getKey(), moverRevision + 1,
+                            mover.x, mover.y, mover.z, mover.rotation.x, mover.rotation.y,
+                            mover.rotation.z, mover.isMovingForNetwork());
+                    if(state.sameTransform(publishedMovers.get(entry.getKey()))) continue;
+                    moverRevision++;
+                    publishedMovers.put(entry.getKey(), state);
+                    host.publishMover(state);
+                }
+                else if(entity instanceof Door) {
                     DoorSnapshot state = ((Door)entity).snapshot(
                             entry.getKey(), doorRevision + 1);
                     DoorSnapshot previous = publishedDoors.get(entry.getKey());
@@ -300,6 +333,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             // Walkways, columns, lifts, doors and crates the native Player collides with.
             List<MovementObstacle> obstacles = movementObstacles.changed(game.level);
             if(obstacles != null) host.setWorldObstacles(obstacles);
+            host.setActorObstacles(com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles
+                    .monsters(game.level));
         }
     }
 
@@ -335,22 +370,33 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         for(Entity entity : entities()) if(entity instanceof Item) remember((Item)entity);
         if(host != null) {
             host.getItemWorld().initializePartyKeys(game.player.keys);
-            // Register worn starters first so they do not occupy backpack capacity.
-            java.util.Collections.sort(starters, (a, b) -> Boolean.compare(
-                    game.player.equippedItems.containsValue(b), game.player.equippedItems.containsValue(a)));
             for(MovementEntityDescriptor descriptor : peer.getMovementEntities()) {
                 ParticipantId participant = descriptor.getParticipantId();
                 host.getItemWorld().registerParticipant(participant, game.player.inventorySize);
-                for(Item starter : starters) {
-                    Item nativeItem = participant.equals(localId) ? starter
-                            : ItemManager.Copy(starter.getClass(), starter);
-                    register(nativeItem, participant);
-                    if(game.player.equippedItems.containsValue(starter)) {
-                        host.getItemWorld().registerEquipment(itemIds.get(nativeItem), starter.GetEquipLoc(), true);
-                    }
+            }
+            if(host.isResumedCampaign()) {
+                // Rebuilt native floor is only a template source. Durable identities replace it.
+                for(Item starter : starters) game.player.removeAuthoritativeItem(starter);
+                for(Entity entity : entities()) {
+                    if(entity instanceof Item) entity.isActive = false;
                 }
             }
-            discoverWorldItems();
+            else {
+                // Register worn starters first so they do not occupy backpack capacity.
+                java.util.Collections.sort(starters, (a, b) -> Boolean.compare(
+                        game.player.equippedItems.containsValue(b), game.player.equippedItems.containsValue(a)));
+                for(MovementEntityDescriptor descriptor : peer.getMovementEntities()) {
+                    ParticipantId participant = descriptor.getParticipantId();
+                    if(participant.equals(localId)) {
+                        for(Item starter : starters) {
+                            registerStarter(starter, participant,
+                                    game.player.equippedItems.containsValue(starter));
+                        }
+                    }
+                    else grantStarterKit(participant, starters);
+                }
+                discoverWorldItems();
+            }
         }
         else {
             for(Item item : starters) game.player.removeAuthoritativeItem(item);
@@ -366,11 +412,19 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         Map<String, Integer> occurrences = new HashMap<String, Integer>();
         for(Entity entity : entities()) {
             if(!(entity instanceof Door || entity instanceof Breakable || entity instanceof Trigger
-                    || entity instanceof BasicTrigger || entity instanceof ButtonModel)) continue;
-            String placement = SharedFloorIdentity.placementKey(entity);
-            Integer occurrence = occurrences.get(placement);
-            occurrences.put(placement, occurrence == null ? 1 : occurrence + 1);
-            long objectId = worldObjectId(placement, occurrence == null ? 0 : occurrence);
+                    || entity instanceof BasicTrigger || entity instanceof ButtonModel
+                    || entity instanceof Mover)) continue;
+            // A restored Host floor keeps the id every client derives from its fresh build, even
+            // for objects that moved (open doors, pushed crates) since it was built.
+            Long saved = savedWorldObjectId(entity);
+            long objectId;
+            if(saved != null) objectId = saved;
+            else {
+                String placement = SharedFloorIdentity.placementKey(entity);
+                Integer occurrence = occurrences.get(placement);
+                occurrences.put(placement, occurrence == null ? 1 : occurrence + 1);
+                objectId = worldObjectId(placement, occurrence == null ? 0 : occurrence);
+            }
             if(objects.containsKey(objectId)) {
                 diagnose("World object identity hash collision for "
                         + entity.getClass().getSimpleName() + " at " + entity.x + "," + entity.y);
@@ -378,6 +432,198 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             }
             objects.put(objectId, entity);
             objectIds.put(entity, objectId);
+            entity.multiplayerIdentity = WORLD_OBJECT_IDENTITY + objectId;
+            // A client's Movers only show the Host's: touching or triggering them moves nothing.
+            if(host == null && entity instanceof Mover) ((Mover)entity).setNetworkReplica(true);
+        }
+        if(host != null) {
+            restoreWorldObjects();
+            game.level.nativeTriggerPresentationListener = (trigger, activator, value) -> {
+                Long objectId = objectIds.get(trigger);
+                if(objectId != null) host.deliverTriggerPresentation(activator, objectId, value);
+            };
+        }
+    }
+
+    /**
+     * Host: a Participant's own roll of the native starting kit. Fixed entries match everyone's,
+     * while random ones (potion, wand, food) differ per character, as for each new single-player
+     * character. Without the player template, falls back to copies of Host's kit.
+     */
+    public void grantStarterKit(ParticipantId participant, List<Item> hostKit) {
+        Player template = startingKitTemplate();
+        StartingKit kit = null;
+        try {
+            if(template != null) kit = rollStartingKit(template);
+        }
+        catch(RuntimeException unrollable) {
+            kit = null;
+        }
+        if(kit == null || kit.worn.isEmpty() && kit.carried.isEmpty()) {
+            for(Item starter : hostKit) {
+                registerStarter(ItemManager.Copy(starter.getClass(), starter), participant,
+                        game.player.equippedItems.containsValue(starter));
+            }
+            return;
+        }
+        // Worn first so they do not occupy backpack capacity.
+        for(Item item : kit.worn) registerStarter(item, participant, true);
+        for(Item item : kit.carried) registerStarter(item, participant, false);
+    }
+
+    /** One character's kit by Player.init rules: armor is worn, everything else is carried. */
+    static StartingKit rollStartingKit(Player template) {
+        StartingKit kit = new StartingKit();
+        for(Entity entry : template.startingInventory) {
+            Entity rolled = entry instanceof ItemSpawner ? ((ItemSpawner)entry).getItem() : entry;
+            if(!(rolled instanceof Item)) continue;
+            if(rolled instanceof Armor) kit.worn.add((Item)rolled);
+            else kit.carried.add((Item)rolled);
+        }
+        return kit;
+    }
+
+    static final class StartingKit {
+        final List<Item> worn = new ArrayList<Item>();
+        final List<Item> carried = new ArrayList<Item>();
+    }
+
+    private void registerStarter(Item item, ParticipantId participant, boolean worn) {
+        register(item, participant);
+        if(worn) host.getItemWorld().registerEquipment(itemIds.get(item), item.GetEquipLoc(), true);
+    }
+
+    /** Fresh player template: its starting kit has not been rolled yet. */
+    private static Player startingKitTemplate() {
+        if(Game.gameData == null || Game.gameData.playerDataFile == null) return null;
+        try {
+            Player template = com.interrupt.utils.JsonUtil.fromJson(Player.class,
+                    Game.findInternalFileInMods("data/" + Game.gameData.playerDataFile));
+            return template == null || template.startingInventory == null
+                    || template.startingInventory.size == 0 ? null : template;
+        }
+        catch(RuntimeException unreadable) {
+            return null;
+        }
+    }
+
+    /** Client: a trigger chain this Participant started on Host shows on this screen only. */
+    private void presentHostTriggerChains() {
+        for(TriggerPresentation presentation : peer.drainTriggerPresentations()) {
+            Entity entity = objects.get(presentation.objectId);
+            if(entity instanceof Trigger) {
+                // Host already ran the chain; closing a message here must not run it again.
+                ((Trigger)entity).presentToActivator(presentation.value, false);
+            }
+            else diagnose("No shared trigger " + presentation.objectId + " to present");
+        }
+    }
+
+    /**
+     * Native touch triggers only see solid entities, so a client's avatar never set one off (the
+     * tutorial spider trap fired only for Host's Player). Host fires them for each remote
+     * Participant it touches, with that Participant as activator, as native does for its Player.
+     */
+    private void fireTouchTriggersForRemoteParticipants() {
+        List<RemoteAvatar> avatars = remoteAvatars();
+        if(avatars.isEmpty()) return;
+        pressMoversForRemoteParticipants(avatars);
+        for(Entity entity : objects.values()) {
+            if(!(entity instanceof Trigger) || !entity.isActive) continue;
+            Trigger trigger = (Trigger)entity;
+            if(trigger.triggerType == Trigger.TriggerType.USE
+                    || trigger.onlyTriggeredById != null && !trigger.onlyTriggeredById.isEmpty()) {
+                continue;
+            }
+            for(RemoteAvatar avatar : avatars) {
+                if(!touches(trigger, avatar)) continue;
+                // The client's own copy of this trigger shows its screen-only effects.
+                trigger.fire(new ParticipantContext(avatar.getDescriptor().getParticipantId(),
+                        new ParticipantCharacterState(avatar.x, avatar.y, avatar.z, 0f),
+                        LocalPlayerCompatibilityAdapter.fromGame().getPartyProgression(), true),
+                        null);
+            }
+        }
+    }
+
+    /**
+     * Native Player presses a Mover it stands on or walks into (lifts, pressure plates); remote
+     * Participants have no native Player on Host, so Host presses it for them.
+     */
+    private void pressMoversForRemoteParticipants(List<RemoteAvatar> avatars) {
+        for(Entity entity : objects.values()) {
+            if(!(entity instanceof Mover) || !entity.isActive) continue;
+            Mover mover = (Mover)entity;
+            if(mover.moverMode != Mover.MoverStartMode.ON_PLAYER_TOUCH
+                    && mover.moverMode != Mover.MoverStartMode.ON_ANY_TOUCH) continue;
+            for(RemoteAvatar avatar : avatars) {
+                if(!presses(mover, avatar)) continue;
+                mover.encroached((com.interrupt.dungeoneer.entities.Player)null);
+                break;
+            }
+        }
+    }
+
+    /** Standing on the Mover (native probe 0.02 below the feet) or pressed against its side. */
+    private static boolean presses(Entity mover, Entity toucher) {
+        float reach = 0.02f;
+        return toucher.x + toucher.collision.x + reach > mover.x - mover.collision.x
+                && toucher.x - toucher.collision.x - reach < mover.x + mover.collision.x
+                && toucher.y + toucher.collision.y + reach > mover.y - mover.collision.y
+                && toucher.y - toucher.collision.y - reach < mover.y + mover.collision.y
+                && toucher.z - reach < mover.z + mover.collision.z
+                && toucher.z + toucher.collision.z > mover.z;
+    }
+
+    private List<RemoteAvatar> remoteAvatars() {
+        List<RemoteAvatar> avatars = new ArrayList<RemoteAvatar>();
+        for(Entity entity : entities()) {
+            // A Downed or Life-exhausted body does not step on anything.
+            if(entity instanceof RemoteAvatar && entity.isActive
+                    && !((RemoteAvatar)entity).isIncapacitated()) avatars.add((RemoteAvatar)entity);
+        }
+        return avatars;
+    }
+
+    /** Level.getEntitiesColliding bounds, with the avatar in place of a solid toucher. */
+    private static boolean touches(Trigger trigger, Entity toucher) {
+        return trigger.x > toucher.x - toucher.collision.x - trigger.collision.x
+                && trigger.x < toucher.x + toucher.collision.x + trigger.collision.x
+                && trigger.y > toucher.y - toucher.collision.y - trigger.collision.y
+                && trigger.y < toucher.y + toucher.collision.y + trigger.collision.y
+                && trigger.z > toucher.z - trigger.collision.z
+                && trigger.z < toucher.z + toucher.collision.z;
+    }
+
+    private static final String WORLD_OBJECT_IDENTITY = "object:";
+
+    private static Long savedWorldObjectId(Entity entity) {
+        String identity = entity.multiplayerIdentity;
+        if(identity == null || !identity.startsWith(WORLD_OBJECT_IDENTITY)) return null;
+        try { return Long.parseLong(identity.substring(WORLD_OBJECT_IDENTITY.length())); }
+        catch(NumberFormatException invalid) { return null; }
+    }
+
+    /**
+     * Cold resume applies current durable outcome without replaying open/break presentations.
+     * Host stays the native authority: the client replica apply would freeze its doors and
+     * breakables. A floor restored from its checkpoint already holds that outcome natively.
+     */
+    private void restoreWorldObjects() {
+        boolean rebuilt = !game.level.restoredCampaignFloor;
+        for(DoorSnapshot snapshot : host.getDoorSnapshots()) {
+            Entity entity = objects.get(snapshot.entityId);
+            if(!(entity instanceof Door)) continue;
+            if(rebuilt) ((Door)entity).restoreAuthoritativeSnapshot(snapshot);
+            publishedDoors.put(snapshot.entityId, snapshot);
+            doorRevision = Math.max(doorRevision, snapshot.revision);
+        }
+        for(BreakableSnapshot snapshot : host.getBreakableSnapshots()) {
+            Entity entity = objects.get(snapshot.entityId);
+            if(!(entity instanceof Breakable)) continue;
+            if(rebuilt) ((Breakable)entity).restoreAuthoritativeSnapshot(snapshot);
+            publishedBreakables.put(snapshot.entityId, snapshot);
+            breakableRevision = Math.max(breakableRevision, snapshot.revision);
         }
     }
 
@@ -587,6 +833,10 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 nativeItems.put(state.entityId, item);
                 itemIds.put(item, state.entityId);
             }
+            if(host != null && host.isResumedCampaign()
+                    && restoredNativeMetadata.add(state.entityId)) {
+                restoreNativeMetadata(state, item);
+            }
             if(state.owner != null) item.multiplayerDamageSource = state.owner.getValue();
             boolean ownedLocally = localId.equals(state.owner);
             boolean alreadyOwnedLocally = ownedLocally && game.player.ownsPhysicalItem(item);
@@ -643,6 +893,23 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 reportedEquipment.remove(state.entityId);
             }
             applied.put(state.entityId, state.revision);
+        }
+    }
+
+    /** Rebuilds Host-only item classifications omitted from detached physical snapshots. */
+    private void restoreNativeMetadata(PhysicalItemState state, Item item) {
+        if(item instanceof Key) host.getItemWorld().registerKey(state.entityId);
+        if(item instanceof Gold) host.getItemWorld().registerGold(state.entityId);
+        host.getItemWorld().registerKind(state.entityId, kindOf(item));
+        host.getItemWorld().registerEquipment(state.entityId, item.GetEquipLoc(), false);
+        if(item instanceof ItemStack) {
+            host.getItemWorld().registerStack(state.entityId,
+                    ((ItemStack)item).stackType, state.templateId);
+        }
+        else if(item instanceof Missile) {
+            Missile missile = (Missile)item;
+            host.getItemWorld().registerStack(state.entityId, missile.stackType,
+                    remember(missile.createRecoveredStack()));
         }
     }
 
@@ -1040,6 +1307,13 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     @Override
     public Entity physicalEntity(long entityId) {
         return nativeItems.get(entityId);
+    }
+
+    @Override
+    public Entity wieldedItem(ParticipantId participant) {
+        if(host == null || participant == null) return null;
+        long wielded = host.getItemWorld().getWielded(participant);
+        return wielded == 0L ? null : nativeItems.get(wielded);
     }
 
     @Override

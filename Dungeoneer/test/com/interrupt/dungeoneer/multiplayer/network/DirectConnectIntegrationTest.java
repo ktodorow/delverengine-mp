@@ -40,6 +40,7 @@ import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.Message;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.ServerRejected;
+import com.interrupt.dungeoneer.multiplayer.communication.PartyChatMessage;
 import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 
 import io.netty.buffer.ByteBuf;
@@ -1629,6 +1630,20 @@ public class DirectConnectIntegrationTest {
     }
 
     @Test
+    public void savedOwnedTutorialTokenCanBeRestoredBeforePlay() throws Exception {
+        DirectConnectCompatibility compatibility = new DirectConnectCompatibility(
+                DirectConnectProtocol.BUILD_ID, "delver-owned-assets-v1",
+                "0000000000000000000000000000000000000000000000000000000000000000");
+        HostFixture fixture = host(compatibility, 2, "owned-tutorial-resume");
+        try {
+            fixture.host.useOwnedFloor(GameApplication.OWNED_TUTORIAL_FLOOR);
+        }
+        finally {
+            fixture.close();
+        }
+    }
+
+    @Test
     public void capacityFourLobbyAdmitsThreeExplicitlyApprovedRemoteIdentities() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("four-party-floor");
         HostFixture fixture = host(compatibility, 4, "four-party");
@@ -1946,6 +1961,39 @@ public class DirectConnectIntegrationTest {
     }
 
     @Test
+    public void playerWhoLeftDoesNotKeepTheCampaignAliveWithTheirLives() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("left-wipe-floor");
+        HostFixture fixture = host(compatibility, 2, "left-wipe",
+                temporaryFolder.newFolder("campaign-store-left-wipe"), 6L);
+        DirectConnectClient second = approveClient(fixture, compatibility, '2', "Two",
+                AvatarCatalog.HUMANOID_2);
+        ParticipantId hostId = new ParticipantId("campaign-slot-1");
+        try {
+            fixture.host.setStartingLives(1);
+            fixture.host.startSession();
+            awaitPhase(second, DirectConnectPhase.READY);
+            second.close();
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(System.currentTimeMillis() < deadline && fixture.host.getPartyStatus()
+                    .getMember(2).getState() != PartyMemberState.DISCONNECTED) Thread.sleep(10L);
+            assertEquals("Reconnect grace is over", PartyMemberState.DISCONNECTED,
+                    fixture.host.getPartyStatus().getMember(2).getState());
+
+            fixture.host.applyNativeEnvironmentalDamage("test-hazard", hostId, 8,
+                    0f, 0f, 0.5f, 0f, 0f, 0.5f);
+            deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(System.currentTimeMillis() < deadline && !fixture.host.isPartyWiped()) Thread.sleep(10L);
+
+            assertTrue("Everyone still in play is out of Lives", fixture.host.isPartyWiped());
+            assertEquals(1, fixture.host.getPartyStatus().getMember(2).getRemainingLives());
+        }
+        finally {
+            second.close();
+            fixture.close();
+        }
+    }
+
+    @Test
     public void simultaneousDowningRespawnsTogetherAndLastLivesEndInPartyWipe() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("wipe-floor");
         HostFixture fixture = host(compatibility, 2, "wipe");
@@ -2252,17 +2300,17 @@ public class DirectConnectIntegrationTest {
             awaitMovementSnapshots(client, 2);
 
             client.submitPartyChat("Watch left.");
-            awaitChatCount(fixture.host, 1);
-            awaitChatCount(client, 1);
+            awaitChatCount(fixture.host, 2);
+            awaitChatCount(client, 2);
             assertEquals("Friend", fixture.host.getPartyCommunicationState()
-                    .getChatHistory().get(0).getNickname());
+                    .getChatHistory().get(1).getNickname());
             assertEquals("Watch left.", client.getPartyCommunicationState()
-                    .getChatHistory().get(0).getText());
+                    .getChatHistory().get(1).getText());
 
             fixture.host.submitPartyChat("Moving in.");
-            awaitChatCount(client, 2);
+            awaitChatCount(client, 3);
             assertEquals("Host", client.getPartyCommunicationState()
-                    .getChatHistory().get(1).getNickname());
+                    .getChatHistory().get(2).getNickname());
 
             client.requestPauseSession();
             awaitPauseRequest(client, 2);
@@ -2422,6 +2470,54 @@ public class DirectConnectIntegrationTest {
             assertEquals(new ParticipantId("campaign-slot-2"),
                     returningAttack.getParticipantId());
             assertEquals(CombatAction.PROJECTILE, returningAttack.getAction());
+        }
+        finally {
+            second.close();
+            if(third != null) third.close();
+            if(returning != null) returning.close();
+            fixture.close();
+        }
+    }
+
+    @Test
+    public void partyFeedNotifiesEveryoneWhenParticipantLeavesAndRejoins() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("presence-feed-floor");
+        HostFixture fixture = host(compatibility, 3, "presence-feed");
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient second = client(fixture.host.getBoundPort(), '2', "Two",
+                AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+        DirectConnectClient third = null;
+        DirectConnectClient returning = null;
+        try {
+            awaitPhase(second, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(second, DirectConnectPhase.LOBBY);
+            third = approveClient(fixture, compatibility, '3', "Three",
+                    AvatarCatalog.HUMANOID_3);
+
+            fixture.host.startSession();
+            awaitPhase(second, DirectConnectPhase.READY);
+            awaitPhase(third, DirectConnectPhase.READY);
+            awaitChatCount(fixture.host, 2);
+            awaitChatCount(second, 2);
+            awaitChatCount(third, 2);
+            assertLastSystemNotice(fixture.host, "Three joined");
+
+            second.close();
+            awaitChatCount(fixture.host, 3);
+            awaitChatCount(third, 3);
+            assertLastSystemNotice(fixture.host, "Two left");
+            assertLastSystemNotice(third, "Two left");
+
+            returning = client(fixture.host.getBoundPort(), '2', "Changed",
+                    AvatarCatalog.HUMANOID_4, 0, tokens, compatibility);
+            awaitPhase(returning, DirectConnectPhase.READY);
+            awaitChatCount(fixture.host, 4);
+            awaitChatCount(third, 4);
+            awaitChatCount(returning, 4);
+            assertLastSystemNotice(fixture.host, "Two joined");
+            assertLastSystemNotice(third, "Two joined");
+            assertLastSystemNotice(returning, "Two joined");
         }
         finally {
             second.close();
@@ -2687,6 +2783,7 @@ public class DirectConnectIntegrationTest {
                     AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), wrongContent);
             awaitPhase(client, DirectConnectPhase.REJECTED);
             assertTrue(client.getStatus().getMessage().contains("Content mismatch"));
+            assertTrue(client.getStatus().getMessage().contains("same -PownedCopy"));
             assertTrue(fixture.roster.findSlot(identity('2')) == null);
         }
         finally {
@@ -2705,7 +2802,8 @@ public class DirectConnectIntegrationTest {
         }
     }
 
-    @Test public void gateConditionsExplainReconnectAfterGraceExpires() throws Exception {
+    @Test public void returningRosterMemberReconnectsAfterGraceExpiresWithoutHostPause()
+            throws Exception {
         String previous = System.getProperty(DirectConnectNetworkSimulation.PROPERTY);
         System.setProperty(DirectConnectNetworkSimulation.PROPERTY, "gate");
         DirectConnectCompatibility compatibility = compatibility("late-reconnect");
@@ -2721,12 +2819,18 @@ public class DirectConnectIntegrationTest {
             awaitPhase(client, DirectConnectPhase.LOBBY);
             fixture.host.startSession();
             awaitPhase(client, DirectConnectPhase.READY);
+            NetworkEntityId preservedEntity = client.getLocalMovementEntityId();
             client.close();
             awaitPartyState(fixture.host, 2, PartyMemberState.DISCONNECTED);
             returning = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
                     0, tokens, compatibility);
-            awaitPhase(returning, DirectConnectPhase.REJECTED);
-            assertTrue(returning.getStatus().getMessage().contains("grace"));
+            awaitStatusMessage(fixture.host, "Waiting for authenticated UDP registration.");
+            assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
+            awaitPhase(returning, DirectConnectPhase.READY);
+            assertEquals(2, returning.getCampaignSlot());
+            assertEquals(preservedEntity, returning.getLocalMovementEntityId());
+            awaitPartyState(fixture.host, 2, PartyMemberState.CONNECTED);
+            assertEquals(2, fixture.host.getMovementEntities().size());
             assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
         }
         finally {
@@ -2846,7 +2950,7 @@ public class DirectConnectIntegrationTest {
             // Client finishes building first; ordered chat proves Host has its report.
             client.recordSharedFloorFingerprint(floorWithWorldObjects(56));
             client.submitPartyChat("Built.");
-            awaitChatCount(fixture.host, 1);
+            awaitChatCount(fixture.host, 2);
             assertEquals(DirectConnectPhase.READY, client.getStatus().getPhase());
 
             fixture.host.recordSharedFloorFingerprint(floorWithWorldObjects(57));
@@ -2878,9 +2982,9 @@ public class DirectConnectIntegrationTest {
             fixture.host.recordSharedFloorFingerprint(floorWithWorldObjects(57));
             client.recordSharedFloorFingerprint(floorWithWorldObjects(57));
             client.submitPartyChat("Built.");
-            awaitChatCount(fixture.host, 1);
+            awaitChatCount(fixture.host, 2);
             fixture.host.submitPartyChat("Same floor.");
-            awaitChatCount(client, 2);
+            awaitChatCount(client, 3);
 
             assertEquals(DirectConnectPhase.READY, client.getStatus().getPhase());
             assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
@@ -3155,6 +3259,13 @@ public class DirectConnectIntegrationTest {
         fail("Timed out waiting for " + count + " Party chat deliveries.");
     }
 
+    private void assertLastSystemNotice(DirectConnectPeer peer, String expected) {
+        List<PartyChatMessage> messages = peer.getPartyCommunicationState().getChatHistory();
+        PartyChatMessage actual = messages.get(messages.size() - 1);
+        assertTrue(actual.isSystem());
+        assertEquals(expected, actual.getDisplayText());
+    }
+
     private void awaitPauseRequest(DirectConnectPeer peer, int campaignSlot)
             throws InterruptedException {
         long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
@@ -3252,6 +3363,17 @@ public class DirectConnectIntegrationTest {
         }
         fail("Timed out waiting for " + phase + "; last state was "
                 + peer.getStatus().getPhase() + ": " + peer.getStatus().getMessage());
+    }
+
+    private void awaitStatusMessage(DirectConnectPeer peer, String message)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(System.currentTimeMillis() < deadline) {
+            DirectConnectStatus status = peer.getStatus();
+            if(status.getMessage().contains(message)) return;
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for Direct Connect status message containing: " + message);
     }
 
     private static final class HostFixture implements AutoCloseable {

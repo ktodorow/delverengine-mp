@@ -28,6 +28,7 @@ import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationJournal;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
+import com.interrupt.dungeoneer.multiplayer.combat.CombatantSnapshot;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CampaignChallenge;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatActionRequestMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatPresentationMessage;
@@ -161,6 +162,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
             new java.util.LinkedHashMap<Long, PhysicalItemState>();
     private final java.util.Map<Long, DoorSnapshot> doorSnapshots =
             new java.util.LinkedHashMap<Long, DoorSnapshot>();
+    private final java.util.Map<Long, com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot> moverSnapshots =
+            new java.util.LinkedHashMap<Long, com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot>();
     private final java.util.Map<Long, BreakableSnapshot> breakableSnapshots =
             new java.util.LinkedHashMap<Long, BreakableSnapshot>();
     private long nextItemRequestId = 1L;
@@ -523,7 +526,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     private synchronized void partyChat(PartyChatDelivery delivery) {
-        if(!isReadySession(delivery.sessionId)) {
+        if(sessionId == null || !sessionId.equals(delivery.sessionId)
+                || delivery.message == null) {
             fail("Host returned Party chat outside current session.");
             return;
         }
@@ -552,6 +556,43 @@ public final class DirectConnectClient implements DirectConnectPeer {
                 new ArrayList<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn>(nativeMonsterSpawns);
         nativeMonsterSpawns.clear();
         return result;
+    }
+
+    private final java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState> nativeDecals =
+            new java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState>();
+    private static final int MAX_TRIGGER_PRESENTATIONS = 64;
+    private final java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation> triggerPresentations =
+            new java.util.ArrayDeque<com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation>();
+
+    @Override public synchronized List<com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState> drainNativeDecals() {
+        List<com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState> result =
+                new ArrayList<com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState>(nativeDecals);
+        nativeDecals.clear();
+        return result;
+    }
+
+    @Override public synchronized List<com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation> drainTriggerPresentations() {
+        List<com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation> result =
+                new ArrayList<com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation>(triggerPresentations);
+        triggerPresentations.clear();
+        return result;
+    }
+
+    private synchronized void nativeDecal(DirectConnectWire.NativeDecalMessage message) {
+        if(!sessionId.equals(message.sessionId)) { fail("Native decal belongs to another session."); return; }
+        if(message.generation != nativeWorldGeneration) return;
+        if(nativeDecals.size() >= DirectConnectHost.MAX_NATIVE_DECALS) nativeDecals.removeFirst();
+        nativeDecals.addLast(message.decal);
+    }
+
+    private synchronized void triggerPresentation(DirectConnectWire.TriggerPresentationMessage message) {
+        if(!sessionId.equals(message.sessionId)) {
+            fail("Trigger presentation belongs to another session."); return;
+        }
+        if(triggerPresentations.size() >= MAX_TRIGGER_PRESENTATIONS) {
+            fail("Trigger presentation queue exceeded."); return;
+        }
+        triggerPresentations.addLast(message.presentation);
     }
 
     private synchronized void nativeMonsterSpawn(DirectConnectWire.NativeMonsterSpawnMessage message) {
@@ -797,6 +838,26 @@ public final class DirectConnectClient implements DirectConnectPeer {
         return new ArrayList<DoorSnapshot>(doorSnapshots.values());
     }
 
+    @Override
+    public synchronized List<com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot> getMoverSnapshots() {
+        return new ArrayList<com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot>(moverSnapshots.values());
+    }
+
+    private synchronized void moverState(DirectConnectWire.MoverStateMessage message) {
+        if(!sessionId.equals(message.sessionId)) {
+            fail("Mover state belongs to another session.");
+            return;
+        }
+        com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot previous = moverSnapshots.get(message.state.entityId);
+        if(previous == null && moverSnapshots.size() >= 4096) {
+            fail("Mover count exceeds session bound.");
+            return;
+        }
+        if(previous == null || previous.revision < message.state.revision) {
+            moverSnapshots.put(message.state.entityId, message.state);
+        }
+    }
+
     private synchronized void doorState(DirectConnectWire.DoorStateMessage message) {
         if(!sessionId.equals(message.sessionId)) {
             fail("Door state belongs to another session.");
@@ -906,11 +967,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
         monsterEffects.clear(); nativeStatusCues.clear(); nativeExplosions.clear(); nativeAnimationCues.clear();
         nativeDynamicCues.clear();
         nativeMonsterSpawns.clear(); lastNativeMonsterSpawnSequence = 0L;
+        nativeDecals.clear();
         nativeSpellPresentations.clear();
         nativeMeleePresentations.clear();
         nativeRangedPresentations.clear();
         nativeDynamicStates.clear(); nativeDynamicTombstones.clear();
         doorSnapshots.clear();
+        moverSnapshots.clear();
         breakableSnapshots.clear();
     }
 
@@ -925,7 +988,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.generation != nativeWorldGeneration) return;
         if(message.sequence <= lastNativeAnimationCueSequence) return;
         lastNativeAnimationCueSequence = message.sequence;
-        if(nativeAnimationCues.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) { fail("Native frameCue presentation queue exceeded."); return; }
+        // Cosmetic cue: a burst past the bound drops the oldest instead of ending the session.
+        if(nativeAnimationCues.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) nativeAnimationCues.removeFirst();
         nativeAnimationCues.addLast(message.presentation);
     }
 
@@ -940,7 +1004,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.generation != nativeWorldGeneration) return;
         if(message.sequence <= lastNativeExplosionSequence) return;
         lastNativeExplosionSequence = message.sequence;
-        if(nativeExplosions.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) { fail("Native explosion presentation queue exceeded."); return; }
+        if(nativeExplosions.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) nativeExplosions.removeFirst();
         nativeExplosions.addLast(message.presentation);
     }
 
@@ -955,15 +1019,14 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.generation != nativeWorldGeneration || message.sequence <= lastNativeDynamicSequence) return;
         lastNativeDynamicSequence = message.sequence;
         if(message.state.active) {
-            if(!nativeDynamicStates.containsKey(message.state.id) && nativeDynamicStates.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) {
-                fail("Native dynamic entity count exceeded."); return;
-            }
+            // Host bounds these too; one more projectile than the bound is simply not drawn.
+            if(!nativeDynamicStates.containsKey(message.state.id) && nativeDynamicStates.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) return;
             nativeDynamicStates.put(message.state.id, message.state);
         }
         else {
             nativeDynamicStates.remove(message.state.id);
-            if(nativeDynamicTombstones.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) {
-                fail("Native dynamic cleanup queue exceeded."); return;
+            if(nativeDynamicTombstones.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES * 2) {
+                nativeDynamicTombstones.removeFirst();
             }
             nativeDynamicTombstones.addLast(message.state);
         }
@@ -983,9 +1046,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.generation != nativeWorldGeneration
                 || message.sequence <= lastNativeDynamicCueSequence) return;
         lastNativeDynamicCueSequence = message.sequence;
-        if(nativeDynamicCues.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) {
-            fail("Native dynamic cue queue exceeded."); return;
-        }
+        if(nativeDynamicCues.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) nativeDynamicCues.removeFirst();
         nativeDynamicCues.addLast(message.cue);
     }
 
@@ -1006,9 +1067,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.generation != nativeWorldGeneration
                 || message.sequence <= lastNativeSpellPresentationSequence) return;
         lastNativeSpellPresentationSequence = message.sequence;
-        if(nativeSpellPresentations.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) {
-            fail("Native spell presentation queue exceeded."); return;
-        }
+        if(nativeSpellPresentations.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) nativeSpellPresentations.removeFirst();
         nativeSpellPresentations.addLast(message.presentation);
     }
 
@@ -1033,9 +1092,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.generation != nativeWorldGeneration
                 || message.sequence <= lastNativeMeleePresentationSequence) return;
         lastNativeMeleePresentationSequence = message.sequence;
-        if(nativeMeleePresentations.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) {
-            fail("Native melee presentation queue exceeded."); return;
-        }
+        if(nativeMeleePresentations.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) nativeMeleePresentations.removeFirst();
         nativeMeleePresentations.addLast(message.presentation);
     }
 
@@ -1056,9 +1113,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.generation != nativeWorldGeneration
                 || message.sequence <= lastNativeRangedPresentationSequence) return;
         lastNativeRangedPresentationSequence = message.sequence;
-        if(nativeRangedPresentations.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) {
-            fail("Native ranged presentation queue exceeded."); return;
-        }
+        if(nativeRangedPresentations.size() >= DirectConnectProtocol.MAX_NATIVE_DYNAMIC_ENTITIES) nativeRangedPresentations.removeFirst();
         nativeRangedPresentations.addLast(message.presentation);
     }
 
@@ -1081,10 +1136,28 @@ public final class DirectConnectClient implements DirectConnectPeer {
         itemActionResults.addLast(message.result);
     }
 
+    /**
+     * Host frees the slot of a Monster dead long enough for everyone to see; its effects entry
+     * goes with it. Dead in, or already gone from, Host's latest combat state qualifies.
+     */
+    private void dropSettledMonsterEffects() {
+        CombatSnapshot combat = combatSnapshot;
+        if(combat == null) return;
+        for(java.util.Iterator<String> ids = monsterEffects.keySet().iterator(); ids.hasNext();) {
+            String id = ids.next();
+            if(!id.startsWith(com.interrupt.dungeoneer.multiplayer.combat.AuthoritativeCombatEncounter.MONSTER_ID_PREFIX)) continue;
+            CombatantSnapshot state = combat.getCombatant(id);
+            if(state == null || state.getHealth() <= 0) ids.remove();
+        }
+    }
+
     private synchronized void monsterEffects(DirectConnectWire.MonsterEffectsMessage message) {
         if(!sessionId.equals(message.sessionId)) { fail("Native effects belong to another session."); return; }
         if(message.generation != nativeWorldGeneration) return;
         ActorEffectsSnapshot previous = monsterEffects.get(message.state.monsterId);
+        if(previous == null && monsterEffects.size() >= DirectConnectProtocol.MAX_MONSTERS + 4) {
+            dropSettledMonsterEffects();
+        }
         if(previous == null && monsterEffects.size() >= DirectConnectProtocol.MAX_MONSTERS + 4) {
             fail("Native effect actor count exceeds session bound."); return;
         }
@@ -1115,9 +1188,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
 
     private boolean queueNativeStatusCue(com.interrupt.dungeoneer.multiplayer.combat.NativeStatusCue cue) {
         if(nativeStatusCues.size() >= (DirectConnectProtocol.MAX_MONSTERS + 4)
-                * ActorEffectsSnapshot.MAX_EFFECTS) {
-            fail("Native status cue queue exceeded."); return false;
-        }
+                * ActorEffectsSnapshot.MAX_EFFECTS) nativeStatusCues.removeFirst();
         nativeStatusCues.addLast(cue); return true;
     }
 
@@ -1314,6 +1385,10 @@ public final class DirectConnectClient implements DirectConnectPeer {
                     && campaignSlot != 0) {
                 doorState((DirectConnectWire.DoorStateMessage)message);
             }
+            else if(message instanceof DirectConnectWire.MoverStateMessage && sessionId != null
+                    && campaignSlot != 0) {
+                moverState((DirectConnectWire.MoverStateMessage)message);
+            }
             else if(message instanceof DirectConnectWire.BreakableStateMessage
                     && sessionId != null && campaignSlot != 0) {
                 breakableState((DirectConnectWire.BreakableStateMessage)message);
@@ -1400,6 +1475,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
             }
             else if(message instanceof DirectConnectWire.NativeMonsterSpawnMessage && sessionId != null) {
                 nativeMonsterSpawn((DirectConnectWire.NativeMonsterSpawnMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.NativeDecalMessage && sessionId != null) {
+                nativeDecal((DirectConnectWire.NativeDecalMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.TriggerPresentationMessage && sessionId != null
+                    && status.getPhase() == DirectConnectPhase.READY) {
+                triggerPresentation((DirectConnectWire.TriggerPresentationMessage)message);
             }
             else if(message instanceof DirectConnectWire.PartyWipeMessage && sessionId != null) {
                 partyWipe((DirectConnectWire.PartyWipeMessage)message);

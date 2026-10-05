@@ -33,7 +33,11 @@ public class TriggeredMusic extends Trigger {
 	
 	@Override
 	public void doTriggerEvent(String value) {
-		
+		presentForActivator(value);
+	}
+
+	@Override
+	public void presentToActivator(String value, boolean continuesChain) {
 		if(didStartPlaying) return;
 		didStartPlaying = true;
 		

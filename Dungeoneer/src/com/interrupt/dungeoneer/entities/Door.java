@@ -67,6 +67,25 @@ public class Door extends Entity {
         animateTime = snapshot.animation * animateSpeed;
     }
 
+    /**
+     * Cold resume on the authority: saved outcome without open/close sound, trigger or break.
+     * Unlike a client replica, the door stays native and animates from its built placement.
+     */
+    public void restoreAuthoritativeSnapshot(DoorSnapshot snapshot) {
+        networkSnapshot = null;
+        // Rebuilt floor places the door closed; native open/close animates from there.
+        if(startLoc == null) startLoc = new Vector3(x, y, z);
+        doorState = DoorState.values()[snapshot.state];
+        isLocked = snapshot.locked;
+        isActive = snapshot.active;
+        isSolid = snapshot.solid;
+        x = snapshot.x; y = snapshot.y; z = snapshot.z; rot = snapshot.rotation;
+        animateInterpolation = Interpolation.exp5;
+        animateSpeed = speed;
+        animateTime = doorState == DoorState.CLOSED || doorState == DoorState.STUCK
+                ? speed : snapshot.animation * animateSpeed;
+    }
+
 	/** Native break feedback only; never runs door triggers or hit gameplay. */
 	public void playNetworkBreakPresentation(Level level) {
 		gib(level, new Vector3());

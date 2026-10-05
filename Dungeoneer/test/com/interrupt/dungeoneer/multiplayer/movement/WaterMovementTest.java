@@ -31,9 +31,13 @@ public class WaterMovementTest {
     @Test public void waterRampsUpSlowlyLikeNativeFriction() {
         AuthoritativeMovementSimulation simulation = simulation(
                 new LevelMovementCollisionWorld(floor(true)));
-        move(simulation, 1);
+        // One still tick in the water takes on water friction, as a native Player standing in it.
+        simulation.applyCommand(1, new MovementInputCommand(PARTICIPANT,
+                new MovementInputFrame(1, 0f, 0f, EAST, false)), null);
+        simulation.tick(1, 1f / 60f, null);
         move(simulation, 2);
         move(simulation, 3);
+        move(simulation, 4);
         float early = horizontalSpeed(simulation);
         // Native water needs ~25 ticks to reach 63 percent of top speed; land needs ~5.
         assertTrue("Water ramp is gradual, got " + early, early < 0.25f);
@@ -67,6 +71,24 @@ public class WaterMovementTest {
         assertTrue("Native Player cannot climb 0.6 out of water; reached x " + state.getX(),
                 state.getX() < 6f);
         assertEquals(-1.0f, state.getZ(), 0.02f);
+    }
+
+    @Test public void waterfallAheadNeverLiftsParticipantOutOfPool() {
+        // Native in-water step height comes from the water the Player stands in, not from a
+        // higher water tile it is about to touch: a waterfall column above the pool stays a wall.
+        Level level = pool(-0.8f);
+        for(int y = 0; y < level.height; y++) {
+            Tile fall = level.tiles[6 + y * level.width];
+            fall.floorHeight = 4f;
+            fall.ceilHeight = 8f;
+            fall.data = water();
+        }
+        AuthoritativeMovementSimulation simulation = simulation(new LevelMovementCollisionWorld(level));
+        for(int tick = 1; tick <= 400; tick++) move(simulation, tick);
+
+        MovementEntityState state = simulation.getState(PARTICIPANT);
+        assertTrue("Participant climbed the waterfall to x " + state.getX(), state.getX() < 6f);
+        assertEquals(-0.7f, state.getZ(), 0.02f);
     }
 
     /** Columns 3-5 are water with the given tile floor; land keeps the default -0.5 floor. */

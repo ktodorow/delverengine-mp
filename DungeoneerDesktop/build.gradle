@@ -31,7 +31,7 @@ task runTestLevel(dependsOn: classes, type: JavaExec) {
 
 task runDirectHost(dependsOn: classes, type: JavaExec) {
     group = "application"
-    description = "Hosts a Direct Connect shared floor; -PownedCopy selects owned tutorial content."
+    description = "Opens Host Campaign Library; -PcampaignId bypasses selection for automation."
     main = project.mainClassName
     classpath = sourceSets.main.runtimeClasspath
     standardInput = System.in

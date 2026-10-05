@@ -26,7 +26,7 @@ final class DesktopLaunchOptions {
     int sessionPort = com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.DEFAULT_PORT;
     File profileRoot;
     int campaignCapacity = 2;
-    String campaignId = "open-source-test";
+    String campaignId;
     String nickname;
     String avatarId;
     int requestedSlot;

@@ -9,6 +9,8 @@ public final class MovementObstacle {
     public final boolean stepable;
     /** Blocks Host monster line of sight (native Doors and Breakables). */
     public final boolean blocksSight;
+    /** Native Ladder climb area: never collides, only lets a touching Participant climb. */
+    public final boolean climbable;
 
     /** Door or Breakable bounds: blocks movement and sight, never a floor. */
     public MovementObstacle(float x, float y, float z, float radiusX, float radiusY, float height) {
@@ -17,6 +19,17 @@ public final class MovementObstacle {
 
     public MovementObstacle(float x, float y, float z, float radiusX, float radiusY, float height,
             boolean standable, boolean stepable, boolean blocksSight) {
+        this(x, y, z, radiusX, radiusY, height, standable, stepable, blocksSight, false);
+    }
+
+    /** Native Ladder climb area around a ladder's own collision bounds. */
+    public static MovementObstacle climbArea(float x, float y, float z, float radiusX, float radiusY,
+            float height) {
+        return new MovementObstacle(x, y, z, radiusX, radiusY, height, false, false, false, true);
+    }
+
+    private MovementObstacle(float x, float y, float z, float radiusX, float radiusY, float height,
+            boolean standable, boolean stepable, boolean blocksSight, boolean climbable) {
         if(!finite(x) || !finite(y) || !finite(z) || !finite(radiusX) || !finite(radiusY)
                 || !finite(height) || radiusX < 0 || radiusY < 0 || height < 0) {
             throw new IllegalArgumentException("Invalid movement obstacle bounds.");
@@ -27,6 +40,7 @@ public final class MovementObstacle {
         this.standable = standable;
         this.stepable = stepable;
         this.blocksSight = blocksSight;
+        this.climbable = climbable;
     }
 
     /** Native Player climbs onto an encroached entity whose top is less than one step above its feet. */

@@ -5,6 +5,7 @@ import com.interrupt.dungeoneer.owned.MultiplayerProfile;
 import java.io.File;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 
@@ -14,6 +15,7 @@ public final class CampaignRosterStore {
 
     private final File campaignsRoot;
     private final SecureRandom random;
+    private final CampaignSaveStore campaignSaves;
 
     public CampaignRosterStore() {
         if(!MultiplayerProfile.isInitialized()) {
@@ -21,6 +23,7 @@ public final class CampaignRosterStore {
         }
         campaignsRoot = MultiplayerProfile.resolveWritableFile("saves/campaigns").file();
         random = new SecureRandom();
+        campaignSaves = new CampaignSaveStore(campaignsRoot);
     }
 
     public CampaignRosterStore(File campaignsRoot, SecureRandom random) {
@@ -28,6 +31,7 @@ public final class CampaignRosterStore {
         if(random == null) throw new IllegalArgumentException("Secure random source cannot be null.");
         this.campaignsRoot = campaignsRoot;
         this.random = random;
+        campaignSaves = new CampaignSaveStore(campaignsRoot);
     }
 
     public synchronized CampaignRoster loadOrCreate(String campaignId, int capacity,
@@ -49,6 +53,26 @@ public final class CampaignRosterStore {
         loaded.updateHostPresentation(hostIdentity, hostPresentation);
         save(loaded);
         return loaded;
+    }
+
+    public synchronized boolean exists(String campaignId) {
+        return rosterFile(campaignId).isFile();
+    }
+
+    /** Campaign IDs with Host-owned rosters, including campaigns not yet started. */
+    public synchronized List<String> listCampaigns() {
+        File[] directories = campaignsRoot.listFiles();
+        if(directories == null) return Collections.emptyList();
+        List<String> campaigns = new ArrayList<String>();
+        for(File directory : directories) {
+            if(!directory.isDirectory() || !new File(directory, "roster.properties").isFile()) {
+                continue;
+            }
+            try { campaigns.add(CampaignRoster.requireCampaignId(directory.getName())); }
+            catch(IllegalArgumentException ignored) { }
+        }
+        Collections.sort(campaigns);
+        return Collections.unmodifiableList(campaigns);
     }
 
     public synchronized CampaignRoster load(String campaignId, AvatarCatalog avatarCatalog) {
@@ -108,6 +132,10 @@ public final class CampaignRosterStore {
 
     SecureRandom getRandom() {
         return random;
+    }
+
+    public CampaignSaveStore campaignSaves() {
+        return campaignSaves;
     }
 
     private File rosterFile(String campaignId) {

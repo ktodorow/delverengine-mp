@@ -31,6 +31,8 @@ import com.interrupt.dungeoneer.input.ControllerState;
 import com.interrupt.dungeoneer.input.GamepadManager;
 import com.interrupt.dungeoneer.owned.MultiplayerProfile;
 import com.interrupt.dungeoneer.owned.OwnedGameCopyMount;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.screens.GameScreen;
 import com.interrupt.dungeoneer.serializers.KryoSerializer;
 import com.interrupt.dungeoneer.ui.*;
@@ -67,6 +69,12 @@ public class Game {
         boolean loadsSavedGame() {
             return loadsSavedGame;
         }
+    }
+
+    /** Distinguishes a live prepared floor from DelvEdit's play-test constructor. */
+    public enum PreparedLevelMode {
+        EDITOR,
+        CAMPAIGN
     }
 
 	/** Engine version */
@@ -201,11 +209,19 @@ public class Game {
 
 	/** Create game for editor usage. */
 	public Game(Level levelToStart) {
+		this(levelToStart, PreparedLevelMode.EDITOR);
+	}
+
+	/** Create an already selected floor for editor testing or a live Campaign. */
+	public Game(Level levelToStart, PreparedLevelMode preparedLevelMode) {
+		if(preparedLevelMode == null) {
+			throw new IllegalArgumentException("Prepared Level mode cannot be null.");
+		}
+		boolean editor = preparedLevelMode == PreparedLevelMode.EDITOR;
 		instance = this;
 		level = levelToStart;
 
-		// we're in the editor
-		inEditor = true;
+		inEditor = editor;
 
 		Game.flashTimer = 0;
 		message.clear();
@@ -222,7 +238,7 @@ public class Game {
 		}
 
 		// load the game progress
-		progression = loadProgression(saveLoc);
+		progression = editor ? loadProgression(saveLoc) : new Progression();
 
 		isMobile = false;
 		Gdx.input.setCursorCatched(true);
@@ -232,7 +248,7 @@ public class Game {
 
         hudManager.backpack.visible = false;
 
-		Gdx.app.log("DelverLifeCycle", "READY EDITOR ONE");
+		Gdx.app.log("DelverLifeCycle", editor ? "READY EDITOR ONE" : "READY CAMPAIGN ONE");
 
 		// try loading the player template
 		try {
@@ -248,10 +264,11 @@ public class Game {
 		player.saveVersion = SAVE_VERSION;
 
 		levelNum = 0;
-		level.loadFromEditor();
+		if(editor) level.loadFromEditor();
+		else level.loadForCampaign();
 
 		player.randomSeed = rand.nextInt();
-		player.gold = 1000;
+		player.gold = editor ? 1000 : Math.max(0, progression.gold);
 
 		progression.inventoryUpgrades = 0;
 		progression.hotbarUpgrades = 0;
@@ -947,6 +964,7 @@ public class Game {
 	// Save all the levels!
 	public void save()
 	{
+		if(persistDirectConnectCampaign()) return;
 		String saveDir = getSaveDir();
 		String levelDir = saveDir + "/levels/";
 
@@ -1013,6 +1031,7 @@ public class Game {
 	// Save a level
 	public void save(int i, String travelPathKey)
 	{
+		if(persistDirectConnectCampaign()) return;
 		String saveDir = getSaveDir();
 		String levelDir = saveDir + "/levels/";
 
@@ -1043,6 +1062,7 @@ public class Game {
 	}
 
 	public boolean levelFileExists(int levelnum, String travelPathKey) {
+		if(GameApplication.isDirectConnectSession()) return false;
 		String saveDir = getSaveDir();
 		String levelDir = saveDir + "levels/";
 
@@ -1061,6 +1081,7 @@ public class Game {
 	}
 
 	public boolean loadLevel(int levelNumber, String travelPathKey) throws FileNotFoundException, IOException, ClassNotFoundException {
+		if(GameApplication.isDirectConnectSession()) return false;
 		String saveDir = getSaveDir();
 		String levelDir = saveDir + "levels/";
 
@@ -1358,7 +1379,16 @@ public class Game {
 		return "save/" + saveLoc + "/";
 	}
 
+	/** Direct Connect never reads or writes native single-player save slots. */
+	private boolean persistDirectConnectCampaign() {
+		if(!GameApplication.isDirectConnectSession()) return false;
+		DirectConnectPeer peer = GameApplication.instance.getDirectConnectPeer();
+		if(peer instanceof DirectConnectHost) ((DirectConnectHost)peer).persistCampaign();
+		return true;
+	}
+
 	public static Progression loadProgression(Integer saveSlot) {
+		if(GameApplication.isDirectConnectSession()) return new Progression();
 		try {
 			//FileHandle modFile = Game.getInternal(path + "/data/items.dat");
             FileHandle progressionFile = getFile("save/game_" + saveSlot + ".dat");
@@ -1371,6 +1401,7 @@ public class Game {
 	}
 
 	public static void saveProgression(Progression progression, Integer saveSlot) {
+		if(GameApplication.isDirectConnectSession()) return;
 		try {
 			if(progression != null) {
 

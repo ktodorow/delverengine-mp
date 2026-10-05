@@ -34,20 +34,31 @@ import java.util.List;
 
 import org.objenesis.ObjenesisStd;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 public class OwnedTutorialSmokeTest {
     private static HeadlessApplication application;
+    // Owned tests install these globals; later tests in the same JVM must not see retail data.
+    private static ModManager previousMods;
+    private static GameData previousGameData;
+    private static EntityManager previousEntities;
 
     @BeforeClass
     public static void startHeadlessRuntime() {
+        previousMods = Game.modManager;
+        previousGameData = Game.gameData;
+        previousEntities = EntityManager.instance;
         application = new HeadlessApplication(new ApplicationAdapter() { });
     }
 
     @AfterClass
     public static void stopHeadlessRuntime() {
         OwnedGameCopyMount.unmount();
+        Game.modManager = previousMods;
+        Game.gameData = previousGameData;
+        EntityManager.instance = previousEntities;
         if(application != null) application.exit();
     }
 
@@ -127,6 +138,41 @@ public class OwnedTutorialSmokeTest {
             assertNotNull("Client catalogue missed Host item " + hostItem.getClass().getName()
                     + " / " + hostItem.name + " / texture " + hostItem.tex,
                     client.materialize(description.templateId, description.properties));
+        }
+    }
+
+    @Test
+    public void ownedTutorialKeepsEveryEntityThoughLocalizedStringsWereNotLoadedYet()
+            throws Exception {
+        String ownedCopyPath = System.getenv("OWNED_GAME_COPY_TEST");
+        Assume.assumeTrue("Set OWNED_GAME_COPY_TEST to run retail integration test.",
+                ownedCopyPath != null && !ownedCopyPath.trim().isEmpty());
+        OwnedGameCopyMount.mount(KnownV108OwnedGameCopies.validator().validate(new File(ownedCopyPath)));
+        ModManager mods = new ModManager();
+        mods.modsFound.add(".");
+        Game.modManager = mods;
+        java.util.HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> strings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        // Floor entry runs before anything else loads them: triggers read them while loading.
+        com.interrupt.managers.StringManager.localizedStrings = null;
+        try {
+            java.lang.reflect.Method load = com.interrupt.dungeoneer.GameApplication.class
+                    .getDeclaredMethod("loadDirectConnectLevel", String.class);
+            load.setAccessible(true);
+            Level tutorial = (Level)load.invoke(new ObjenesisStd().newInstance(
+                    com.interrupt.dungeoneer.GameApplication.class),
+                    com.interrupt.dungeoneer.GameApplication.OWNED_TUTORIAL_FLOOR);
+
+            int triggers = 0;
+            for(Entity entity : tutorial.entities) {
+                if(entity instanceof com.interrupt.dungeoneer.entities.triggers.Trigger) triggers++;
+            }
+            assertEquals("The level reader drops everything after an entity it cannot build",
+                    530, tutorial.entities.size);
+            assertEquals(9, triggers);
+        }
+        finally {
+            com.interrupt.managers.StringManager.localizedStrings = strings;
         }
     }
 

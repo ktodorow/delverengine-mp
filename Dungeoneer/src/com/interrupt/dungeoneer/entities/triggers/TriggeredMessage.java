@@ -75,7 +75,16 @@ public class TriggeredMessage extends Trigger {
 	
 	@Override
 	public void doTriggerEvent(String value) {
+		// A client activator reads this on its own screen; nothing here waits for it to close.
+		if(!activatedHere() && triggerIdAfter != null && !triggerIdAfter.isEmpty()) {
+			Game.instance.level.trigger(this, triggerIdAfter, "message",
+					getTriggeringParticipantContext());
+		}
+		super.doTriggerEvent(value);
+	}
 
+	@Override
+	public void presentToActivator(String value, boolean continuesChain) {
 		// We saw this, do we need to update the progression?
 		if(messageProgression != null && progressionKey != null) {
 			Game.instance.progression.messagesSeen.put(progressionKey, messageProgression);
@@ -101,17 +110,17 @@ public class TriggeredMessage extends Trigger {
 
 		if(messages != null) {
 			MessageOverlay overlay = new MessageOverlay(messages,background, textColor);
-			overlay.triggerOnClose = triggerIdAfter;
+			overlay.triggerOnClose = continuesChain ? triggerIdAfter : null;
 			overlay.pausesGame = pausesGame;
 			OverlayManager.instance.push(overlay);
 		}
 		else {
 			MessageOverlay overlay = new MessageOverlay(messageFile, Game.instance.player, background, textColor);
-			overlay.triggerOnClose = triggerIdAfter;
+			overlay.triggerOnClose = continuesChain ? triggerIdAfter : null;
 			overlay.pausesGame = pausesGame;
 			OverlayManager.instance.push(overlay);
 		}
-		
-		super.doTriggerEvent(value);
+
+		super.presentToActivator(value, continuesChain);
 	}
 }

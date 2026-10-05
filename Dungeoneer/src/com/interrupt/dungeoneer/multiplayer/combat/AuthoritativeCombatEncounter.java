@@ -76,11 +76,72 @@ public final class AuthoritativeCombatEncounter {
         return "participant:" + participantId.getValue();
     }
 
+    /** Monster ids keep counting as dead Monsters give their slots to new ones. */
+    public static final int MAX_MONSTER_INDEX = 1000000;
+
     public static String monsterTargetId(int encounterIndex) {
-        if(encounterIndex < 1 || encounterIndex > CombatSnapshot.MAX_MONSTERS) {
+        if(encounterIndex < 1 || encounterIndex > MAX_MONSTER_INDEX) {
             throw new IllegalArgumentException("Monster encounter index is outside bounds.");
         }
         return MONSTER_ID_PREFIX + encounterIndex;
+    }
+
+    /**
+     * Frees the slot of a Monster Host's native floor has had dead long enough for every client
+     * to see; its corpse stays in each peer's floor. Without this a floor could only ever hold
+     * 64 Monsters in total.
+     */
+    public synchronized boolean retireMonster(String monsterId) {
+        MutableCombatant monster = monsters.get(monsterId);
+        if(monster == null) return false;
+        monsters.remove(monsterId);
+        combatants.remove(monsterId);
+        monsterTargetIds.remove(monsterId);
+        lastAttackers.remove(monsterId);
+        lastMonsterStateTicks.remove(monsterId);
+        return true;
+    }
+
+    public synchronized int getMonsterCount() {
+        return monsters.size();
+    }
+
+    /** Restores current combat outcomes only; action cadence and presentation queues stay clear. */
+    public synchronized void restoreSnapshot(CombatSnapshot saved) {
+        if(saved == null) throw new IllegalArgumentException("Saved combat state is required.");
+        monsters.clear();
+        monsterTargetIds.clear();
+        lastAttackers.clear();
+        lastMonsterStateTicks.clear();
+        List<String> remove = new ArrayList<String>();
+        for(Map.Entry<String, MutableCombatant> entry : combatants.entrySet()) {
+            if(entry.getValue().kind == CombatantKind.MONSTER) remove.add(entry.getKey());
+        }
+        for(String id : remove) combatants.remove(id);
+
+        for(CombatantSnapshot snapshot : saved.getCombatants()) {
+            if(snapshot.getKind() == CombatantKind.PARTICIPANT) {
+                MutableCombatant participant = combatants.get(snapshot.getId());
+                if(participant == null) continue; // Saved but absent Campaign Slot stays inert.
+                participant.maximumHealth = snapshot.getMaximumHealth();
+                participant.health = snapshot.getHealth();
+                continue;
+            }
+            MonsterSnapshot position = saved.getMonster(snapshot.getId());
+            if(position == null) {
+                throw new IllegalArgumentException("Saved Monster combatant has no world state.");
+            }
+            MutableCombatant monster = new MutableCombatant(snapshot.getId(),
+                    CombatantKind.MONSTER, snapshot.getMaximumHealth());
+            monster.health = snapshot.getHealth();
+            monster.x = position.getX(); monster.y = position.getY(); monster.z = position.getZ();
+            monster.gibbed = position.isGibbed();
+            monsters.put(monster.id, monster);
+            combatants.put(monster.id, monster);
+            monsterTargetIds.put(monster.id, position.getTargetId());
+        }
+        snapshotSequence = Math.max(snapshotSequence, saved.getSequence());
+        pendingNativeRequests.clear();
     }
 
     public synchronized void updateParticipantPosition(ParticipantId participantId, float x, float y) {

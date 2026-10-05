@@ -6,7 +6,9 @@ import com.interrupt.dungeoneer.entities.Breakable;
 import com.interrupt.dungeoneer.entities.Entity;
 import com.interrupt.dungeoneer.entities.Item;
 import com.interrupt.dungeoneer.entities.Monster;
+import com.interrupt.dungeoneer.entities.MonsterSpawner;
 import com.interrupt.dungeoneer.entities.Player;
+import com.interrupt.dungeoneer.entities.ProjectedDecal;
 import com.interrupt.dungeoneer.entities.items.Bow;
 import com.interrupt.dungeoneer.entities.items.Sword;
 import com.interrupt.dungeoneer.entities.items.Wand;
@@ -14,7 +16,10 @@ import com.interrupt.dungeoneer.entities.items.Weapon.DamageType;
 import com.interrupt.dungeoneer.entities.spells.Heal;
 import com.interrupt.dungeoneer.entities.spells.Spell;
 import com.interrupt.dungeoneer.game.Level;
+import com.interrupt.dungeoneer.tiles.Tile;
 import com.interrupt.helpers.PlayerHistory;
+import com.interrupt.managers.MonsterManager;
+import com.badlogic.gdx.utils.Array;
 import com.interrupt.dungeoneer.multiplayer.communication.PartyCommunicationState;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame;
@@ -31,12 +36,403 @@ import org.junit.Test;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 public class DirectConnectCombatControllerTest {
+    @Test
+    public void coldResumeHostRebuildsSavedMonsterCorpseSeenByClient() throws Exception {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        HostStubPeer peer = new HostStubPeer();
+        peer.combatSnapshot = new CombatSnapshot(1L, 0L,
+                Collections.singletonList(new MonsterSnapshot("monster:1", "", 2f, 3f, 0f)),
+                Collections.singletonList(new CombatantSnapshot(
+                        "monster:1", CombatantKind.MONSTER, 0, 20)));
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = new org.objenesis.ObjenesisStd()
+                    .newInstance(com.interrupt.dungeoneer.game.Game.class);
+            com.interrupt.dungeoneer.game.Game.instance = game;
+            game.player = new Player(); game.level = new Level(4, 4);
+            Monster monster = new Monster();
+            monster.hostile = true; monster.hp = monster.maxHp = 20;
+            java.lang.reflect.Field death = Monster.class.getDeclaredField("dieAnimation");
+            death.setAccessible(true);
+            death.set(monster, new com.interrupt.dungeoneer.gfx.animation.SpriteAnimation(
+                    50, 59, 100, null));
+            game.level.entities.add(monster);
+
+            controller.prepare(game);
+
+            assertNotNull("Host must rebuild saved corpse presented by Client",
+                    monster.getMultiplayerCorpse());
+            assertTrue(game.level.entities.contains(monster.getMultiplayerCorpse(), true));
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void hostAnnouncesMonstersPastSixtyFourOnceDeadOnesGiveUpTheirSlots() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        HostStubPeer peer = new HostStubPeer();
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+            controller.prepare(game);
+            List<Monster> wave = new ArrayList<Monster>();
+            for(int index = 0; index < CombatSnapshot.MAX_NATIVE_MONSTERS; index++) {
+                Monster slime = slime();
+                slime.x = 1.1f + (index % 8) * 0.2f;
+                slime.y = 1.1f + (index / 8) * 0.2f;
+                game.level.entities.add(slime);
+                wave.add(slime);
+            }
+            controller.prepare(game);
+            assertEquals(CombatSnapshot.MAX_NATIVE_MONSTERS, peer.publishedSpawns.size());
+
+            // The tutorial's last wave keeps coming as the first ones die.
+            wave.get(0).hp = 0;
+            Monster arrival = slime();
+            arrival.x = arrival.y = 3.5f;
+            game.level.entities.add(arrival);
+            controller.update(game);
+            assertEquals("Clients have not seen the death yet", CombatSnapshot.MAX_NATIVE_MONSTERS,
+                    peer.publishedSpawns.size());
+
+            for(int frame = 0; frame < 130; frame++) controller.update(game);
+
+            assertEquals("The next Monster reaches clients", CombatSnapshot.MAX_NATIVE_MONSTERS + 1,
+                    peer.publishedSpawns.size());
+            assertEquals("monster:64", peer.publishedSpawns.get(CombatSnapshot.MAX_NATIVE_MONSTERS).monsterId);
+            assertEquals("Only the dead one gave up its slot", 1, peer.retiredMonsters.size());
+            assertTrue(peer.presentationFailures.isEmpty());
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void resumedHostFreesSlotsOfMonstersThatDiedBeforeTheSave() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        HostStubPeer peer = new HostStubPeer();
+        // Saved after the tutorial finale: every slot held a Monster that had already died.
+        List<MonsterSnapshot> saved = new ArrayList<MonsterSnapshot>();
+        List<CombatantSnapshot> combatants = new ArrayList<CombatantSnapshot>();
+        for(int index = 1; index <= CombatSnapshot.MAX_NATIVE_MONSTERS; index++) {
+            saved.add(new MonsterSnapshot("monster:" + index, "", 2f, 2f, 0.5f));
+            combatants.add(new CombatantSnapshot("monster:" + index, CombatantKind.MONSTER, 0, 4));
+        }
+        peer.combatSnapshot = new CombatSnapshot(1L, 0L, saved, combatants);
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+            // The floor checkpoint keeps living Monsters only, so none of them is on it.
+            game.level.restoredCampaignFloor = true;
+            controller.prepare(game);
+            Monster arrival = slime();
+            arrival.x = arrival.y = 3.5f;
+            game.level.entities.add(arrival);
+            controller.update(game);
+            assertTrue("Resumed clients have not drawn the saved corpses yet",
+                    peer.publishedSpawns.isEmpty());
+
+            for(int frame = 0; frame < 130; frame++) controller.update(game);
+
+            assertEquals(1, peer.publishedSpawns.size());
+            assertEquals("monster:64", peer.publishedSpawns.get(0).monsterId);
+            assertEquals("The oldest saved corpse gave up its slot",
+                    Collections.singletonList("monster:1"), peer.retiredMonsters);
+            assertTrue(peer.presentationFailures.isEmpty());
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void undescribableProjectileIsSkippedInsteadOfEndingTheSession() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        HostStubPeer peer = new HostStubPeer();
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+            controller.prepare(game);
+            com.interrupt.dungeoneer.entities.projectiles.Projectile bolt =
+                    new com.interrupt.dungeoneer.entities.projectiles.Projectile();
+            bolt.x = bolt.y = 2f;
+            bolt.xa = Float.NaN;
+            game.level.non_collidable_entities.add(bolt);
+
+            controller.update(game);
+            controller.update(game);
+
+            assertTrue("A projectile clients cannot draw never stops the session: "
+                    + peer.presentationFailures, peer.presentationFailures.isEmpty());
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void coldResumeHostRecreatesSavedLateMonsterItsRebuiltFloorLacks() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        HostStubPeer peer = new HostStubPeer();
+        peer.restoredSpawns.add(new NativeMonsterSpawn("monster:2", "DUNGEON", "SLIME",
+                1.5f, 1.5f, 0f, 4, 4));
+        peer.combatSnapshot = new CombatSnapshot(1L, 0L,
+                Collections.singletonList(new MonsterSnapshot("monster:2", "", 2.5f, 2.25f, 0f)),
+                Collections.singletonList(new CombatantSnapshot(
+                        "monster:2", CombatantKind.MONSTER, 3, 4)));
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+
+            controller.prepare(game);
+
+            List<Monster> restored = activeMonsters(game.level);
+            assertEquals("Host must show the saved slime its Client shows", 1, restored.size());
+            assertEquals("SLIME", restored.get(0).name);
+            assertEquals(3, restored.get(0).hp);
+            assertEquals(4, restored.get(0).maxHp);
+            assertEquals(2.5f, restored.get(0).x, 0f);
+            assertEquals(2.25f, restored.get(0).y, 0f);
+            assertTrue("Clients already get saved spawns replayed", peer.publishedSpawns.isEmpty());
+
+            Monster arrival = slime();
+            arrival.x = arrival.y = 3.5f;
+            game.level.entities.add(arrival);
+            controller.prepare(game);
+
+            assertEquals("A new arrival must not take a saved Monster id",
+                    "monster:3", peer.publishedSpawns.get(0).monsterId);
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void restoredHostFloorKeepsSavedMonsterIdsAndNeverRecreatesItsLateMonsters() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        HostStubPeer peer = new HostStubPeer();
+        // A dead late slime: the checkpoint holds its corpse, not a Monster to recreate.
+        peer.restoredSpawns.add(new NativeMonsterSpawn("monster:9", "DUNGEON", "SLIME",
+                1.5f, 1.5f, 0f, 4, 4));
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+            game.level.restoredCampaignFloor = true;
+            Monster saved = slime();
+            saved.x = saved.y = 2.5f;
+            saved.hp = 3;
+            saved.multiplayerIdentity = "monster:7";
+            game.level.entities.add(saved);
+
+            controller.prepare(game);
+
+            assertEquals(Collections.singletonList(saved), activeMonsters(game.level));
+            assertEquals("Saved Monster keeps the id its clients know",
+                    "monster:7", saved.multiplayerIdentity);
+            assertEquals(3, saved.hp);
+            assertTrue(peer.publishedSpawns.isEmpty());
+
+            Monster arrival = slime();
+            arrival.x = arrival.y = 3.5f;
+            game.level.entities.add(arrival);
+            controller.prepare(game);
+
+            assertEquals("monster:10", peer.publishedSpawns.get(0).monsterId);
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void floorSpawnerAddsItsMonstersOncePerCampaignAcrossColdResume() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        HostStubPeer first = new HostStubPeer();
+        HostStubPeer resumed = new HostStubPeer();
+        DirectConnectCombatController before = new DirectConnectCombatController(first, false);
+        DirectConnectCombatController after = new DirectConnectCombatController(resumed, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+            MonsterSpawner spawner = slimeSpawner(game.level);
+            before.prepare(game);
+            spawner.spawn(game.level);
+            assertEquals(1, activeMonsters(game.level).size());
+            assertEquals(1, first.consumedSpawners.size());
+
+            // Resumed Host rebuilds the same floor: its spawner is armed again.
+            resumed.consumedSpawners.addAll(first.consumedSpawners);
+            game = campaignGame();
+            MonsterSpawner rebuilt = slimeSpawner(game.level);
+            after.prepare(game);
+            rebuilt.spawn(game.level);
+
+            assertTrue("Saved slime returns from the save, not from its spent spawner",
+                    activeMonsters(game.level).isEmpty());
+            assertTrue(!rebuilt.isActive);
+        }
+        finally {
+            before.dispose(); after.dispose();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void clientNeverKeepsMonstersItsOwnFloorAdds() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        StubPeer peer = new StubPeer();
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+            MonsterSpawner spawner = slimeSpawner(game.level);
+            controller.prepare(game);
+
+            spawner.spawn(game.level);
+            assertTrue("Client spawner must wait for Host announcements",
+                    activeMonsters(game.level).isEmpty());
+
+            Monster stray = slime();
+            stray.x = stray.y = 2.5f;
+            game.level.entities.add(stray);
+            controller.prepare(game);
+
+            assertTrue("Monster Host never announced is not in the session", !stray.isActive);
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void hostSendsRestoredFloorMarksAndKeepsNewOnesForLaterJoiners() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        HostStubPeer peer = new HostStubPeer();
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+            game.level.restoredCampaignFloor = true;
+            ProjectedDecal restored = new ProjectedDecal(Entity.ArtType.sprite, 16, 0.8f);
+            restored.multiplayerIdentity = "decal:7";
+            ProjectedDecal floor = new ProjectedDecal(Entity.ArtType.sprite, 18, 1f);
+            game.level.entities.add(restored);
+            game.level.entities.add(floor);
+
+            controller.prepare(game);
+
+            assertEquals("Connected clients never saw the restored blood made",
+                    1, peer.announcedDecals.size());
+            assertEquals(16, peer.announcedDecals.get(0).tex);
+            assertEquals("Every peer's build has the floor's own decal",
+                    "decal:floor", floor.multiplayerIdentity);
+
+            ProjectedDecal fresh = new ProjectedDecal(Entity.ArtType.sprite, 17, 0.5f);
+            game.level.entities.add(fresh);
+            controller.update(game);
+
+            assertEquals("decal:8", fresh.multiplayerIdentity);
+            assertEquals("Live clients drew it themselves; later joiners get it",
+                    1, peer.keptDecals.size());
+            assertEquals(1, peer.announcedDecals.size());
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test
+    public void joiningClientRebuildsHostMarksMadeBeforeIt() {
+        com.interrupt.dungeoneer.game.Game previous =
+                com.interrupt.dungeoneer.game.Game.instance;
+        StubPeer peer = new StubPeer();
+        peer.decals.add(new NativeDecalState(1.5f, 1.5f, 0.2f, 0.05f, 0f, -0.95f, 12f, 0f, 0f, 0f,
+                0.01f, 1f, 20f, 0.8f, 0.8f, true, Entity.ArtType.sprite.ordinal(), 16, "",
+                1f, 1f, 1f, 1f));
+        DirectConnectCombatController controller = new DirectConnectCombatController(peer, false);
+        try {
+            com.interrupt.dungeoneer.game.Game game = campaignGame();
+
+            controller.prepare(game);
+
+            ProjectedDecal rebuilt = null;
+            for(Entity entity : game.level.entities) {
+                if(entity instanceof ProjectedDecal) rebuilt = (ProjectedDecal)entity;
+            }
+            assertNotNull(rebuilt);
+            assertEquals(16, rebuilt.tex);
+            assertEquals(12f, rebuilt.roll, 0f);
+            assertTrue(rebuilt.isOrtho);
+        }
+        finally {
+            controller.dispose(); com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    private static com.interrupt.dungeoneer.game.Game campaignGame() {
+        com.interrupt.dungeoneer.game.Game game = new org.objenesis.ObjenesisStd()
+                .newInstance(com.interrupt.dungeoneer.game.Game.class);
+        com.interrupt.dungeoneer.game.Game.instance = game;
+        game.player = new Player();
+        game.level = new Level(4, 4);
+        // Open floor without TileManager content; setTile would resolve tile materials.
+        for(int index = 0; index < game.level.tiles.length; index++) {
+            game.level.tiles[index] = Tile.EmptyTile();
+        }
+        game.monsterManager = new MonsterManager();
+        game.monsterManager.monsters = new HashMap<String, Array<Monster>>();
+        Array<Monster> dungeon = new Array<Monster>();
+        dungeon.add(slime());
+        game.monsterManager.monsters.put("DUNGEON", dungeon);
+        return game;
+    }
+
+    private static Monster slime() {
+        Monster slime = new Monster();
+        slime.name = "SLIME";
+        slime.hostile = true;
+        slime.hp = slime.maxHp = 4;
+        slime.artType = Entity.ArtType.hidden; // No sprite: native init needs no renderer.
+        return slime;
+    }
+
+    private static MonsterSpawner slimeSpawner(Level level) {
+        MonsterSpawner spawner = new MonsterSpawner();
+        spawner.monsterTheme = "DUNGEON";
+        spawner.monsterName = "SLIME";
+        spawner.x = spawner.y = 1.5f;
+        level.entities.add(spawner);
+        return spawner;
+    }
+
+    private static List<Monster> activeMonsters(Level level) {
+        List<Monster> result = new ArrayList<Monster>();
+        for(Entity entity : level.entities) {
+            if(entity instanceof Monster && entity.isActive) result.add((Monster)entity);
+        }
+        return result;
+    }
+
     @Test
     public void replaysEachRemotePresentationOnceAndSkipsLocalEcho() {
         StubPeer peer = new StubPeer();
@@ -575,7 +971,7 @@ public class DirectConnectCombatControllerTest {
         }
     }
 
-    private static final class StubPeer implements DirectConnectPeer {
+    private static class StubPeer implements DirectConnectPeer {
         private final List<CombatPresentationEvent> presentations =
                 new ArrayList<CombatPresentationEvent>();
         private long directedRequestId;
@@ -598,7 +994,14 @@ public class DirectConnectCombatControllerTest {
                 new ArrayList<NativeMeleePresentation>();
         private final List<NativeRangedPresentation> rangedPresentations =
                 new ArrayList<NativeRangedPresentation>();
-        private final List<String> presentationFailures = new ArrayList<String>();
+        final List<String> presentationFailures = new ArrayList<String>();
+        CombatSnapshot combatSnapshot;
+        final List<NativeDecalState> decals = new ArrayList<NativeDecalState>();
+        @Override public List<NativeDecalState> drainNativeDecals() {
+            List<NativeDecalState> drained = new ArrayList<NativeDecalState>(decals);
+            decals.clear();
+            return drained;
+        }
         private final NetworkEntityId localEntityId = new NetworkEntityId(1L);
         private final PartyStatusSnapshot partyStatus = new PartyStatusSnapshot(1L,
                 Arrays.asList(new PartyMemberStatus(1, localEntityId, "Host",
@@ -614,7 +1017,7 @@ public class DirectConnectCombatControllerTest {
         @Override public List<MovementSnapshot> getMovementSnapshots() {
             return Collections.emptyList();
         }
-        @Override public CombatSnapshot getCombatSnapshot() { return null; }
+        @Override public CombatSnapshot getCombatSnapshot() { return combatSnapshot; }
         @Override public List<CombatPresentationEvent> getCombatPresentationEvents() {
             return new ArrayList<CombatPresentationEvent>(presentations);
         }
@@ -675,5 +1078,47 @@ public class DirectConnectCombatControllerTest {
         }
         @Override public void submitMovementInput(MovementInputFrame input) { }
         @Override public void close() { }
+    }
+
+    private static final class HostStubPeer extends StubPeer implements NativeCombatAuthority {
+        final List<NativeDecalState> announcedDecals = new ArrayList<NativeDecalState>();
+        final List<NativeDecalState> keptDecals = new ArrayList<NativeDecalState>();
+        @Override public void recordNativeDecal(NativeDecalState decal, boolean announce) {
+            (announce ? announcedDecals : keptDecals).add(decal);
+        }
+        final List<NativeMonsterSpawn> restoredSpawns = new ArrayList<NativeMonsterSpawn>();
+        final List<NativeMonsterSpawn> publishedSpawns = new ArrayList<NativeMonsterSpawn>();
+        final List<String> retiredMonsters = new ArrayList<String>();
+        @Override public void retireNativeMonster(String monsterId) {
+            retiredMonsters.add(monsterId);
+        }
+        final Set<String> consumedSpawners = new LinkedHashSet<String>();
+
+        @Override public List<NativeMonsterSpawn> getRestoredNativeMonsterSpawns() {
+            return restoredSpawns;
+        }
+        @Override public void publishNativeMonsterSpawn(NativeMonsterSpawn spawn) {
+            publishedSpawns.add(spawn);
+        }
+        @Override public boolean isNativeMonsterSpawnerConsumed(String spawnerKey) {
+            return consumedSpawners.contains(spawnerKey);
+        }
+        @Override public void consumeNativeMonsterSpawner(String spawnerKey) {
+            consumedSpawners.add(spawnerKey);
+        }
+        @Override public void bindNativeMonster(int health, int maximumHealth,
+                float x, float y, float z) { }
+        @Override public void synchronizeNativeMonster(int health, int maximumHealth,
+                float x, float y, float z) { }
+        @Override public List<CombatRequest> drainNativeCombatRequests() {
+            return Collections.emptyList();
+        }
+        @Override public void applyNativeMonsterDamage(
+                com.interrupt.dungeoneer.multiplayer.participant.ParticipantId targetId,
+                int damage, CombatAction action, float originX, float originY, float originZ,
+                float impactX, float impactY, float impactZ) { }
+        @Override public void publishNativePresentation(String sourceId, String targetId,
+                CombatAction action, float originX, float originY, float originZ,
+                float impactX, float impactY, float impactZ, boolean stateChanged) { }
     }
 }

@@ -55,7 +55,7 @@ public class AuthoritativeMovementSimulationTest {
         assertEquals((normal.getState(participant(1)).getY() - origin) * 0.5f,
                 slowed.getState(participant(1)).getY() - origin, 0.00001f);
         slowed.setNativeSpeedModifier(participant(1), 1f);
-        for(int tick = 31; tick <= 60; tick++) {
+        for(int tick = 31; tick <= 90; tick++) {
             slowed.applyCommand(tick, command(1, tick, 1, 0, 0, false), NO_OUTPUT);
             slowed.tick(tick, FIXED_DELTA, NO_OUTPUT);
         }
@@ -213,6 +213,26 @@ public class AuthoritativeMovementSimulationTest {
 
         assertTrue(simulation.getState(participant(1)).getX()
                 > simulation.getState(participant(2)).getX());
+    }
+
+    @Test public void jumpRisesAsHighAsNativePlayerJumpAndLands() {
+        AuthoritativeMovementSimulation simulation = simulation(1);
+        float start = simulation.getState(participant(1)).getZ();
+        float highest = start;
+        for(int tick = 1; tick <= 90; tick++) {
+            simulation.applyCommand(tick, command(1, tick, 0f, 0f, 0f, tick == 1), NO_OUTPUT);
+            simulation.tick(tick, FIXED_DELTA, NO_OUTPUT);
+            highest = Math.max(highest, simulation.getState(participant(1)).getZ());
+        }
+        // Native Player: za += 0.05 once, then each tick z += za and gravity takes 0.0035.
+        float z = 0f, za = 0.05f, apex = 0f;
+        while(za > 0f) {
+            z += za;
+            za -= 0.0035f;
+            apex = Math.max(apex, z);
+        }
+        assertEquals(apex, highest - start, 0.001f);
+        assertEquals(start, simulation.getState(participant(1)).getZ(), 0.00001f);
     }
 
     @Test

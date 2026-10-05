@@ -118,6 +118,9 @@ final class DirectConnectWire {
     private static final int REVIVE_INTENT = 49;
     private static final int PARTY_WIPE = 50;
     private static final int NATIVE_MONSTER_SPAWN = 51;
+    private static final int NATIVE_DECAL = 53;
+    private static final int TRIGGER_PRESENTATION = 54;
+    private static final int MOVER_STATE = 55;
     // TCP-only fragments of one complete combat snapshot; never partial gameplay state.
     static final int COMBAT_STATE_PART = 52;
     private static final int COMBAT_PART_HEADER_BYTES = 13; // magic, type, total, offset
@@ -406,6 +409,34 @@ final class DirectConnectWire {
             output.writeInt(spawnMessage.spawn.health);
             output.writeInt(spawnMessage.spawn.maximumHealth);
         }
+        else if(message instanceof NativeDecalMessage) {
+            NativeDecalMessage decalMessage = (NativeDecalMessage)message;
+            com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState decal = decalMessage.decal;
+            output.writeByte(NATIVE_DECAL);
+            writeString(output, decalMessage.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(decalMessage.generation);
+            float[] values = { decal.x, decal.y, decal.z, decal.directionX, decal.directionY,
+                    decal.directionZ, decal.roll, decal.rotationX, decal.rotationY, decal.rotationZ,
+                    decal.start, decal.end, decal.fieldOfView, decal.width, decal.height,
+                    decal.red, decal.green, decal.blue, decal.alpha };
+            for(float value : values) output.writeFloat(value);
+            output.writeBoolean(decal.ortho);
+            output.writeByte(decal.artType);
+            output.writeShort(decal.tex);
+            writeString(output, decal.atlas,
+                    com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState.MAX_ATLAS_BYTES, "decal atlas");
+        }
+        else if(message instanceof TriggerPresentationMessage) {
+            TriggerPresentationMessage presentation = (TriggerPresentationMessage)message;
+            output.writeByte(TRIGGER_PRESENTATION);
+            writeString(output, presentation.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(presentation.presentation.objectId);
+            writeString(output, presentation.presentation.value,
+                    com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation.MAX_VALUE_BYTES,
+                    "trigger presentation value");
+        }
         else if(message instanceof DoorStateMessage) {
             DoorStateMessage messageState = (DoorStateMessage)message;
             DoorSnapshot state = messageState.state;
@@ -417,6 +448,17 @@ final class DirectConnectWire {
             output.writeBoolean(state.active); output.writeBoolean(state.solid);
             output.writeFloat(state.x); output.writeFloat(state.y); output.writeFloat(state.z);
             output.writeFloat(state.rotation); output.writeFloat(state.animation);
+        }
+        else if(message instanceof MoverStateMessage) {
+            MoverStateMessage messageState = (MoverStateMessage)message;
+            com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot state = messageState.state;
+            output.writeByte(MOVER_STATE);
+            writeString(output, messageState.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(state.entityId); output.writeLong(state.revision);
+            output.writeFloat(state.x); output.writeFloat(state.y); output.writeFloat(state.z);
+            output.writeFloat(state.rotationX); output.writeFloat(state.rotationY);
+            output.writeFloat(state.rotationZ); output.writeBoolean(state.moving);
         }
         else if(message instanceof BreakableStateMessage) {
             BreakableStateMessage messageState = (BreakableStateMessage)message;
@@ -812,6 +854,7 @@ final class DirectConnectWire {
                     "session identity");
             output.writeLong(delivery.getSequence());
             output.writeByte(delivery.getCampaignSlot());
+            output.writeBoolean(delivery.isSystem());
             writeString(output, delivery.getNickname(), DirectConnectProtocol.MAX_NICKNAME_BYTES,
                     "Nickname");
             writeString(output, delivery.getText(), DirectConnectProtocol.MAX_PARTY_CHAT_BYTES,
@@ -868,6 +911,20 @@ final class DirectConnectWire {
         int type = input.readUnsignedByte();
         Message message;
         switch(type) {
+            case MOVER_STATE:
+                String moverSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                        "session identity");
+                requireReadable(input, 41, "mover state");
+                try {
+                    message = new MoverStateMessage(moverSession,
+                            new com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot(input.readLong(),
+                                    input.readLong(), input.readFloat(), input.readFloat(), input.readFloat(),
+                                    input.readFloat(), input.readFloat(), input.readFloat(), input.readBoolean()));
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid mover state.", invalid);
+                }
+                break;
             case DOOR_STATE:
                 String doorSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                         "session identity");
@@ -1212,6 +1269,49 @@ final class DirectConnectWire {
                 }
                 catch(IllegalArgumentException invalid) {
                     throw new ProtocolException("Invalid native monster spawn.", invalid);
+                }
+                break;
+            case NATIVE_DECAL:
+                String decalSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                        "session identity");
+                requireReadable(input, 8 + 19 * 4 + 1 + 1 + 2, "native decal");
+                long decalGeneration = input.readLong();
+                float[] decalValues = new float[19];
+                for(int index = 0; index < decalValues.length; index++) decalValues[index] = input.readFloat();
+                boolean decalOrtho = input.readBoolean();
+                int decalArt = input.readUnsignedByte();
+                int decalTex = input.readUnsignedShort();
+                String decalAtlas = readString(input,
+                        com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState.MAX_ATLAS_BYTES, "decal atlas");
+                try {
+                    message = new NativeDecalMessage(decalSession, decalGeneration,
+                            new com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState(
+                                    decalValues[0], decalValues[1], decalValues[2], decalValues[3],
+                                    decalValues[4], decalValues[5], decalValues[6], decalValues[7],
+                                    decalValues[8], decalValues[9], decalValues[10], decalValues[11],
+                                    decalValues[12], decalValues[13], decalValues[14], decalOrtho,
+                                    decalArt, decalTex, decalAtlas, decalValues[15], decalValues[16],
+                                    decalValues[17], decalValues[18]));
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid native decal.", invalid);
+                }
+                break;
+            case TRIGGER_PRESENTATION:
+                String triggerShowSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 8, "trigger presentation");
+                long triggerShowObject = input.readLong();
+                String triggerShowValue = readString(input,
+                        com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation.MAX_VALUE_BYTES,
+                        "trigger presentation value");
+                try {
+                    message = new TriggerPresentationMessage(triggerShowSession,
+                            new com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation(
+                                    triggerShowObject, triggerShowValue));
+                }
+                catch(IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid trigger presentation.", invalid);
                 }
                 break;
             case REVIVE_INTENT:
@@ -1757,16 +1857,21 @@ final class DirectConnectWire {
             case PARTY_CHAT_DELIVERY:
                 String chatSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
-                requireReadable(input, 9, "Party chat delivery identity");
+                requireReadable(input, 10, "Party chat delivery identity");
                 long chatSequence = input.readLong();
                 int chatSlot = input.readUnsignedByte();
+                boolean systemChat = input.readBoolean();
                 String chatNickname = readString(input,
                         DirectConnectProtocol.MAX_NICKNAME_BYTES, "Nickname");
                 String chatText = requireChat(readString(input,
                         DirectConnectProtocol.MAX_PARTY_CHAT_BYTES, "Party chat"));
                 try {
                     message = new PartyChatDelivery(chatSession,
-                            new PartyChatMessage(chatSequence, chatSlot, chatNickname, chatText));
+                            systemChat
+                                    ? PartyChatMessage.system(chatSequence, chatSlot,
+                                            chatNickname, chatText)
+                                    : new PartyChatMessage(chatSequence, chatSlot,
+                                            chatNickname, chatText));
                 }
                 catch(IllegalArgumentException ex) {
                     throw new ProtocolException("Malformed Party chat: " + ex.getMessage(), ex);
@@ -2472,6 +2577,36 @@ final class DirectConnectWire {
     }
 
     /** Reliable Host announcement of a Monster that appeared after the floor's initial attach. */
+    /** A mark on Host's current floor a joining client did not see being made. */
+    static final class NativeDecalMessage implements Message {
+        final String sessionId;
+        final long generation;
+        final com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState decal;
+
+        NativeDecalMessage(String sessionId, long generation,
+                com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState decal) {
+            if(sessionId == null || decal == null || generation <= 0)
+                throw new IllegalArgumentException("Invalid native decal message.");
+            this.sessionId = sessionId;
+            this.generation = generation;
+            this.decal = decal;
+        }
+    }
+
+    /** Sent only to the client that used a trigger whose effects address its own screen. */
+    static final class TriggerPresentationMessage implements Message {
+        final String sessionId;
+        final com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation presentation;
+
+        TriggerPresentationMessage(String sessionId,
+                com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation presentation) {
+            if(sessionId == null || presentation == null)
+                throw new IllegalArgumentException("Invalid trigger presentation message.");
+            this.sessionId = sessionId;
+            this.presentation = presentation;
+        }
+    }
+
     static final class NativeMonsterSpawnMessage implements Message {
         final String sessionId;
         final long sequence;
@@ -2530,6 +2665,16 @@ final class DirectConnectWire {
         PartyKeysMessage(String sessionId, long revision, int count) {
             if(revision < 0 || count < 0 || count > 1000000) throw new IllegalArgumentException("Invalid Party Keys.");
             this.sessionId = sessionId; this.revision = revision; this.count = count;
+        }
+    }
+
+    static final class MoverStateMessage implements Message {
+        final String sessionId;
+        final com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot state;
+        MoverStateMessage(String sessionId, com.interrupt.dungeoneer.multiplayer.items.MoverSnapshot state) {
+            if(state == null) throw new IllegalArgumentException("Mover state is required.");
+            this.sessionId = sessionId;
+            this.state = state;
         }
     }
 
