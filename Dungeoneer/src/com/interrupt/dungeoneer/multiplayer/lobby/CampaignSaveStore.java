@@ -33,12 +33,17 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 /** Host Campaign Library plus bounded, all-or-nothing Campaign Save codec. */
 public final class CampaignSaveStore {
@@ -48,14 +53,24 @@ public final class CampaignSaveStore {
     private static final int MAX_WORLD_OBJECTS = 4096;
 
     private final File campaignsRoot;
+    private final Map<String, FileChannel> sessionChannels = new HashMap<String, FileChannel>();
+    private final Map<String, FileLock> sessionLocks = new HashMap<String, FileLock>();
+    interface AtomicReplacement { void replace(Path source, Path target) throws IOException; }
+    private final AtomicReplacement replacement;
 
     public CampaignSaveStore(File campaignsRoot) {
+        this(campaignsRoot, (source, target) -> Files.move(source, target,
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING));
+    }
+
+    CampaignSaveStore(File campaignsRoot, AtomicReplacement replacement) {
         if(campaignsRoot == null) throw new IllegalArgumentException("Campaign storage root cannot be null.");
         this.campaignsRoot = campaignsRoot;
+        this.replacement = replacement;
     }
 
     public synchronized boolean exists(String campaignId) {
-        return saveFile(campaignId).isFile();
+        return saveFile(campaignId).isFile() || isArchived(campaignId);
     }
 
     /** Campaign IDs with durable saves. Invalid directory names and unrelated files are ignored. */
@@ -64,9 +79,10 @@ public final class CampaignSaveStore {
         if(directories == null) return Collections.emptyList();
         List<String> campaigns = new ArrayList<String>();
         for(File directory : directories) {
-            if(!directory.isDirectory() || !new File(directory, "campaign.save").isFile()) continue;
+            if(!directory.isDirectory()) continue;
             try {
-                campaigns.add(CampaignRoster.requireCampaignId(directory.getName()));
+                String id = CampaignRoster.requireCampaignId(directory.getName());
+                if(exists(id)) campaigns.add(id);
             }
             catch(IllegalArgumentException ignored) { }
         }
@@ -79,7 +95,24 @@ public final class CampaignSaveStore {
         if(expectedCompatibility == null) {
             throw new IllegalArgumentException("Expected Campaign compatibility is required.");
         }
-        File file = saveFile(campaignId);
+        File file = currentFile(campaignId);
+        CampaignSave loaded = loadFile(file, campaignId, expectedCompatibility);
+        if(isTerminal(campaignId) && loaded.getOutcome() == CampaignSave.Outcome.ACTIVE) {
+            throw new IllegalStateException("Terminal Campaign archive write is incomplete; active recovery/export blocked. Keep files for repair: " + campaignId);
+        }
+        int format = fileFormat(file);
+        if(format < CampaignSave.FORMAT && !isArchived(campaignId)) {
+            File backup = campaignFile(campaignId, "campaign.save.before-format-" + CampaignSave.FORMAT);
+            // An existing backup is never replaced by a later migration attempt.
+            if(!backup.exists()) atomicCopy(file, backup);
+            writeFile(file, loaded);
+        }
+        if(loaded.getOutcome() != CampaignSave.Outcome.ACTIVE && !isArchived(campaignId)) save(loaded);
+        return loaded;
+    }
+
+    private CampaignSave loadFile(File file, String campaignId,
+            DirectConnectCompatibility expectedCompatibility) {
         if(!file.isFile()) throw new IllegalStateException("Campaign Save does not exist: " + campaignId);
         if(file.length() < 16L || file.length() > MAX_SAVE_BYTES) {
             throw corrupt(file, "file is truncated or outside size bounds", null);
@@ -101,7 +134,7 @@ public final class CampaignSaveStore {
             throw corrupt(file, "saved state is internally inconsistent", ex);
         }
 
-        if(!campaignId.equals(loaded.getCampaignId())) {
+        if(campaignId != null && !campaignId.equals(loaded.getCampaignId())) {
             throw corrupt(file, "Campaign identity does not match its profile path", null);
         }
         DirectConnectCompatibility saved = loaded.getCompatibility();
@@ -119,7 +152,35 @@ public final class CampaignSaveStore {
 
     public synchronized void save(CampaignSave campaign) {
         if(campaign == null) throw new IllegalArgumentException("Campaign Save cannot be null.");
-        File file = saveFile(campaign.getCampaignId());
+        String id = campaign.getCampaignId();
+        if(isArchived(id)) throw new IllegalStateException("Campaign Archive is read-only: " + id);
+        if(campaign.getOutcome() != CampaignSave.Outcome.ACTIVE) {
+            markTerminal(id, campaign.getOutcome());
+            File archive = campaignFile(id, "campaign.archive");
+            writeFile(archive, campaign);
+            archive.setReadOnly();
+            return;
+        }
+        File file = saveFile(id);
+        if(campaignFile(id, "terminal.outcome").exists()) {
+            throw new IllegalStateException("Terminal Campaign cannot resume active play: " + id);
+        }
+        if(file.isFile()) {
+            boolean valid = false;
+            try { loadFile(file, id, campaign.getCompatibility()); valid = true; }
+            catch(IllegalStateException invalid) { /* Keep last valid backup if primary is damaged. */ }
+            if(valid) {
+                if(fileFormat(file) < CampaignSave.FORMAT) {
+                    File migrationBackup = campaignFile(id, "campaign.save.before-format-" + CampaignSave.FORMAT);
+                    if(!migrationBackup.exists()) atomicCopy(file, migrationBackup);
+                }
+                atomicCopy(file, campaignFile(id, "campaign.previous"));
+            }
+        }
+        writeFile(file, campaign);
+    }
+
+    private void writeFile(File file, CampaignSave campaign) {
         File parent = file.getParentFile();
         if(!parent.isDirectory() && !parent.mkdirs()) {
             throw new IllegalStateException("Could not create Campaign Save directory: " + parent);
@@ -132,21 +193,16 @@ public final class CampaignSaveStore {
             throw new IllegalStateException("Could not create temporary Campaign Save: " + file, ex);
         }
         try {
-            try(DataOutputStream output = new DataOutputStream(
-                    new BufferedOutputStream(new FileOutputStream(temporary)))) {
+            try(FileOutputStream stream = new FileOutputStream(temporary);
+                    DataOutputStream output = new DataOutputStream(new BufferedOutputStream(stream))) {
                 write(output, campaign);
                 output.flush();
+                stream.getFD().sync();
             }
             if(temporary.length() > MAX_SAVE_BYTES) {
                 throw new IllegalStateException("Campaign Save exceeds bounded file size: " + file);
             }
-            try {
-                Files.move(temporary.toPath(), file.toPath(),
-                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            }
-            catch(AtomicMoveNotSupportedException ex) {
-                Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            }
+            replacement.replace(temporary.toPath(), file.toPath());
             AtomicProperties.restrictToOwner(file);
         }
         catch(IOException ex) {
@@ -155,6 +211,189 @@ public final class CampaignSaveStore {
         finally {
             if(temporary.exists() && !temporary.delete()) temporary.deleteOnExit();
         }
+    }
+
+    public synchronized boolean isArchived(String id) {
+        return campaignFile(id, "campaign.archive").isFile();
+    }
+
+    /** Durable outcome latch precedes archive write, so disk failure cannot revive a defeated run. */
+    public synchronized void markTerminal(String id, CampaignSave.Outcome outcome) {
+        if(outcome == CampaignSave.Outcome.ACTIVE) throw new IllegalArgumentException("Terminal outcome required.");
+        File file = campaignFile(id, "terminal.outcome");
+        if(file.exists()) return;
+        try {
+            Files.createDirectories(file.getParentFile().toPath());
+            try(FileOutputStream output = new FileOutputStream(file)) {
+                output.write(outcome.name().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                output.getFD().sync();
+            }
+            AtomicProperties.restrictToOwner(file);
+        }
+        catch(IOException failure) { throw new IllegalStateException("Could not preserve terminal Campaign outcome: " + id, failure); }
+    }
+
+    public synchronized boolean isTerminal(String id) {
+        return isArchived(id) || campaignFile(id, "terminal.outcome").exists();
+    }
+
+    /** Dirty marker survives process death; lock prevents two Hosts writing one Campaign. */
+    public synchronized void beginSession(String id) {
+        if(isTerminal(id)) throw new IllegalStateException("Terminal Campaign cannot resume: " + id);
+        if(sessionLocks.containsKey(id)) throw new IllegalStateException("Campaign is already running: " + id);
+        if(needsRecovery(id)) throw new IllegalStateException("Campaign needs crash recovery in Campaign Library: " + id);
+        File marker = campaignFile(id, "session.running");
+        FileChannel channel = null;
+        try {
+            Files.createDirectories(marker.getParentFile().toPath());
+            channel = FileChannel.open(campaignFile(id, "session.lock").toPath(),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            FileLock lock = channel.tryLock();
+            if(lock == null) throw new IllegalStateException("Campaign is running in another Host: " + id);
+            sessionChannels.put(id, channel);
+            sessionLocks.put(id, lock);
+            try(FileOutputStream output = new FileOutputStream(marker)) {
+                output.write(1); output.getFD().sync();
+            }
+            AtomicProperties.restrictToOwner(marker);
+        }
+        catch(IOException | RuntimeException failure) {
+            endSession(id, false);
+            if(channel != null) try { channel.close(); } catch(IOException ignored) { }
+            throw new IllegalStateException("Could not begin Campaign session: " + id, failure);
+        }
+    }
+
+    public synchronized void endSession(String id, boolean clean) {
+        try {
+            if(clean) Files.deleteIfExists(campaignFile(id, "session.running").toPath());
+        }
+        catch(IOException failure) { throw new IllegalStateException("Could not mark Campaign shutdown clean: " + id, failure); }
+        finally {
+            FileLock lock = sessionLocks.remove(id);
+            FileChannel channel = sessionChannels.remove(id);
+            try { if(lock != null) lock.release(); } catch(IOException ignored) { }
+            try { if(channel != null) channel.close(); } catch(IOException ignored) { }
+        }
+    }
+
+    public synchronized boolean needsRecovery(String id) {
+        return !isTerminal(id) && !sessionLocks.containsKey(id)
+                && campaignFile(id, "session.running").isFile();
+    }
+
+    /** Three bounded internal slots, never exposed as selectable checkpoints. */
+    public synchronized void snapshot(CampaignSave campaign) {
+        String id = campaign.getCampaignId();
+        if(isArchived(id)) return;
+        File oldest = campaignFile(id, "recovery-0.save");
+        for(int index = 1; index < 3; index++) {
+            File candidate = campaignFile(id, "recovery-" + index + ".save");
+            if(!candidate.exists() || candidate.lastModified() < oldest.lastModified()) oldest = candidate;
+        }
+        writeFile(oldest, campaign);
+        long timestamp = System.currentTimeMillis();
+        for(int index = 0; index < 3; index++) {
+            File other = campaignFile(id, "recovery-" + index + ".save");
+            if(!other.equals(oldest)) timestamp = Math.max(timestamp, other.lastModified() + 1L);
+        }
+        if(!oldest.setLastModified(timestamp)) throw new IllegalStateException("Could not order Campaign recovery snapshots.");
+    }
+
+    /** Recovery always chooses newest valid compatible record; terminal primary wins. */
+    public synchronized CampaignSave recover(String id, DirectConnectCompatibility compatibility) {
+        if(!needsRecovery(id)) throw new IllegalStateException("Recovery is available only after unclean Host shutdown.");
+        try(FileChannel channel = FileChannel.open(campaignFile(id, "session.lock").toPath(),
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            FileLock lock;
+            try { lock = channel.tryLock(); }
+            catch(java.nio.channels.OverlappingFileLockException running) {
+                throw new IllegalStateException("Campaign is still running in another Host; recovery blocked.", running);
+            }
+            if(lock == null) throw new IllegalStateException("Campaign is still running in another Host; recovery blocked.");
+            try { return recoverLocked(id, compatibility); }
+            finally { lock.release(); }
+        }
+        catch(IOException failure) { throw new IllegalStateException("Could not lock Campaign for recovery.", failure); }
+    }
+
+    private CampaignSave recoverLocked(String id, DirectConnectCompatibility compatibility) {
+        List<File> candidates = new ArrayList<File>();
+        for(int index = 0; index < 3; index++) candidates.add(campaignFile(id, "recovery-" + index + ".save"));
+        candidates.add(saveFile(id));
+        candidates.add(campaignFile(id, "campaign.previous"));
+        Collections.sort(candidates, (left, right) -> Long.compare(right.lastModified(), left.lastModified()));
+        RuntimeException last = null;
+        for(File candidate : candidates) {
+            if(!candidate.isFile()) continue;
+            CampaignSave saved;
+            try { saved = loadFile(candidate, id, compatibility); }
+            catch(RuntimeException failure) { last = failure; continue; }
+            save(saved);
+            endSession(id, true);
+            return saved;
+        }
+        throw new IllegalStateException("No valid compatible Campaign recovery remains; keep files and restore a Host export.", last);
+    }
+
+    public synchronized File exportCampaign(String id, LauncherIdentity host, File destination,
+            DirectConnectCompatibility compatibility) {
+        if(needsRecovery(id) || sessionLocks.containsKey(id)) {
+            throw new IllegalStateException("End or recover Campaign before exporting it.");
+        }
+        CampaignSave campaign = load(id, compatibility);
+        requireHost(campaign, host);
+        if(destination == null || !destination.isAbsolute() || destination.exists()) {
+            throw new IllegalStateException("Choose an unused absolute path for Campaign Export.");
+        }
+        atomicCopy(currentFile(id), destination);
+        return destination;
+    }
+
+    public synchronized CampaignSave readExport(File source, LauncherIdentity host,
+            DirectConnectCompatibility compatibility) {
+        if(source == null || !source.isFile()) throw new IllegalStateException("Campaign Export file does not exist.");
+        CampaignSave campaign = loadFile(source, null, compatibility);
+        requireHost(campaign, host);
+        return campaign;
+    }
+
+    private static void requireHost(CampaignSave campaign, LauncherIdentity host) {
+        for(CampaignSlot slot : campaign.getSlots()) {
+            if(slot.getNumber() == 1 && slot.getLauncherIdentity().equals(host)) return;
+        }
+        throw new IllegalStateException("Campaign belongs to another Host Launcher Identity; restore original Host Identity Recovery File first.");
+    }
+
+    private File currentFile(String id) {
+        return isArchived(id) ? campaignFile(id, "campaign.archive") : saveFile(id);
+    }
+
+    private File campaignFile(String id, String name) {
+        return new File(new File(campaignsRoot, CampaignRoster.requireCampaignId(id)), name);
+    }
+
+    private int fileFormat(File file) {
+        try(DataInputStream input = new DataInputStream(new FileInputStream(file))) {
+            input.readInt(); return input.readInt();
+        }
+        catch(IOException failure) { throw new IllegalStateException("Could not read Campaign format: " + file, failure); }
+    }
+
+    private void atomicCopy(File source, File destination) {
+        File temporary = null;
+        try {
+            Files.createDirectories(destination.getParentFile().toPath());
+            temporary = File.createTempFile("campaign-copy-", ".tmp", destination.getParentFile());
+            Files.copy(source.toPath(), temporary.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            try(FileOutputStream output = new FileOutputStream(temporary, true)) { output.getFD().sync(); }
+            // Recovery ordering follows captured state, not time an old backup was copied.
+            Files.setLastModifiedTime(temporary.toPath(), Files.getLastModifiedTime(source.toPath()));
+            replacement.replace(temporary.toPath(), destination.toPath());
+            AtomicProperties.restrictToOwner(destination);
+        }
+        catch(IOException failure) { throw new IllegalStateException("Could not preserve Campaign file: " + destination, failure); }
+        finally { if(temporary != null && temporary.exists() && !temporary.delete()) temporary.deleteOnExit(); }
     }
 
     private CampaignSave read(DataInputStream input) throws IOException {

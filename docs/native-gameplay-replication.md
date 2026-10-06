@@ -77,7 +77,7 @@ Configured wand spells: MagicMissile (8), SpreadMagicMissile (5), Beam (2). Conf
 
 `NativeStatusEffectState` allowlist covers Base, Burning, Drunk, Invisibility, Paralyze, Poison, RestoreHealth, Shield, Slow, Levitate, Speed, and SlowTime. Unsupported native subclasses fail with a controlled compatibility diagnostic instead of a generic visual fallback. Dynamic allowlist covers Projectile, MagicMissileProjectile, BeamProjectile, Missile, Bomb, and FusedBomb; required local definitions remain content-hash compatible.
 
-## Campaign Save lifecycle matrix (#21)
+## Campaign Save lifecycle matrix (#21, #22)
 
 Cold resume loads complete detached data before mutating runtime state. Current state is rebuilt
 quietly; one-shot presentation or gameplay callbacks are never serialized.
@@ -94,12 +94,24 @@ quietly; one-shot presentation or gameplay callbacks are never serialized.
 | Attack, explosion, spell, melee, ranged, animation, status-start, pulse, sound, light, impact and fizzle cues | Clear | Ordered live-only presentation; replay could duplicate damage, consumption, audio, particles or loot. |
 | Pending movement/combat/item requests, reconnect grace, chat, pause request, shop opening and controller queues | Clear | Session-scoped intent or UI state; no accepted durable outcome. |
 | Floor seed, fingerprint, native world generation and stable entity IDs | Persist | Regenerated owned content must bind to same current floor and reject incompatible construction before play. |
-| Whole Host Active Floor (ADR 0014, save format 3) | Persist the live `Level` in Delver's own level format with each bound entity's `multiplayerIdentity`; resumed Host loads it like a saved level (`init(LEVEL_LOAD)`), keeps saved ids for world objects, Monsters and hazards, and skips per-family reapply | Native families without explicit save code (triggers, levers, shops, movers, corpses) survive resume; clients keep building from their own copy and never receive the serialized floor. Format 2 saves still rebuild and reapply. |
+| Whole Host Active Floor (ADR 0014, save format 3) | Persist the live `Level` in Delver's own level format with each bound entity's `multiplayerIdentity`; resumed Host loads it like a saved level (`init(LEVEL_LOAD)`), keeps saved ids for world objects, Monsters and hazards, and skips per-family reapply | Native families without explicit save code (triggers, levers, shops, movers, corpses) survive resume; clients keep building from their own copy and never receive the serialized floor. Format 2 saves rebuild and reapply, with exact-byte backup before migration to format 3. Failed native capture retains previous save; unreadable format-3 native state stops through session error handling instead of rebuilding partial state. |
 | Floor marks (blood, sword, scorch `ProjectedDecal`) | Host keys decals it finds in level entities: floor-built ones `decal:floor`, marks made in play `decal:N` (saved in the floor checkpoint). Host keeps current-floor marks (bounded 512) and replays them to any joining or rejoining client (`NativeDecalMessage`, wire 53, protocol 45); marks restored from a checkpoint are also sent to clients already connected | Live clients draw their own marks from hit/death/swing presentation, so play-time marks are never broadcast; a rejoining client's dead-Monster pool comes from Host, not its recovery path. |
 | Screen-only trigger effects (ADR 0011) | `Trigger.presentToActivator` holds message, message/dialogue overlay, flash, music, ambient sound, achievement. Own player or no Participant: shown here. A client that used the trigger: Host sends `TriggerPresentationMessage` (wire 54) to that client only, which runs its own copy's presentation without re-running the chain (`continuesChain=false`); Host continues `triggerIdAfter` at once. A client that walked into it: nothing, its own copy already showed it. Remote touch never warps Host. | Signs and messages a client reads appear on that client's screen, not Host's. |
 
 Save schema intentionally leaves extension space for #23 Party Progression, #24 knowledge,
 #26 Dormant Floors, #27-#29 travel, #30 Orb/victory rules, and #31 full encounter/spawner state.
+
+Issue #22 uses this same detached record for saves, recovery, exports and archives; no second
+gameplay serializer or effect restart path. Render thread captures after native bridges sync,
+about every wall-clock minute (including Party pause) and on native world generation changes;
+explicit durable writes also rotate recovery. Three recovery files remain internal. Dirty
+session marker survives crashes; clean shutdown hides recovery, while recovery chooses newest
+valid compatible record and never lets Host select historical checkpoints. JVM shutdown hook
+can write last detached capture without touching native graphs; hard process termination relies
+on snapshots already written. Terminal outcome latch blocks active recovery even if final archive
+write fails. Completed/defeated archives reject writes and resume. Export/import preserves Host
+Launcher Identity, slot identities and reconnect tokens; machine transfer requires original Host
+identity restored separately. Atomic replacement never falls back to ordinary overwrite.
 
 ## Automated evidence
 

@@ -14,6 +14,7 @@ import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 
 import java.util.Collections;
 import java.util.List;
+import java.io.File;
 
 /** Host-facing Campaign Library shown before a Direct Connect listener is opened. */
 public final class CampaignLibraryScreen implements Screen {
@@ -62,7 +63,8 @@ public final class CampaignLibraryScreen implements Screen {
         font.getData().setScale(1f);
         y -= 44f;
         font.draw(batch, "[N] New Campaign (Capacity " + newCampaignCapacity
-                        + ")   [UP/DOWN] Select   [ENTER] Host selected",
+                        + ")   [UP/DOWN] Select   [ENTER] Host / inspect archive\n"
+                        + "[R] Recover after crash   [E] Export   [I] Import Host export",
                 width * 0.05f, y, width * 0.9f, Align.center, true);
         y -= 42f;
         if(entries.isEmpty()) {
@@ -99,10 +101,52 @@ public final class CampaignLibraryScreen implements Screen {
             selected = (selected + 1) % entries.size();
         }
         if(Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && !entries.isEmpty()) {
-            try { open(library.resume(entries.get(selected).getCampaignId())); }
+            try {
+                CampaignLibrary.Entry entry = entries.get(selected);
+                if(entry.isArchived()) error = library.describeArchive(entry.getCampaignId(), application.getCampaignCompatibility());
+                else open(library.resume(entry.getCampaignId()));
+            }
             catch(RuntimeException failure) { fail(failure); }
         }
+        if(Gdx.input.isKeyJustPressed(Input.Keys.R) && !entries.isEmpty()) {
+            try { open(library.recover(entries.get(selected).getCampaignId(), application.getCampaignCompatibility())); }
+            catch(RuntimeException failure) { fail(failure); }
+        }
+        if(Gdx.input.isKeyJustPressed(Input.Keys.E) && !entries.isEmpty()) requestExport();
+        if(Gdx.input.isKeyJustPressed(Input.Keys.I)) requestImport();
         if(Gdx.input.isKeyJustPressed(Input.Keys.N)) requestNewCampaign();
+    }
+
+    private void requestExport() {
+        final String id = entries.get(selected).getCampaignId();
+        promptOpen = true;
+        Gdx.input.getTextInput(new Input.TextInputListener() {
+            @Override public void input(String text) {
+                promptOpen = false;
+                try {
+                    File exported = library.exportCampaign(id, new File(text.trim()), application.getCampaignCompatibility());
+                    error = "Export saved: " + exported + ". Move original Host Identity Recovery File separately to keep ownership.";
+                }
+                catch(RuntimeException failure) { fail(failure); }
+            }
+            @Override public void canceled() { promptOpen = false; }
+        }, "Campaign Export - original Host only", "", "Unused full path, e.g. C:\\Backups\\friends.delvercampaign");
+    }
+
+    private void requestImport() {
+        promptOpen = true;
+        Gdx.input.getTextInput(new Input.TextInputListener() {
+            @Override public void input(String text) {
+                promptOpen = false;
+                try {
+                    CampaignRoster imported = library.importCampaign(new File(text.trim()), application.getCampaignCompatibility());
+                    error = "Imported " + imported.getCampaignId() + ". Original Host ownership preserved.";
+                    refresh();
+                }
+                catch(RuntimeException failure) { fail(failure); }
+            }
+            @Override public void canceled() { promptOpen = false; }
+        }, "Import Campaign Export", "", "Full path to original Host export");
     }
 
     private void requestNewCampaign() {
@@ -149,7 +193,8 @@ public final class CampaignLibraryScreen implements Screen {
 
     static String campaignLine(CampaignLibrary.Entry entry) {
         return entry.getCampaignId() + "  |  "
-                + (entry.hasSave() ? "Saved Campaign" : "Not started")
+                + (entry.isArchived() ? "Campaign Archive (read-only)" : entry.needsRecovery()
+                        ? "Unclean shutdown - [R] Recover" : entry.hasSave() ? "Saved Campaign" : "Not started")
                 + "  |  Capacity " + entry.getCapacity()
                 + "  |  Claimed " + entry.getClaimedSlots();
     }

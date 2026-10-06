@@ -160,6 +160,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private boolean resumeNativeWorldPending;
     private byte[] restoredNativeFloor;
     private java.util.function.Supplier<byte[]> nativeFloorCapture;
+    private CampaignSave lastCapturedCampaign;
+    private Thread recoveryShutdownHook;
     private final MovementCollisionWorld movementWorld;
     private final MovementReplicationState movementReplication =
             new MovementReplicationState();
@@ -272,6 +274,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         this.roster = roster;
         this.rosterStore = rosterStore;
         campaignSaveStore = rosterStore.campaignSaves();
+        if(campaignSaveStore.isTerminal(roster.getCampaignId())) {
+            throw new IllegalStateException("Campaign Archive is read-only and cannot resume active play.");
+        }
+        if(campaignSaveStore.needsRecovery(roster.getCampaignId())) {
+            throw new IllegalStateException("Unclean Host shutdown: recover Campaign in Campaign Library first.");
+        }
         CampaignSave saved = campaignSaveStore.exists(roster.getCampaignId())
                 ? campaignSaveStore.load(roster.getCampaignId(), compatibility) : null;
         if(saved != null) {
@@ -746,7 +754,19 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     @Override
                     public void persist(long hostTick, HostPersistedState state) { }
                 });
+        campaignSaveStore.beginSession(roster.getCampaignId());
         sessionStarted = true;
+        recoveryShutdownHook = new Thread(() -> {
+            // Native graphs cannot be touched from JVM shutdown thread. Reuse last detached capture.
+            synchronized(DirectConnectHost.this) {
+                if(!closing.get() && lastCapturedCampaign != null
+                        && !campaignSaveStore.isTerminal(roster.getCampaignId())) {
+                    try { campaignSaveStore.snapshot(lastCapturedCampaign); }
+                    catch(RuntimeException ignored) { /* Existing valid files and dirty marker survive. */ }
+                }
+            }
+        }, "delver-campaign-recovery");
+        Runtime.getRuntime().addShutdownHook(recoveryShutdownHook);
 
         for(MovementEntityDescriptor descriptor : descriptors) {
             movementReplication.applySpawn(descriptor);
@@ -777,7 +797,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 publishPartyNotice(descriptor, descriptor.getNickname() + " joined", null);
             }
         }
-        persistCampaign();
+        if(durableCampaign == null) persistCampaign();
     }
 
     private MovementSpawn findEncounterSpawn() {
@@ -2040,12 +2060,15 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     /** Terminal state: Host keeps serving chat and status, but simulation never advances again. */
     private void declarePartyWipe() {
         partyWiped = true;
+        campaignSaveStore.markTerminal(roster.getCampaignId(), CampaignSave.Outcome.DEFEATED);
         ScheduledFuture<?> task = movementTask;
         if(task != null) task.cancel(false);
         broadcast(new DirectConnectWire.PartyWipeMessage(sessionId));
         status = status(DirectConnectPhase.READY,
                 "Party Wipe: no Campaign Slot can return. The campaign is defeated.",
                 null, sharedFloorId());
+        // Native floor capture belongs to render thread; headless sessions can archive here.
+        if(nativeFloorCapture == null) persistCampaign();
     }
 
     @Override
@@ -2858,6 +2881,28 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         return boundPort;
     }
 
+    /** Failed reconstruction must not replace last durable state with partial startup state. */
+    public void abortCampaignRecovery(String reason) {
+        if(!closing.compareAndSet(false, true)) return;
+        List<Channel> participants;
+        synchronized(this) { participants = new ArrayList<Channel>(connections.keySet()); }
+        for(Channel participant : participants) {
+            if(participant.isActive()) participant.writeAndFlush(
+                    new ServerDisconnect("Host recovery failed; wait for original Host."))
+                    .awaitUninterruptibly(1000L);
+        }
+        if(sessionStarted) campaignSaveStore.endSession(roster.getCampaignId(), false);
+        closeResources();
+        removeRecoveryShutdownHook();
+        status = status(DirectConnectPhase.FAILED, reason, null, null);
+    }
+
+    private void removeRecoveryShutdownHook() {
+        if(recoveryShutdownHook == null) return;
+        try { Runtime.getRuntime().removeShutdownHook(recoveryShutdownHook); }
+        catch(IllegalStateException shuttingDown) { /* JVM shutdown already started. */ }
+    }
+
     private static ParticipantId participantId(CampaignSlot slot) {
         return new ParticipantId("campaign-slot-" + slot.getNumber());
     }
@@ -2880,9 +2925,13 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     public void close() {
         if(!closing.compareAndSet(false, true)) return;
         RuntimeException persistenceFailure = null;
-        if(sessionStarted) {
+        if(sessionStarted && !confirmedSavePrepared) {
             try { persistCampaign(); }
             catch(RuntimeException failure) { persistenceFailure = failure; }
+        }
+        if(sessionStarted) {
+            try { campaignSaveStore.endSession(roster.getCampaignId(), persistenceFailure == null); }
+            catch(RuntimeException failure) { if(persistenceFailure == null) persistenceFailure = failure; }
         }
         List<Channel> participants;
         synchronized(this) {
@@ -2890,11 +2939,13 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         for(Channel participant : participants) {
             if(participant.isActive()) {
-                participant.writeAndFlush(new ServerDisconnect("Host closed session."))
+                participant.writeAndFlush(new ServerDisconnect(persistenceFailure == null
+                        ? "Host saved and closed session." : "Host lost session; crash recovery required."))
                         .awaitUninterruptibly(1000L);
             }
         }
         closeResources();
+        removeRecoveryShutdownHook();
         status = persistenceFailure == null
                 ? status(DirectConnectPhase.CLOSED, "Host session closed.", null, null)
                 : status(DirectConnectPhase.FAILED,
@@ -2905,6 +2956,15 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     /** Durable cold-resume checkpoint. Does not replay transient commands or cues. */
     public synchronized CampaignSave persistCampaign() {
+        if(campaignSaveStore.isArchived(roster.getCampaignId())) return durableCampaign;
+        CampaignSave saved = captureCampaign();
+        campaignSaveStore.save(saved);
+        durableCampaign = saved;
+        if(saved.getOutcome() == CampaignSave.Outcome.ACTIVE) campaignSaveStore.snapshot(saved);
+        return saved;
+    }
+
+    private synchronized CampaignSave captureCampaign() {
         if(!sessionStarted || movementSimulation == null || combatEncounter == null
                 || partyStatus == null) {
             throw new IllegalStateException("Campaign play must start before it can be saved.");
@@ -2939,9 +2999,48 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 new ArrayList<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn>(
                         nativeMonsterSpawns),
                 new ArrayList<String>(consumedMonsterSpawners), captureNativeFloor());
-        campaignSaveStore.save(saved);
-        durableCampaign = saved;
+        lastCapturedCampaign = saved;
         return saved;
+    }
+
+    private long nextRecoveryNanos;
+    private long savedRecoveryGeneration = -1L;
+    private String campaignSaveError;
+    private boolean confirmedSavePrepared;
+
+    /** Called after native bridges synchronize, even during Party pause. Wall clock cadence. */
+    public synchronized void updateCampaignRecovery(long nowNanos) {
+        if(!sessionStarted || closing.get() || campaignSaveStore.isArchived(roster.getCampaignId())) return;
+        if(!partyWiped && savedRecoveryGeneration == nativeWorldGeneration
+                && nowNanos < nextRecoveryNanos) return;
+        nextRecoveryNanos = nowNanos + TimeUnit.MINUTES.toNanos(1L);
+        savedRecoveryGeneration = nativeWorldGeneration;
+        try {
+            CampaignSave saved = captureCampaign();
+            if(partyWiped) campaignSaveStore.save(saved);
+            else campaignSaveStore.snapshot(saved);
+            durableCampaign = saved;
+            campaignSaveError = null;
+        }
+        catch(RuntimeException failure) {
+            campaignSaveError = "Campaign protection failed: " + safeMessage(failure);
+            if(com.badlogic.gdx.Gdx.app != null) com.badlogic.gdx.Gdx.app.error("DelverMultiplayer", campaignSaveError);
+        }
+    }
+
+    public synchronized String getCampaignSaveError() { return campaignSaveError; }
+
+    /** Explicit confirmation path: failed save keeps session alive and marker dirty. */
+    public void saveAndQuit() {
+        boolean wasPaused = isSessionPaused();
+        setSessionPaused(true);
+        try { persistCampaign(); }
+        catch(RuntimeException failure) {
+            setSessionPaused(wasPaused);
+            throw failure;
+        }
+        confirmedSavePrepared = true;
+        close();
     }
 
     /**
@@ -2976,15 +3075,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private byte[] captureNativeFloor() {
         java.util.function.Supplier<byte[]> capture = nativeFloorCapture;
         if(capture == null) return durableCampaign == null ? null : durableCampaign.getNativeFloor();
-        try {
-            return capture.get();
-        }
-        catch(RuntimeException failure) {
-            // Ledger still saves; resume then rebuilds this floor and reapplies saved state.
-            if(com.badlogic.gdx.Gdx.app != null) com.badlogic.gdx.Gdx.app.error("DelverMultiplayer",
-                    "Active Floor checkpoint failed: " + safeMessage(failure));
-            return null;
-        }
+        byte[] floor = capture.get();
+        if(floor == null) throw new IllegalStateException("Active Floor capture returned no native state; previous save retained.");
+        return floor;
     }
 
     private MovementEntityDescriptor descriptorForSlot(int campaignSlot) {

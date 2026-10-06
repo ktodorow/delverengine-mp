@@ -27,6 +27,9 @@ import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
 import java.util.Arrays;
 import java.util.Collections;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.io.IOException;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -138,6 +141,152 @@ public class CampaignSaveStoreTest {
         assertFailure(store, "mixed", compatibility("another-build"), "incompatible engine build");
         assertTrue(store.exists("mixed"));
         assertFalse(store.exists("missing"));
+    }
+
+    @Test public void failedAtomicReplacementRetainsPreviousNativeState() throws Exception {
+        File root = temporaryFolder.newFolder("atomic");
+        CampaignSave original = withFloor(save("friends", compatibility("build-49")), new byte[] { 1 });
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        store.save(original);
+        CampaignSaveStore failing = new CampaignSaveStore(root, (source, target) -> {
+            if(target.getFileName().toString().equals("campaign.save")) throw new IOException("Injected replacement failure");
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        });
+        try { failing.save(withFloor(original, new byte[] { 2 })); fail("Replacement must fail."); }
+        catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("Could not save")); }
+        assertTrue(Arrays.equals(new byte[] { 1 }, store.load("friends", original.getCompatibility()).getNativeFloor()));
+        assertTrue(new File(new File(root, "friends"), "campaign.previous").isFile());
+    }
+
+    @Test public void migrationBacksUpExactOldBytesBeforeChangingFormat() throws Exception {
+        File root = temporaryFolder.newFolder("migration");
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        CampaignSave original = save("friends", compatibility("build-49"));
+        store.save(original);
+        File file = new File(new File(root, "friends"), "campaign.save");
+        try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
+            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 1);
+        }
+        byte[] before = Files.readAllBytes(file.toPath());
+        store.load("friends", original.getCompatibility());
+        File backup = new File(file.getParentFile(), "campaign.save.before-format-3");
+        assertTrue(Arrays.equals(before, Files.readAllBytes(backup.toPath())));
+        try(RandomAccessFile migrated = new RandomAccessFile(file, "r")) {
+            migrated.seek(4); assertEquals(CampaignSave.FORMAT, migrated.readInt());
+        }
+        store.load("friends", original.getCompatibility());
+        assertTrue(Arrays.equals(before, Files.readAllBytes(backup.toPath())));
+    }
+
+    @Test public void rotatingRecoveryRequiresUncleanShutdownAndSkipsCorruptNewest() throws Exception {
+        File root = temporaryFolder.newFolder("recovery");
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        CampaignSave original = save("friends", compatibility("build-49"));
+        store.save(original);
+        store.beginSession("friends");
+        for(int index = 1; index <= 5; index++) store.snapshot(withFloor(original, new byte[] { (byte)index }));
+        assertFalse(store.needsRecovery("friends"));
+        store.endSession("friends", false); // Process loss releases lock but retains dirty marker.
+        CampaignSaveStore restarted = new CampaignSaveStore(root);
+        assertTrue(restarted.needsRecovery("friends"));
+        File newest = null;
+        int count = 0;
+        for(File file : new File(root, "friends").listFiles()) {
+            if(!file.getName().startsWith("recovery-")) continue;
+            count++;
+            if(newest == null || file.lastModified() > newest.lastModified()) newest = file;
+        }
+        assertEquals(3, count);
+        try(FileOutputStream corrupt = new FileOutputStream(newest)) { corrupt.write(0); }
+        CampaignSave recovered = restarted.recover("friends", original.getCompatibility());
+        assertTrue(Arrays.equals(new byte[] { 4 }, recovered.getNativeFloor()));
+        assertEquals(321f, recovered.getActorEffects().get(0).effects.get(0).remaining, 0f);
+        assertEquals(9L, recovered.getActorEffects().get(0).effects.get(0).pulses);
+        assertEquals(19L, recovered.getPhysicalItems().get(0).entityId);
+        assertFalse(restarted.needsRecovery("friends"));
+        try { restarted.recover("friends", original.getCompatibility()); fail("Clean run cannot select checkpoints."); }
+        catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("only after unclean")); }
+    }
+
+    @Test public void failedMigrationBackupDoesNotChangeOriginalSave() throws Exception {
+        File root = temporaryFolder.newFolder("failed-migration");
+        CampaignSave original = save("friends", compatibility("build-49"));
+        new CampaignSaveStore(root).save(original);
+        File file = new File(new File(root, "friends"), "campaign.save");
+        try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
+            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 1);
+        }
+        byte[] before = Files.readAllBytes(file.toPath());
+        CampaignSaveStore failing = new CampaignSaveStore(root, (source, target) -> {
+            throw new IOException("Injected backup failure");
+        });
+        try { failing.load("friends", original.getCompatibility()); fail("Migration requires successful backup."); }
+        catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("preserve Campaign file")); }
+        assertTrue(Arrays.equals(before, Files.readAllBytes(file.toPath())));
+    }
+
+    @Test public void cleanShutdownHidesSnapshotsAndLiveHostBlocksRecovery() throws Exception {
+        File root = temporaryFolder.newFolder("live-lock");
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        CampaignSave original = save("friends", compatibility("build-49"));
+        store.save(original); store.beginSession("friends"); store.snapshot(original);
+        try {
+            new CampaignSaveStore(root).recover("friends", original.getCompatibility());
+            fail("Running Host must retain authority.");
+        }
+        catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("still running")); }
+        finally { store.endSession("friends", true); }
+        assertFalse(new CampaignSaveStore(root).needsRecovery("friends"));
+    }
+
+    @Test public void terminalArchivesRejectWritesAndOldRecoveryForBothOutcomes() throws Exception {
+        for(CampaignSave.Outcome outcome : new CampaignSave.Outcome[] {
+                CampaignSave.Outcome.DEFEATED, CampaignSave.Outcome.COMPLETED }) {
+            CampaignSaveStore store = new CampaignSaveStore(temporaryFolder.newFolder(outcome.name()));
+            CampaignSave original = save("friends", compatibility("build-49"));
+            store.save(original); store.beginSession("friends"); store.snapshot(original);
+            CampaignSave terminal = new CampaignSave(original.getCompatibility(), original.getCampaignId(),
+                    original.getCapacity(), original.getStartingLives(), outcome, original.getFloorId(),
+                    original.getFloorSeed(), original.getFloorFingerprint(), original.getNativeWorldGeneration(),
+                    original.getSlots(), original.getParticipants(), original.getPhysicalItems(), original.getCombat(),
+                    original.getDoors(), original.getBreakables(), original.getActorEffects(), original.getMonsterSpawns(),
+                    original.getConsumedMonsterSpawners(), original.getNativeFloor());
+            store.save(terminal); store.endSession("friends", false);
+            assertTrue(store.isArchived("friends")); assertFalse(store.needsRecovery("friends"));
+            assertEquals(outcome, store.load("friends", original.getCompatibility()).getOutcome());
+            try { store.save(original); fail("Archive cannot be overwritten."); }
+            catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("read-only")); }
+            try { store.recover("friends", original.getCompatibility()); fail("Old snapshot cannot revive archive."); }
+            catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("only after unclean")); }
+        }
+    }
+
+    @Test public void hostExportImportsIntoNewProfileWithoutTransferringAuthority() throws Exception {
+        File sourceRoot = temporaryFolder.newFolder("export-source");
+        CampaignSaveStore source = new CampaignSaveStore(sourceRoot);
+        CampaignSave original = withFloor(save("friends", compatibility("build-49")), new byte[] { 9 });
+        source.save(original);
+        LauncherIdentity host = original.getSlots().get(0).getLauncherIdentity();
+        File export = new File(temporaryFolder.getRoot(), "friends.delvercampaign");
+        source.exportCampaign("friends", host, export, original.getCompatibility());
+        CampaignRosterStore destination = new CampaignRosterStore(temporaryFolder.newFolder("import-target"), new java.security.SecureRandom());
+        try {
+            destination.importCampaign(export, new LauncherIdentity(repeat('3')),
+                    AvatarCatalog.ownedV108Humanoids(), original.getCompatibility());
+            fail("Different Host cannot adopt export.");
+        }
+        catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("another Host")); }
+        CampaignRoster imported = destination.importCampaign(export, host,
+                AvatarCatalog.ownedV108Humanoids(), original.getCompatibility());
+        assertEquals(host, imported.getSlot(1).getLauncherIdentity());
+        assertEquals(original.getSlots().get(1).getReconnectToken(), imported.getSlot(2).getReconnectToken());
+        assertTrue(Arrays.equals(new byte[] { 9 }, destination.campaignSaves().load("friends", original.getCompatibility()).getNativeFloor()));
+        try {
+            destination.importCampaign(export, host, AvatarCatalog.ownedV108Humanoids(), original.getCompatibility());
+            fail("Import cannot overwrite Campaign.");
+        }
+        catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("already exists")); }
+        assertTrue(source.exists("friends")); assertTrue(export.isFile());
     }
 
     private CampaignSave save(String campaignId, DirectConnectCompatibility compatibility) {

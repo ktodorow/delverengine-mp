@@ -28,6 +28,7 @@ public final class DirectConnectSessionScreen implements Screen {
     private final OrthographicCamera camera = new OrthographicCamera();
     private boolean floorEntryRequested = false;
     private boolean disposed = false;
+    private String entryError;
 
     public DirectConnectSessionScreen(GameApplication application, DirectConnectPeer peer) {
         if(application == null) throw new IllegalArgumentException("Game application cannot be null.");
@@ -49,7 +50,17 @@ public final class DirectConnectSessionScreen implements Screen {
             Gdx.app.postRunnable(new Runnable() {
                 @Override
                 public void run() {
-                    application.enterDirectConnectFloor();
+                    try { application.enterDirectConnectFloor(); }
+                    catch(RuntimeException failure) {
+                        entryError = failure.getMessage();
+                        try {
+                            if(peer instanceof DirectConnectHost) ((DirectConnectHost)peer).abortCampaignRecovery(entryError);
+                            else peer.close();
+                        }
+                        catch(RuntimeException ignored) { }
+                        application.returnToDirectConnectSession();
+                        application.showDirectConnectFailure(entryError);
+                    }
                 }
             });
         }
@@ -73,7 +84,7 @@ public final class DirectConnectSessionScreen implements Screen {
         font.draw(batch, status.getPhase().name(), textLeft(width, 0.9f), y,
                 width * 0.9f, Align.center, false);
         y -= 30f;
-        font.draw(batch, status.getMessage(), textLeft(width, 0.8f), y,
+        font.draw(batch, entryError == null ? status.getMessage() : entryError, textLeft(width, 0.8f), y,
                 width * 0.8f, Align.center, true);
         if(status.getSessionId() != null) {
             y -= 40f;
@@ -107,11 +118,23 @@ public final class DirectConnectSessionScreen implements Screen {
                         textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
             }
         }
+        if(status.getPhase() == DirectConnectPhase.CLOSED
+                || status.getPhase() == DirectConnectPhase.DISCONNECTED
+                || status.getPhase() == DirectConnectPhase.FAILED) {
+            y -= 36f;
+            font.draw(batch, "Session stopped. Restart to host or rejoin original Host. [ESC] Exit",
+                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
+            if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) Gdx.app.exit();
+        }
         batch.end();
     }
 
+    public void showFailure(String error) { entryError = error; }
+
     private void handleHostControls() {
         if(!(peer instanceof DirectConnectHost)) return;
+        DirectConnectPhase phase = peer.getStatus().getPhase();
+        if(phase == DirectConnectPhase.CLOSED || phase == DirectConnectPhase.FAILED) return;
         DirectConnectHost host = (DirectConnectHost)peer;
         List<PendingSlotClaim> pending = host.getPendingClaims();
         if(!pending.isEmpty()) {

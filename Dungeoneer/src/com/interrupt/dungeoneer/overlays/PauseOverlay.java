@@ -76,19 +76,30 @@ public class PauseOverlay extends WindowOverlay {
 			}
 		});
 
-		TextButton controlsBtn = new TextButton(" " + StringManager.get("overlays.PauseOverlay.quitButton") + " ", skin.get(TextButtonStyle.class));
+        boolean host = GameApplication.isDirectConnectSession()
+                && GameApplication.instance.getDirectConnectPeer() instanceof com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
+		TextButton controlsBtn = new TextButton(" " + (host ? "Save and Quit" : GameApplication.isDirectConnectSession()
+                ? "Leave Session" : StringManager.get("overlays.PauseOverlay.quitButton")) + " ", skin.get(TextButtonStyle.class));
 		controlsBtn.addListener(new ClickListener() {
 			@Override
 			public void clicked(InputEvent event, float x, float y) {
-				OverlayManager.instance.clear();
-				// The main menu would strand a live session; closing the game ends it cleanly.
-				if(GameApplication.isDirectConnectSession()) com.badlogic.gdx.Gdx.app.exit();
-				else GameApplication.ShowMainMenuScreen();
+                if(GameApplication.isDirectConnectSession()) {
+                    OverlayManager.instance.push(new SessionQuitOverlay());
+                }
+                else {
+                    OverlayManager.instance.clear();
+                    GameApplication.ShowMainMenuScreen();
+                }
 			}
 		});
 
 		Table contentTable = new Table();
 	    Label pauseText = new Label(StringManager.get("overlays.PauseOverlay.pauseHeader"),skin.get(LabelStyle.class));
+        if(host) {
+            String saveError = ((com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost)
+                    GameApplication.instance.getDirectConnectPeer()).getCampaignSaveError();
+            if(saveError != null) { pauseText.setText(saveError); pauseText.setWrap(true); }
+        }
 	    contentTable.add(pauseText).padBottom(8f);
 	    contentTable.row();
 

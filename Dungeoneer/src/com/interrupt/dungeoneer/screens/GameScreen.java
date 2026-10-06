@@ -89,12 +89,20 @@ public class GameScreen implements Screen {
 			DirectConnectPeer directConnect = directConnectPeer();
 			boolean directConnectReady = directConnect == null
 					|| canAdvanceDirectConnectGameplay(directConnect.getStatus().getPhase());
-			if(!directConnectReady) reportStoppedDirectConnect(directConnect);
+			if(!directConnectReady) {
+                reportStoppedDirectConnect(directConnect);
+                GameApplication.instance.returnToDirectConnectSession();
+                return;
+            }
 			handlePartyControls(directConnect);
 			if(directConnect != null && directConnect.isPartyWiped() && !partyWipeShown
 					&& game != null && !game.gameOver) {
 				// Terminal campaign defeat: native game over for every peer, no resume.
 				partyWipeShown = true;
+                if(directConnect instanceof com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost) {
+                    ((com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost)directConnect)
+                            .updateCampaignRecovery(System.nanoTime());
+                }
 				GameApplication.ShowGameOverScreen(false);
 				return;
 			}
@@ -148,6 +156,10 @@ public class GameScreen implements Screen {
             }
             if(directConnectReady && networkItemController != null) networkItemController.update(game);
             if(directConnectReady && networkEconomyController != null) networkEconomyController.update(game);
+            if(directConnect instanceof com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost) {
+                ((com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost)directConnect)
+                        .updateCampaignRecovery(System.nanoTime());
+            }
 
 			// draw the game
 			gameManager.render();
@@ -194,9 +206,9 @@ public class GameScreen implements Screen {
 		catch(Exception e) { }
 		
 		try {
-			if(saveOnPause)
+			if(!GameApplication.isDirectConnectSession() && saveOnPause)
 				GameManager.getGame().save();
-            else if(GameManager.getGame().level != null)
+            else if(!GameApplication.isDirectConnectSession() && GameManager.getGame().level != null)
                 GameManager.getGame().level.preSaveCleanup();
 		}
 		catch(Exception ex) {

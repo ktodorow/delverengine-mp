@@ -805,6 +805,97 @@ public class DirectConnectCampaignPersistenceTest {
         }
     }
 
+    @Test public void confirmedSaveQuitPersistsBeforeNotifyingRemoteAndMarksRunClean() throws Exception {
+        File root = temporaryFolder.newFolder("confirmed-quit");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        DirectConnectCompatibility compatibility = compatibility();
+        store.campaignSaves().save(save(compatibility, roster));
+        CampaignSlot friend = roster.getSlot(2);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        tokens.save("friends", friend.getReconnectToken());
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
+        DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
+                identity('2'), friend.getPresentation(), 2, tokens, compatibility);
+        try {
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            host.setNativeFloorCapture(() -> new byte[] { 7, 8 });
+            host.saveAndQuit();
+            awaitPhase(client, DirectConnectPhase.DISCONNECTED);
+            assertTrue(client.getStatus().getMessage().contains("saved"));
+            assertArrayEquals(new byte[] { 7, 8 }, store.campaignSaves().load("friends", compatibility).getNativeFloor());
+            assertFalse(store.campaignSaves().needsRecovery("friends"));
+            assertFalse(new File(new File(root, "friends"), "session.running").exists());
+            assertEquals(DirectConnectPhase.CLOSED, host.getStatus().getPhase());
+        }
+        finally { client.close(); host.close(); }
+    }
+
+    @Test public void failedNativeCaptureRetainsSaveAndConfirmedQuitKeepsSessionAlive() throws Exception {
+        File root = temporaryFolder.newFolder("capture-failure");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        DirectConnectCompatibility compatibility = compatibility();
+        store.campaignSaves().save(save(compatibility, roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            host.setNativeFloorCapture(() -> new byte[] { 1 }); host.persistCampaign();
+            host.setSessionPaused(false);
+            host.setNativeFloorCapture(() -> { throw new IllegalStateException("Injected native capture failure"); });
+            try { host.saveAndQuit(); org.junit.Assert.fail("Native state cannot be silently discarded."); }
+            catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("native capture failure")); }
+            assertEquals(DirectConnectPhase.READY, host.getStatus().getPhase());
+            assertFalse(host.isSessionPaused());
+            assertArrayEquals(new byte[] { 1 }, store.campaignSaves().load("friends", compatibility).getNativeFloor());
+            assertTrue(new File(new File(root, "friends"), "session.running").isFile());
+        }
+        finally { host.setNativeFloorCapture(() -> new byte[] { 1 }); host.close(); }
+    }
+
+    @Test public void recoverySnapshotsUseMinuteWallClockEvenWhilePartyPaused() throws Exception {
+        File root = temporaryFolder.newFolder("snapshot-cadence");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        DirectConnectCompatibility compatibility = compatibility();
+        store.campaignSaves().save(save(compatibility, roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            host.setNativeFloorCapture(() -> new byte[] { 1 });
+            host.updateCampaignRecovery(0L);
+            long first = newestRecoveryTimestamp(root);
+            host.updateCampaignRecovery(java.util.concurrent.TimeUnit.SECONDS.toNanos(59));
+            assertEquals(first, newestRecoveryTimestamp(root));
+            host.updateCampaignRecovery(java.util.concurrent.TimeUnit.SECONDS.toNanos(60));
+            assertTrue(newestRecoveryTimestamp(root) > first);
+            long second = newestRecoveryTimestamp(root);
+            host.beginNativeWorld(); host.beginNativeWorld(); // Resumed baseline then new generation.
+            host.updateCampaignRecovery(java.util.concurrent.TimeUnit.SECONDS.toNanos(61));
+            assertTrue(newestRecoveryTimestamp(root) > second);
+            assertTrue(host.isSessionPaused());
+        }
+        finally { host.close(); }
+    }
+
+    private long newestRecoveryTimestamp(File root) {
+        long newest = 0;
+        for(File file : new File(root, "friends").listFiles()) {
+            if(file.getName().startsWith("recovery-")) newest = Math.max(newest, file.lastModified());
+        }
+        return newest;
+    }
+
+    private CampaignRoster persistenceRoster(CampaignRosterStore store) {
+        CampaignRoster roster = store.loadOrCreate("friends", 2, AvatarCatalog.ownedV108Humanoids(),
+                identity('1'), new SlotPresentation("Host", AvatarCatalog.HUMANOID_1));
+        roster.approve(new SlotClaimRequest(identity('2'), new SlotPresentation("Friend", AvatarCatalog.HUMANOID_2),
+                2, null), new SecureRandom());
+        store.save(roster);
+        return roster;
+    }
+
     private void awaitPhase(DirectConnectPeer peer, DirectConnectPhase phase)
             throws InterruptedException {
         long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;

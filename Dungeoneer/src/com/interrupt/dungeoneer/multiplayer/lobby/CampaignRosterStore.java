@@ -8,6 +8,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.io.IOException;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility;
 
 /** Host-local persistent Campaign Roster store. It never reads original single-player saves. */
 public final class CampaignRosterStore {
@@ -136,6 +140,39 @@ public final class CampaignRosterStore {
 
     public CampaignSaveStore campaignSaves() {
         return campaignSaves;
+    }
+
+    /** Stage save and derived roster together; import never overwrites an existing Campaign. */
+    public synchronized CampaignRoster importCampaign(File source, LauncherIdentity host,
+            AvatarCatalog avatars, DirectConnectCompatibility compatibility) {
+        CampaignSave saved = campaignSaves.readExport(source, host, compatibility);
+        CampaignRoster roster = CampaignRoster.restore(saved.getCampaignId(), saved.getCapacity(),
+                avatars, saved.getSlots());
+        File destination = new File(campaignsRoot, saved.getCampaignId());
+        if(destination.exists()) throw new IllegalStateException("Campaign already exists: " + saved.getCampaignId());
+        File staging = null;
+        try {
+            Files.createDirectories(campaignsRoot.toPath());
+            staging = Files.createTempDirectory(campaignsRoot.toPath(), "campaign-import-").toFile();
+            CampaignRosterStore staged = new CampaignRosterStore(staging, random);
+            staged.save(roster);
+            staged.campaignSaves().save(saved);
+            Files.move(new File(staging, saved.getCampaignId()).toPath(), destination.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE);
+            return roster;
+        }
+        catch(IOException failure) { throw new IllegalStateException("Could not import Campaign; original export remains intact.", failure); }
+        finally {
+            if(staging != null) {
+                File stagedCampaign = new File(staging, saved.getCampaignId());
+                for(String name : new String[] { "campaign.save", "campaign.archive", "terminal.outcome", "roster.properties" }) {
+                    File file = new File(stagedCampaign, name);
+                    if(file.exists()) { file.setWritable(true, true); if(!file.delete()) file.deleteOnExit(); }
+                }
+                if(stagedCampaign.exists() && !stagedCampaign.delete()) stagedCampaign.deleteOnExit();
+                if(!staging.delete()) staging.deleteOnExit();
+            }
+        }
     }
 
     private File rosterFile(String campaignId) {

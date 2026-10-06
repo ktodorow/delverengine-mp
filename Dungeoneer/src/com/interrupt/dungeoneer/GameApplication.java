@@ -285,6 +285,31 @@ public class GameApplication extends Game {
                 : DirectConnectCompatibility.forOwnedGameCopy(ownedCopy);
     }
 
+    public DirectConnectCompatibility getCampaignCompatibility() {
+        return createDirectConnectCompatibility();
+    }
+
+    /** World stops before the screen changes. Closed peers never enter a second local game. */
+    public void returnToDirectConnectSession() {
+        if(directConnectPeer == null || directConnectScreen != null) return;
+        com.interrupt.dungeoneer.overlays.OverlayManager.instance.clear();
+        com.interrupt.dungeoneer.Audio.stopLoopingSounds();
+        Gdx.input.setCursorCatched(false);
+        directConnectScreen = new DirectConnectSessionScreen(this, directConnectPeer);
+        setScreen(directConnectScreen);
+    }
+
+    public void leaveDirectConnectSession() {
+        if(directConnectPeer == null) return;
+        if(directConnectPeer instanceof DirectConnectHost) ((DirectConnectHost)directConnectPeer).saveAndQuit();
+        else directConnectPeer.close();
+        returnToDirectConnectSession();
+    }
+
+    public void showDirectConnectFailure(String message) {
+        if(directConnectScreen != null) directConnectScreen.showFailure(message);
+    }
+
     /** Transition floors keep theme in native generator section definitions, not in their .bin. */
     private static String ownedFloorTheme(String floorId) {
         for(Level definition : com.interrupt.dungeoneer.game.Game.buildLevelLayout()) {
@@ -397,10 +422,8 @@ public class GameApplication extends Game {
                 startupLevel = NativeFloorSave.restore(savedFloor);
             }
             catch(RuntimeException unreadable) {
-                // Never strand the Campaign on an unreadable checkpoint: rebuild and reapply.
-                Gdx.app.error("DelverMultiplayer", "Saved Active Floor could not load; rebuilding it: "
-                        + unreadable.getMessage());
-                savedFloor = null;
+                throw new IllegalStateException("Saved native Active Floor is incompatible or corrupt; "
+                        + "previous Campaign files retained. Restore a compatible Host export.", unreadable);
             }
         }
         if(savedFloor == null) startupLevel.sharedFloorBuild = floorBuild;
