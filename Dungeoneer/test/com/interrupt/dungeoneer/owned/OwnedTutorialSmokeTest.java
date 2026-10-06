@@ -43,10 +43,12 @@ public class OwnedTutorialSmokeTest {
     // Owned tests install these globals; later tests in the same JVM must not see retail data.
     private static ModManager previousMods;
     private static GameData previousGameData;
+    private static Game previousGame;
     private static EntityManager previousEntities;
 
     @BeforeClass
     public static void startHeadlessRuntime() {
+        previousGame = Game.instance;
         previousMods = Game.modManager;
         previousGameData = Game.gameData;
         previousEntities = EntityManager.instance;
@@ -56,6 +58,7 @@ public class OwnedTutorialSmokeTest {
     @AfterClass
     public static void stopHeadlessRuntime() {
         OwnedGameCopyMount.unmount();
+        Game.instance = previousGame;
         Game.modManager = previousMods;
         Game.gameData = previousGameData;
         EntityManager.instance = previousEntities;
@@ -218,6 +221,8 @@ public class OwnedTutorialSmokeTest {
     private static DirectConnectPeer peer() {
         return (DirectConnectPeer)Proxy.newProxyInstance(OwnedTutorialSmokeTest.class.getClassLoader(),
                 new Class<?>[]{DirectConnectPeer.class}, (proxy, method, args) -> {
+            if(method.getName().equals("getPartyProgression")) return
+                    com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty();
             if(method.getName().equals("getNextItemRequestId")) return 1L;
             if(method.getName().equals("getNativeWorldGeneration")) return 1L;
             if(method.getName().equals("getLocalMovementEntityId")) return new NetworkEntityId(2L);

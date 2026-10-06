@@ -87,7 +87,7 @@ public class CampaignSaveStoreTest {
         File legacy = new File(new File(root, "legacy"), "campaign.save");
         try(RandomAccessFile file = new RandomAccessFile(legacy, "rw")) {
             file.seek(4L); file.writeInt(2);
-            file.setLength(file.length() - 1L);
+            file.setLength(file.length() - 51L);
         }
         CampaignSave loaded = store.load("legacy", compatibility);
         assertFalse(loaded.hasNativeFloor());
@@ -158,6 +158,27 @@ public class CampaignSaveStoreTest {
         assertTrue(new File(new File(root, "friends"), "campaign.previous").isFile());
     }
 
+    @Test public void formatThreeMigrationRetainsNativeFloorAndBacksUpOriginalBytes() throws Exception {
+        File root = temporaryFolder.newFolder("format-three");
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        CampaignSave original = withFloor(save("friends", compatibility("build-49")), new byte[] { 7, 8, 9 });
+        store.save(original);
+        File file = new File(new File(root, "friends"), "campaign.save");
+        try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
+            legacy.seek(4); legacy.writeInt(3);
+            // Format 4 appends 12 key bytes and 38 bytes for empty shared facts.
+            legacy.setLength(legacy.length() - 50);
+        }
+        byte[] before = Files.readAllBytes(file.toPath());
+        CampaignSave migrated = store.load("friends", original.getCompatibility());
+        assertTrue(Arrays.equals(new byte[] { 7, 8, 9 }, migrated.getNativeFloor()));
+        assertEquals(0, migrated.getPartyKeys()); assertEquals(0L, migrated.getKeyRevision());
+        assertTrue(migrated.getPartyProgression().sameFacts(
+                com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty()));
+        File backup = new File(file.getParentFile(), "campaign.save.before-format-" + CampaignSave.FORMAT);
+        assertTrue(Arrays.equals(before, Files.readAllBytes(backup.toPath())));
+    }
+
     @Test public void migrationBacksUpExactOldBytesBeforeChangingFormat() throws Exception {
         File root = temporaryFolder.newFolder("migration");
         CampaignSaveStore store = new CampaignSaveStore(root);
@@ -165,11 +186,11 @@ public class CampaignSaveStoreTest {
         store.save(original);
         File file = new File(new File(root, "friends"), "campaign.save");
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
-            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 1);
+            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 51);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         store.load("friends", original.getCompatibility());
-        File backup = new File(file.getParentFile(), "campaign.save.before-format-3");
+        File backup = new File(file.getParentFile(), "campaign.save.before-format-" + CampaignSave.FORMAT);
         assertTrue(Arrays.equals(before, Files.readAllBytes(backup.toPath())));
         try(RandomAccessFile migrated = new RandomAccessFile(file, "r")) {
             migrated.seek(4); assertEquals(CampaignSave.FORMAT, migrated.readInt());
@@ -214,7 +235,7 @@ public class CampaignSaveStoreTest {
         new CampaignSaveStore(root).save(original);
         File file = new File(new File(root, "friends"), "campaign.save");
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
-            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 1);
+            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 51);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         CampaignSaveStore failing = new CampaignSaveStore(root, (source, target) -> {

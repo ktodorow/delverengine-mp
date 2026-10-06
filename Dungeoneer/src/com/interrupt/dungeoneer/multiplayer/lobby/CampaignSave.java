@@ -29,8 +29,9 @@ public final class CampaignSave {
     /**
      * 2: late Monster spawns and consumed floor MonsterSpawners, needed to rebuild the floor.
      * 3: Host Active Floor checkpoint in Delver's own level format (absent in format 2).
+     * 4: Party Progression and Party Keys.
      */
-    public static final int FORMAT = 3;
+    public static final int FORMAT = 4;
     public static final int MAX_CONSUMED_MONSTER_SPAWNERS = 4096;
     public static final int MAX_SPAWNER_KEY_BYTES = 512;
 
@@ -90,6 +91,9 @@ public final class CampaignSave {
     private final List<NativeMonsterSpawn> monsterSpawns;
     private final List<String> consumedMonsterSpawners;
     private final byte[] nativeFloor;
+    private final int partyKeys;
+    private final long keyRevision;
+    private final com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression;
 
     public CampaignSave(DirectConnectCompatibility compatibility, String campaignId,
             int capacity, int startingLives, Outcome outcome, String floorId,
@@ -129,6 +133,45 @@ public final class CampaignSave {
             List<BreakableSnapshot> breakables,
             List<ActorEffectsSnapshot> actorEffects, List<NativeMonsterSpawn> monsterSpawns,
             List<String> consumedMonsterSpawners, byte[] nativeFloor) {
+        this(compatibility, campaignId, capacity, startingLives, outcome, floorId, floorSeed,
+                floorFingerprint, nativeWorldGeneration, slots, participants, physicalItems,
+                combat, doors, breakables, actorEffects, monsterSpawns, consumedMonsterSpawners,
+                nativeFloor, 0, 0L);
+    }
+
+    public CampaignSave(DirectConnectCompatibility compatibility, String campaignId,
+            int capacity, int startingLives, Outcome outcome, String floorId,
+            long floorSeed, SharedFloorFingerprint floorFingerprint,
+            long nativeWorldGeneration, List<CampaignSlot> slots,
+            List<ParticipantState> participants, List<PhysicalItemState> physicalItems,
+            CombatSnapshot combat, List<DoorSnapshot> doors,
+            List<BreakableSnapshot> breakables,
+            List<ActorEffectsSnapshot> actorEffects, List<NativeMonsterSpawn> monsterSpawns,
+            List<String> consumedMonsterSpawners, byte[] nativeFloor,
+            int partyKeys, long keyRevision) {
+        this(compatibility, campaignId, capacity, startingLives, outcome, floorId, floorSeed,
+                floorFingerprint, nativeWorldGeneration, slots, participants, physicalItems,
+                combat, doors, breakables, actorEffects, monsterSpawns, consumedMonsterSpawners,
+                nativeFloor, partyKeys, keyRevision,
+                com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty());
+    }
+
+    public CampaignSave(DirectConnectCompatibility compatibility, String campaignId,
+            int capacity, int startingLives, Outcome outcome, String floorId,
+            long floorSeed, SharedFloorFingerprint floorFingerprint,
+            long nativeWorldGeneration, List<CampaignSlot> slots,
+            List<ParticipantState> participants, List<PhysicalItemState> physicalItems,
+            CombatSnapshot combat, List<DoorSnapshot> doors,
+            List<BreakableSnapshot> breakables,
+            List<ActorEffectsSnapshot> actorEffects, List<NativeMonsterSpawn> monsterSpawns,
+            List<String> consumedMonsterSpawners, byte[] nativeFloor,
+            int partyKeys, long keyRevision,
+            com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression) {
+        if(partyProgression == null) throw new IllegalArgumentException("Saved Party Progression is required.");
+        if(partyKeys < 0 || partyKeys > 1000000 || keyRevision < 0
+                || keyRevision == 0 && partyKeys != 0) {
+            throw new IllegalArgumentException("Saved Party Keys are invalid.");
+        }
         if(compatibility == null) throw new IllegalArgumentException("Campaign compatibility is required.");
         if(nativeFloor != null && (nativeFloor.length == 0
                 || nativeFloor.length > NativeFloorSave.MAX_BYTES)) {
@@ -273,6 +316,9 @@ public final class CampaignSave {
         this.monsterSpawns = immutable(monsterSpawns);
         this.consumedMonsterSpawners = immutable(consumedMonsterSpawners);
         this.nativeFloor = nativeFloor == null ? null : nativeFloor.clone();
+        this.partyKeys = partyKeys;
+        this.keyRevision = keyRevision;
+        this.partyProgression = partyProgression;
     }
 
     public DirectConnectCompatibility getCompatibility() { return compatibility; }
@@ -298,6 +344,9 @@ public final class CampaignSave {
     /** Host floor as last checkpointed, or null when the floor must be rebuilt (format 2). */
     public byte[] getNativeFloor() { return nativeFloor == null ? null : nativeFloor.clone(); }
     public boolean hasNativeFloor() { return nativeFloor != null; }
+    public int getPartyKeys() { return partyKeys; }
+    public long getKeyRevision() { return keyRevision; }
+    public com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot getPartyProgression() { return partyProgression; }
 
     public ParticipantState getParticipant(int campaignSlot) {
         for(ParticipantState participant : participants) {

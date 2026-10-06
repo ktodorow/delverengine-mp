@@ -612,6 +612,284 @@ public class DirectConnectIntegrationTest {
         return null;
     }
 
+    @Test public void nativePartyHistoryReachesTwoObserversWithoutCopyingPersonalGold() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("party-history");
+        HostFixture fixture = host(compatibility, 3, "party-history");
+        DirectConnectClient first = null, second = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> previousStrings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        com.interrupt.managers.StringManager.localizedStrings = new HashMap<>();
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY);
+            awaitPhase(second, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game hostGame = nativePartyGame();
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController hostItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            hostItems.prepare(hostGame);
+            hostGame.progression.gold = 97;
+            hostGame.progression.progressionTriggers.put("quest:gate", "opened");
+            // Campaign history exceeds one TCP frame; observers receive one complete state.
+            for(int index = 0; index < 40; index++) {
+                hostGame.progression.progressionTriggers.put("world:story-" + index,
+                        "This story consequence belongs to every Campaign Slot.");
+            }
+            hostGame.progression.messagesSeen.put("campfire", 2);
+            hostGame.progression.uniqueItemsSpawned.add("Axe of Testing");
+            hostGame.progression.sawTutorial = true;
+            hostItems.update(hostGame);
+            for(DirectConnectClient observer : java.util.Arrays.asList(first, second)) {
+                com.interrupt.dungeoneer.game.Game local = nativePartyGame();
+                local.progression.gold = 13;
+                com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                        new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(observer);
+                long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+                do {
+                    items.prepare(local);
+                    if("opened".equals(local.progression.progressionTriggers.get("quest:gate"))) break;
+                    Thread.sleep(10L);
+                } while(System.currentTimeMillis() < deadline);
+                assertEquals("opened", local.progression.progressionTriggers.get("quest:gate"));
+                assertEquals(41, local.progression.progressionTriggers.size);
+                assertEquals(Integer.valueOf(2), local.progression.messagesSeen.get("campfire"));
+                assertTrue(local.progression.uniqueItemsSpawned.contains("Axe of Testing", false));
+                assertTrue(local.progression.sawTutorial);
+                assertEquals(13, local.progression.gold);
+            }
+        }
+        finally {
+            if(first != null) first.close();
+            if(second != null) second.close();
+            fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            com.interrupt.managers.StringManager.localizedStrings = previousStrings;
+        }
+    }
+
+    @Test public void observerTouchCannotAdvanceNativePartyStory() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("observer-story");
+        HostFixture fixture = host(compatibility, 2, "observer-story");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        try {
+            client = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger gate =
+                    new com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger();
+            gate.progressionKey = "observer-must-not-write";
+            game.level.entities.add(gate);
+            new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client).prepare(game);
+            gate.fire(""); gate.tick(game.level, 1f);
+            assertEquals(com.interrupt.dungeoneer.entities.triggers.Trigger.TriggerStatus.WAITING,
+                    gate.getTriggerStatus());
+            assertNull(game.progression.progressionTriggers.get("observer-must-not-write"));
+            gate.doTriggerEvent("");
+            assertNull("Direct native callback on replica cannot write Party story",
+                    game.progression.progressionTriggers.get("observer-must-not-write"));
+            com.badlogic.gdx.graphics.PerspectiveCamera oldCamera = com.interrupt.dungeoneer.game.Game.camera;
+            com.interrupt.dungeoneer.game.Game.camera = null;
+            try {
+                // Replica must not evaluate camera-driven native chains or play their local sounds.
+                new com.interrupt.dungeoneer.entities.triggers.LookAtTrigger().tick(game.level, 1f);
+            }
+            finally { com.interrupt.dungeoneer.game.Game.camera = oldCamera; }
+        }
+        finally {
+            if(client != null) client.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            StringManager.localizedStrings = strings;
+        }
+    }
+
+    @Test public void remoteSecretBelongsToPartyRatherThanHostsPersonalHistory() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("party-secret");
+        HostFixture fixture = host(compatibility, 2, "party-secret");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        com.badlogic.gdx.Application previousApplication = com.badlogic.gdx.Gdx.app;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
+                (proxy, method, args) -> null);
+        try {
+            client = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            com.interrupt.dungeoneer.entities.triggers.Trigger secret =
+                    new com.interrupt.dungeoneer.entities.triggers.Trigger();
+            secret.isSecret = true;
+            game.level.entities.add(secret);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            items.prepare(game);
+            com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext remote =
+                    new com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext(
+                            new com.interrupt.dungeoneer.multiplayer.participant.ParticipantId("campaign-slot-2"),
+                            new com.interrupt.dungeoneer.multiplayer.participant.ParticipantCharacterState(1, 1, 0, 0),
+                            com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter
+                                    .fromGame().getPartyProgression());
+            secret.fire(remote, null); secret.fire(remote, null);
+            assertEquals(0, game.player.history.secretsFound);
+        }
+        finally {
+            if(client != null) client.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            com.badlogic.gdx.Gdx.app = previousApplication;
+            StringManager.localizedStrings = strings;
+        }
+    }
+
+    @Test public void nativeOnceGateDeliversSharedSoundToBothObserversOnce() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("shared-trigger-sound");
+        HostFixture fixture = host(compatibility, 3, "shared-trigger-sound");
+        DirectConnectClient first = null, second = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger gate =
+                    new com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger();
+            gate.progressionKey = "sound-gate";
+            gate.triggerSound = "open-source-test-cue.mp3";
+            game.level.entities.add(gate);
+            new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host).prepare(game);
+            gate.fire(new com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext(
+                    new ParticipantId("campaign-slot-2"),
+                    new com.interrupt.dungeoneer.multiplayer.participant.ParticipantCharacterState(1, 1, 0, 0),
+                    com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter
+                            .fromGame().getPartyProgression()), null);
+            gate.doTriggerEvent(""); gate.doTriggerEvent("");
+            List<com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation> cues = new java.util.ArrayList<>();
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(cues.size() < 1 && System.currentTimeMillis() < deadline) {
+                cues.addAll(second.drainTriggerPresentations()); Thread.sleep(10L);
+            }
+            assertEquals("non-activator observes shared sound once", 1, cues.size());
+            cues.clear();
+            deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(cues.size() < 2 && System.currentTimeMillis() < deadline) {
+                cues.addAll(first.drainTriggerPresentations()); Thread.sleep(10L);
+            }
+            assertEquals("activator observes one sound and one targeted presentation", 2, cues.size());
+            assertTrue(second.drainTriggerPresentations().isEmpty());
+            assertTrue(first.drainTriggerPresentations().isEmpty());
+        }
+        finally {
+            if(first != null) first.close(); if(second != null) second.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            StringManager.localizedStrings = strings;
+        }
+    }
+
+    @Test public void nativeButtonSoundReachesOtherObserverWithoutMessage() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("button-sound");
+        HostFixture fixture = host(compatibility, 3, "button-sound");
+        DirectConnectClient first = null, second = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        try {
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            com.interrupt.dungeoneer.entities.triggers.ButtonModel button =
+                    new com.interrupt.dungeoneer.entities.triggers.ButtonModel();
+            button.triggerSound = "open-source-button-cue.mp3";
+            button.message = "Only activator reads this";
+            game.level.entities.add(button);
+            new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host).prepare(game);
+            button.fire(new ParticipantContext(new ParticipantId("campaign-slot-2"),
+                    new ParticipantCharacterState(1, 1, 0, 0),
+                    com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter
+                            .fromGame().getPartyProgression()), null);
+            button.tick(game.level, 1f);
+            List<com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation> cues = new java.util.ArrayList<>();
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(cues.isEmpty() && System.currentTimeMillis() < deadline) {
+                cues.addAll(second.drainTriggerPresentations()); Thread.sleep(10L);
+            }
+            assertEquals("Other observer receives shared native button sound", 1, cues.size());
+            assertTrue(cues.get(0).sharedSound);
+            cues.clear(); deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(cues.size() < 2 && System.currentTimeMillis() < deadline) {
+                cues.addAll(first.drainTriggerPresentations()); Thread.sleep(10L);
+            }
+            assertEquals("Activator receives sound and private message", 2, cues.size());
+            assertTrue(cues.get(0).sharedSound);
+            assertFalse(cues.get(1).sharedSound);
+        }
+        finally {
+            if(first != null) first.close(); if(second != null) second.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            StringManager.localizedStrings = strings;
+        }
+    }
+
+    @Test public void cooperativeTutorialUsesOneNativeSeenFlagForParty() throws Exception {
+        DirectConnectCompatibility compatibility = new DirectConnectCompatibility(
+                DirectConnectProtocol.BUILD_ID, "delver-owned-assets-v1",
+                "0000000000000000000000000000000000000000000000000000000000000000");
+        HostFixture fixture = host(compatibility, 3, "party-tutorial");
+        DirectConnectClient first = null, second = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        try {
+            fixture.host.useOwnedFloor(GameApplication.OWNED_TUTORIAL_FLOOR);
+            first = approveClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = approveClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession();
+            awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            game.progression.gold = 97;
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            items.prepare(game); items.update(game);
+            assertTrue("Native Game.Start marks tutorial seen when it starts", game.progression.sawTutorial);
+            assertEquals(97, game.progression.gold);
+            for(DirectConnectClient observer : java.util.Arrays.asList(first, second)) {
+                long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+                while(!observer.getPartyProgression().tutorialCompleted && System.currentTimeMillis() < deadline)
+                    Thread.sleep(10L);
+                assertTrue(observer.getPartyProgression().tutorialCompleted);
+            }
+            long revision = fixture.host.getPartyProgression().revision;
+            items.prepare(game); items.update(game);
+            assertEquals("Repeated tutorial frames do not create another completion", revision,
+                    fixture.host.getPartyProgression().revision);
+        }
+        finally {
+            if(first != null) first.close(); if(second != null) second.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            StringManager.localizedStrings = strings;
+        }
+    }
+
+    private com.interrupt.dungeoneer.game.Game nativePartyGame() {
+        com.interrupt.dungeoneer.game.Game game = new org.objenesis.ObjenesisStd().newInstance(
+                com.interrupt.dungeoneer.game.Game.class);
+        game.player = new com.interrupt.dungeoneer.entities.Player();
+        game.player.inventory.clear();
+        game.level = new com.interrupt.dungeoneer.game.Level(4, 4);
+        game.progression = new com.interrupt.dungeoneer.game.Progression();
+        com.interrupt.dungeoneer.game.Game.instance = game;
+        return game;
+    }
+
     @Test public void nativeDoorFeedbackReachesOnlyInitiatingParticipant() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("door-feedback");
         HostFixture fixture = host(compatibility, 3, "door-feedback");

@@ -168,6 +168,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     public void prepare(Game current) {
         if(current == null || current.player == null || current.level == null) return;
         if(game == null) attach(current);
+        if(host == null && current.progression != null) peer.getPartyProgression().applyTo(current.progression);
         if(objectLevel != current.level) attachWorldObjects();
         long generation = peer.getNativeWorldGeneration();
         if(objectGeneration != generation) {
@@ -335,11 +336,18 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             if(obstacles != null) host.setWorldObstacles(obstacles);
             host.setActorObstacles(com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles
                     .monsters(game.level));
+            if(game.progression != null) host.publishPartyProgression(game.progression);
         }
     }
 
     private void attach(Game current) {
         game = current;
+        if(host != null && game.progression != null) {
+            if(host.isResumedCampaign()) game.initializePartyProgression(host.getPartyProgression());
+            // Same native tutorial-entry rule also applies at headless/session bridge boundary.
+            if(com.interrupt.dungeoneer.GameApplication.OWNED_TUTORIAL_FLOOR.equals(
+                    peer.getStatus().getFloorId())) game.progression.sawTutorial = true;
+        }
         for(MovementEntityDescriptor descriptor : peer.getMovementEntities()) {
             if(descriptor.getEntityId().equals(peer.getLocalMovementEntityId())) {
                 localId = descriptor.getParticipantId();
@@ -407,6 +415,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     private void attachWorldObjects() {
         objectLevel = game.level;
+        game.level.nativeTriggerReplica = host == null;
         objects.clear();
         objectIds.clear();
         Map<String, Integer> occurrences = new HashMap<String, Integer>();
@@ -438,6 +447,16 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         }
         if(host != null) {
             restoreWorldObjects();
+            game.level.nativeTriggerSoundListener = source -> {
+                String sound = source instanceof Trigger ? ((Trigger)source).triggerSound
+                        : source instanceof BasicTrigger ? ((BasicTrigger)source).triggerSound
+                        : source instanceof ButtonModel ? ((ButtonModel)source).triggerSound : null;
+                Long objectId = objectIds.get(source);
+                if(objectId != null && sound != null && !sound.isEmpty()) host.publishTriggerSound(objectId);
+            };
+            game.level.nativeSecretDiscoveryListener = source -> {
+                if(game.progression != null) game.progression.partySecretsFound++;
+            };
             game.level.nativeTriggerPresentationListener = (trigger, activator, value) -> {
                 Long objectId = objectIds.get(trigger);
                 if(objectId != null) host.deliverTriggerPresentation(activator, objectId, value);
@@ -511,10 +530,19 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     private void presentHostTriggerChains() {
         for(TriggerPresentation presentation : peer.drainTriggerPresentations()) {
             Entity entity = objects.get(presentation.objectId);
-            if(entity instanceof Trigger) {
+            if(presentation.sharedSound && entity != null) {
+                String sound = entity instanceof Trigger ? ((Trigger)entity).triggerSound
+                        : entity instanceof BasicTrigger ? ((BasicTrigger)entity).triggerSound
+                        : entity instanceof ButtonModel ? ((ButtonModel)entity).triggerSound : null;
+                com.interrupt.dungeoneer.Audio.playPositionedSound(sound,
+                        new com.badlogic.gdx.math.Vector3(entity.x, entity.y, entity.z), 0.8f, 11f);
+            }
+            else if(entity instanceof Trigger) {
                 // Host already ran the chain; closing a message here must not run it again.
                 ((Trigger)entity).presentToActivator(presentation.value, false);
             }
+            else if(entity instanceof BasicTrigger) ((BasicTrigger)entity).presentToActivator();
+            else if(entity instanceof ButtonModel) ((ButtonModel)entity).presentToActivator();
             else diagnose("No shared trigger " + presentation.objectId + " to present");
         }
     }
@@ -537,10 +565,10 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             }
             for(RemoteAvatar avatar : avatars) {
                 if(!touches(trigger, avatar)) continue;
-                // The client's own copy of this trigger shows its screen-only effects.
+                // Client never executes its copy. Host targets screen-only effects to activator.
                 trigger.fire(new ParticipantContext(avatar.getDescriptor().getParticipantId(),
                         new ParticipantCharacterState(avatar.x, avatar.y, avatar.z, 0f),
-                        LocalPlayerCompatibilityAdapter.fromGame().getPartyProgression(), true),
+                        LocalPlayerCompatibilityAdapter.fromGame().getPartyProgression(), false),
                         null);
             }
         }

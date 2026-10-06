@@ -319,6 +319,15 @@ public final class AuthoritativeItemWorld {
 
     public synchronized int getPartyKeys() { return partyKeys; }
     public synchronized long getKeyRevision() { return keyRevision; }
+    public synchronized void restorePartyKeys(int count, long savedRevision) {
+        if(count < 0 || count > 1000000 || savedRevision < 0
+                || savedRevision == 0 && count != 0) {
+            throw new IllegalArgumentException("Invalid saved Party Keys.");
+        }
+        partyKeys = count;
+        keyRevision = savedRevision;
+    }
+
     public synchronized boolean spendPartyKey() {
         if(partyKeys == 0) return false;
         partyKeys--; keyRevision++;

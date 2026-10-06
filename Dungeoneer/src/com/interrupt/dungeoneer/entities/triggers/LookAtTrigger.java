@@ -28,6 +28,7 @@ public class LookAtTrigger extends BasicTrigger {
 
 	@Override
 	public void tick(Level level, float delta) {
+        if(level != null && level.nativeTriggerReplica) return;
 		super.tick(level, delta);
 
 		if(isActive) {

@@ -478,9 +478,15 @@ public final class CampaignSaveStore {
                     "native floor byte")];
             input.readFully(nativeFloor);
         }
+        int partyKeys = format >= 4 ? input.readInt() : 0;
+        long keyRevision = format >= 4 ? input.readLong() : 0L;
+        com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot progression = format >= 4
+                ? com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.readFrom(input)
+                : com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty();
         return new CampaignSave(compatibility, campaignId, capacity, startingLives, outcome,
                 floorId, floorSeed, fingerprint, nativeWorldGeneration, slots, participants,
-                items, combat, doors, breakables, actorEffects, spawns, spawners, nativeFloor);
+                items, combat, doors, breakables, actorEffects, spawns, spawners, nativeFloor,
+                partyKeys, keyRevision, progression);
     }
 
     private void write(DataOutputStream output, CampaignSave campaign) throws IOException {
@@ -547,6 +553,9 @@ public final class CampaignSaveStore {
             output.writeInt(nativeFloor.length);
             output.write(nativeFloor);
         }
+        output.writeInt(campaign.getPartyKeys());
+        output.writeLong(campaign.getKeyRevision());
+        campaign.getPartyProgression().writeTo(output);
     }
 
     private static void writeParty(DataOutputStream out, PartyMemberStatus value) throws IOException {

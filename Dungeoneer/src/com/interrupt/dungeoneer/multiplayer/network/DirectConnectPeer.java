@@ -155,6 +155,10 @@ public interface DirectConnectPeer extends AutoCloseable {
 
     default int getPartyKeys() { return 0; }
 
+    default com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot getPartyProgression() {
+        return com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty();
+    }
+
     default List<com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress> getParticipantProgress() {
         return java.util.Collections.emptyList();
     }

@@ -239,6 +239,17 @@ public class Game {
 
 		// load the game progress
 		progression = editor ? loadProgression(saveLoc) : new Progression();
+        if(!editor && GameApplication.instance != null
+                && GameApplication.instance.getDirectConnectPeer() != null) {
+            initializePartyProgression(GameApplication.instance.getDirectConnectPeer().getPartyProgression());
+            level.nativeTriggerReplica = !(GameApplication.instance.getDirectConnectPeer()
+                    instanceof com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost);
+            // Match Game.Start: native tutorial marks sawTutorial when entered.
+            if(!level.nativeTriggerReplica && GameApplication.OWNED_TUTORIAL_FLOOR.equals(
+                    GameApplication.instance.getDirectConnectPeer().getStatus().getFloorId())) {
+                progression.sawTutorial = true;
+            }
+        }
 
 		isMobile = false;
 		Gdx.input.setCursorCatched(true);
@@ -621,6 +632,17 @@ public class Game {
 		// keep the cache clean
 		CachePools.clearOnTick();
 	}
+
+    private transient boolean partyProgressionInitialized;
+
+    /** Restore once before native init; later bridge attach must preserve new native facts. */
+    public void initializePartyProgression(
+            com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot saved) {
+        if(saved == null || progression == null) throw new IllegalArgumentException("Party bootstrap requires native Progression.");
+        if(partyProgressionInitialized) return;
+        saved.applyTo(progression);
+        partyProgressionInitialized = true;
+    }
 
 	public void changeLevel(Stairs stair)
 	{

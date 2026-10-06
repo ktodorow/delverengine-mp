@@ -9,6 +9,8 @@ import com.interrupt.dungeoneer.entities.Item;
 import java.util.HashMap;
 
 public class Progression {
+    /** Co-op discoveries belong to Party; single-player PlayerHistory stays personal. */
+    public int partySecretsFound = 0;
 	public int gold = 40;
 	public int lowestFloor = 0;
 	public int experienceGained = 0;

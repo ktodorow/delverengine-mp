@@ -26,10 +26,15 @@ import static org.junit.Assert.assertTrue;
 
 public class TriggerPresentationRoutingTest {
     private Game previousGame;
+    private com.badlogic.gdx.Application previousApplication;
     private HashMap<String, LocalizedString> previousStrings;
     private final List<String> delivered = new ArrayList<String>();
 
     @Before public void floor() {
+        previousApplication = com.badlogic.gdx.Gdx.app;
+        com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
+                (proxy, method, args) -> null);
         previousStrings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<String, LocalizedString>();
         previousGame = Game.instance;
@@ -45,6 +50,7 @@ public class TriggerPresentationRoutingTest {
     @After public void restore() {
         StringManager.localizedStrings = previousStrings;
         Game.instance = previousGame;
+        com.badlogic.gdx.Gdx.app = previousApplication;
     }
 
     @Test public void ownPlayerSeesItHereAndClosingItContinuesTheChain() {
@@ -78,6 +84,63 @@ public class TriggerPresentationRoutingTest {
 
         assertEquals(0, sign.presented);
         assertTrue(delivered.isEmpty());
+    }
+
+    @Test public void onceGateCommitsBeforeDownstreamReentryAndRejectsDuplicateDelivery() {
+        com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger gate =
+                new com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger();
+        gate.progressionKey = "gate";
+        gate.newProgressionValue = "opened";
+        gate.triggersId = "consequence";
+        final int[] consequences = { 0 };
+        com.interrupt.dungeoneer.entities.Entity consequence = new com.interrupt.dungeoneer.entities.Entity() {
+            @Override public void onTrigger(com.interrupt.dungeoneer.entities.Entity source, String value) {
+                consequences[0]++;
+                if(consequences[0] == 1) gate.doTriggerEvent(value);
+            }
+        };
+        consequence.id = "consequence";
+        Game.instance.level.entities.add(consequence);
+        gate.fire(remote(false), null);
+        gate.doTriggerEvent("");
+        gate.doTriggerEvent("");
+        assertEquals("opened", Game.instance.progression.progressionTriggers.get("gate"));
+        assertEquals("shared consequence executes once", 1, consequences[0]);
+    }
+
+    @Test public void remoteDialogueCommitsPartyHistoryWithoutHostPresentation() {
+        com.interrupt.dungeoneer.entities.triggers.TriggeredMessage message =
+                new com.interrupt.dungeoneer.entities.triggers.TriggeredMessage();
+        message.messageFile = "first.dat,second.dat";
+        message.progressionKey = "campfire";
+        message.init(Game.instance.level, Level.Source.LEVEL_START);
+        message.fire(remote(false), null);
+        message.doTriggerEvent("");
+        assertEquals("Host records dialogue even when another Participant reads it",
+                Integer.valueOf(0), Game.instance.progression.messagesSeen.get("campfire"));
+        assertEquals(1, delivered.size());
+    }
+
+    @Test public void basicTriggerMessageTargetsRemoteActivator() {
+        String hostMessage = Game.message.toString();
+        com.interrupt.dungeoneer.entities.triggers.BasicTrigger trigger =
+                new com.interrupt.dungeoneer.entities.triggers.BasicTrigger();
+        trigger.message = "Remote message";
+        trigger.fire(remote(false), null);
+        trigger.tick(Game.instance.level, 1f);
+        assertEquals(java.util.Collections.singletonList("campaign-slot-2:"), delivered);
+        assertEquals("Host message remains unchanged", hostMessage, Game.message.toString());
+    }
+
+    @Test public void buttonMessageTargetsRemoteActivator() {
+        String hostMessage = Game.message.toString();
+        com.interrupt.dungeoneer.entities.triggers.ButtonModel button =
+                new com.interrupt.dungeoneer.entities.triggers.ButtonModel();
+        button.message = "Remote button message";
+        button.fire(remote(false), null);
+        button.tick(Game.instance.level, 1f);
+        assertEquals(java.util.Collections.singletonList("campaign-slot-2:"), delivered);
+        assertEquals("Host message remains unchanged", hostMessage, Game.message.toString());
     }
 
     private static ParticipantContext remote(boolean presentedByActivator) {

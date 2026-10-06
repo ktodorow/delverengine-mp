@@ -53,6 +53,77 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class DirectConnectWireTest {
+    @Test public void completePartyHistoryUsesBoundedFramesWithoutPublishingPartialFacts() throws Exception {
+        com.interrupt.dungeoneer.game.Progression nativeState = new com.interrupt.dungeoneer.game.Progression();
+        for(int i = 0; i < 100; i++) nativeState.progressionTriggers.put("quest-" + i,
+                "One shared native consequence belongs to every Participant.");
+        nativeState.partySecretsFound = 3;
+        nativeState.sawTutorial = true; nativeState.won = true;
+        com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot expected =
+                com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.capture(nativeState, 9L);
+        EmbeddedChannel outbound = new EmbeddedChannel(), inbound = new EmbeddedChannel();
+        DirectConnectWire.configureTcp(outbound.pipeline()); DirectConnectWire.configureTcp(inbound.pipeline());
+        try {
+            outbound.writeOutbound(new DirectConnectWire.PartyProgressionMessage("session", expected));
+            ByteBuf frames = Unpooled.buffer(), part;
+            while((part = outbound.readOutbound()) != null) { frames.writeBytes(part); part.release(); }
+            int count = 0;
+            try {
+                while(frames.isReadable()) {
+                    int size = frames.getInt(frames.readerIndex());
+                    assertTrue(size <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES);
+                    inbound.writeInbound(frames.readRetainedSlice(size + 4)); count++;
+                    if(frames.isReadable()) assertNull(inbound.readInbound());
+                }
+            }
+            finally { frames.release(); }
+            assertTrue(count > 1);
+            DirectConnectWire.PartyProgressionMessage result = inbound.readInbound();
+            assertTrue(expected.sameFacts(result.state)); assertEquals(9L, result.state.revision);
+            assertNull(inbound.readInbound());
+        }
+        finally { outbound.finishAndReleaseAll(); inbound.finishAndReleaseAll(); }
+    }
+
+    @Test public void malformedPartyFragmentsNeverPublishPartialState() {
+        assertBadFragments(partyFragment(300000, 0, 1011));
+        assertBadFragments(partyFragment(2048, 1, 1011));
+        assertBadFragments(partyFragment(2048, 0, 1011), partyFragment(2048, 0, 1011));
+        assertBadFragments(partyFragment(2048, 0, 1011), fragment(2048, 1011, 1011));
+    }
+
+    private ByteBuf partyFragment(int total, int offset, int size) {
+        ByteBuf bytes = fragment(total, offset, size);
+        bytes.setByte(8, DirectConnectWire.PARTY_PROGRESSION_PART);
+        if(size >= 5) bytes.setByte(21, 56);
+        return bytes;
+    }
+
+    @Test public void malformedPartyPayloadCountsUtf8AndTrailingBytesAreRejected() throws Exception {
+        ByteBuf valid = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.PartyProgressionMessage("s",
+                        com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty()));
+        try {
+            ByteBuf oversized = valid.copy(); oversized.setInt(8, 262145); rejectPartyDatagram(oversized);
+            ByteBuf entries = valid.copy(); entries.setInt(22, 1025); rejectPartyDatagram(entries);
+            ByteBuf trailing = valid.copy(); trailing.writeByte(0); rejectPartyDatagram(trailing);
+            ByteBuf utf8 = valid.copy();
+            // Replace empty first map by one invalid UTF-8 key, leaving remaining maps/count intact.
+            utf8.setInt(22, 1);
+            ByteBuf malformed = Unpooled.buffer();
+            malformed.writeBytes(utf8, 0, 26).writeShort(1).writeByte(0xff).writeShort(0)
+                    .writeBytes(utf8, 26, utf8.readableBytes() - 26);
+            malformed.setInt(8, valid.getInt(8) + 5); utf8.release(); rejectPartyDatagram(malformed);
+        }
+        finally { valid.release(); }
+    }
+
+    private void rejectPartyDatagram(ByteBuf bytes) throws Exception {
+        try { DirectConnectWire.decodeDatagram(bytes); fail("Malformed Party Progression accepted"); }
+        catch(DirectConnectWire.ProtocolException expected) { }
+        finally { bytes.release(); }
+    }
+
     @Test public void malformedCombatFragmentsAreRejectedBeforePublishingState() {
         assertBadFragments(fragment(16385, 0, 1011)); // Allocation bound.
         assertBadFragments(fragment(2048, 1, 1011)); // No first part.

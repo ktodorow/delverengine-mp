@@ -143,6 +143,9 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile CombatSnapshot combatSnapshot;
     private volatile PartyCommunicationState partyCommunication =
             PartyCommunicationState.initial();
+    private com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression =
+            com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty();
+    private long partyProgressionRevision = -1L;
     private int partyKeys;
     private long keyRevision = -1L;
     private final java.util.Map<ParticipantId, com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress>
@@ -585,10 +588,14 @@ public final class DirectConnectClient implements DirectConnectPeer {
         nativeDecals.addLast(message.decal);
     }
 
+    private long lastTriggerPresentationSequence;
     private synchronized void triggerPresentation(DirectConnectWire.TriggerPresentationMessage message) {
         if(!sessionId.equals(message.sessionId)) {
             fail("Trigger presentation belongs to another session."); return;
         }
+        if(message.presentation.generation != nativeWorldGeneration
+                || message.presentation.sequence <= lastTriggerPresentationSequence) return;
+        lastTriggerPresentationSequence = message.presentation.sequence;
         if(triggerPresentations.size() >= MAX_TRIGGER_PRESENTATIONS) {
             fail("Trigger presentation queue exceeded."); return;
         }
@@ -964,6 +971,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message.generation <= nativeWorldGeneration) return;
         nativeWorldGeneration = message.generation;
         shopEntries.clear(); shopOpenings.clear();
+        triggerPresentations.clear(); lastTriggerPresentationSequence = 0L;
         monsterEffects.clear(); nativeStatusCues.clear(); nativeExplosions.clear(); nativeAnimationCues.clear();
         nativeDynamicCues.clear();
         nativeMonsterSpawns.clear(); lastNativeMonsterSpawnSequence = 0L;
@@ -1193,6 +1201,17 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     @Override public synchronized int getPartyKeys() { return partyKeys; }
+
+    @Override public synchronized com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot getPartyProgression() {
+        return partyProgression;
+    }
+
+    private synchronized void partyProgression(DirectConnectWire.PartyProgressionMessage message) {
+        if(!sessionId.equals(message.sessionId)) { fail("Party Progression belongs to another session."); return; }
+        if(message.state.revision > partyProgressionRevision) {
+            partyProgression = message.state; partyProgressionRevision = message.state.revision;
+        }
+    }
 
     private synchronized void partyKeys(DirectConnectWire.PartyKeysMessage message) {
         if(!sessionId.equals(message.sessionId)) { fail("Party Keys belong to another session."); return; }
@@ -1436,6 +1455,10 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof DirectConnectWire.MonsterEffectsMessage && sessionId != null
                     && campaignSlot != 0) {
                 monsterEffects((DirectConnectWire.MonsterEffectsMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.PartyProgressionMessage && sessionId != null
+                    && campaignSlot != 0) {
+                partyProgression((DirectConnectWire.PartyProgressionMessage)message);
             }
             else if(message instanceof DirectConnectWire.PartyKeysMessage && sessionId != null
                     && campaignSlot != 0) {

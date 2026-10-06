@@ -92,6 +92,7 @@ public class BasicTrigger extends Entity {
 
     @Override
     public void tick(Level level, float delta) {
+        if(level != null && level.nativeTriggerReplica) return;
         if (triggerStatus== Trigger.TriggerStatus.DESTROYED && selfDestructs){
             this.isActive=false;
         }
@@ -131,6 +132,7 @@ public class BasicTrigger extends Entity {
     }
 
     public void fire(ParticipantContext participant, String value) {
+        if(Game.instance != null && Game.instance.level != null && Game.instance.level.nativeTriggerReplica) return;
 
         // Check if we can actually fire now
         if(triggersDuring != Trigger.GameTime.WHENEVER) {
@@ -150,7 +152,7 @@ public class BasicTrigger extends Entity {
         // Track secrets
         if(isSecret) {
             isSecret = false;
-            Game.instance.player.history.foundSecret();
+            Game.instance.level.recordSecretDiscovery(this);
         }
 
         // Triggering an already triggered trigger will do nothing
@@ -190,8 +192,23 @@ public class BasicTrigger extends Entity {
 
     // triggers can be delayed, fire the actual trigger here
     public void doTriggerEvent(String value) {
+        if(Game.instance != null && Game.instance.level != null && Game.instance.level.nativeTriggerReplica) return;
         Audio.playPositionedSound(triggerSound, new Vector3((float)x,(float)y,(float)z), 0.8f, 11f);
+        Game.instance.level.publishTriggerSound(this);
         Game.instance.level.trigger(this, triggersId, triggerValue, triggeringParticipant);
+        if(triggeringParticipant != null && !LocalPlayerCompatibilityAdapter.LOCAL_PARTICIPANT_ID
+                .equals(triggeringParticipant.getParticipantId())) {
+            if(!triggeringParticipant.isPresentedByActivator()
+                    && Game.instance.level.nativeTriggerPresentationListener != null) {
+                Game.instance.level.nativeTriggerPresentationListener.deliver(this,
+                        triggeringParticipant.getParticipantId(), value == null ? "" : value);
+            }
+        }
+        else presentToActivator();
+    }
+
+    /** Screen-only message; replay never runs native chain. */
+    public void presentToActivator() {
         if(message != null && !message.equals("")) Game.ShowMessage(message, messageTime, messageSize);
     }
 

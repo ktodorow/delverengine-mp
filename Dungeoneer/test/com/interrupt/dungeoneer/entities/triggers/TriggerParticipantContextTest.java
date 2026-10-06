@@ -22,9 +22,12 @@ import static org.junit.Assert.assertSame;
 
 public class TriggerParticipantContextTest {
     private static HashMap<String, LocalizedString> previousLocalizedStrings;
+    private static com.interrupt.dungeoneer.game.Game previousGame;
 
     @BeforeClass
     public static void provideMinimalLocalizedStrings() {
+        previousGame = com.interrupt.dungeoneer.game.Game.instance;
+        com.interrupt.dungeoneer.game.Game.instance = null;
         previousLocalizedStrings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<String, LocalizedString>();
     }
@@ -32,6 +35,7 @@ public class TriggerParticipantContextTest {
     @AfterClass
     public static void restoreLocalizedStrings() {
         StringManager.localizedStrings = previousLocalizedStrings;
+        com.interrupt.dungeoneer.game.Game.instance = previousGame;
     }
 
     @Test

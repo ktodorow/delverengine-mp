@@ -121,7 +121,12 @@ final class DirectConnectWire {
     private static final int NATIVE_DECAL = 53;
     private static final int TRIGGER_PRESENTATION = 54;
     private static final int MOVER_STATE = 55;
-    // TCP-only fragments of one complete combat snapshot; never partial gameplay state.
+    private static final int PARTY_PROGRESSION = 56;
+    static final int PARTY_PROGRESSION_PART = 57;
+    private static final int MAX_PARTY_MESSAGE_BYTES =
+            com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.MAX_BYTES
+                    + DirectConnectProtocol.MAX_SESSION_ID_BYTES + 11;
+    // TCP-only complete Combat/Party snapshots; fragments never expose partial gameplay state.
     static final int COMBAT_STATE_PART = 52;
     private static final int COMBAT_PART_HEADER_BYTES = 13; // magic, type, total, offset
     private static final int COMBAT_PART_BYTES =
@@ -433,6 +438,9 @@ final class DirectConnectWire {
             writeString(output, presentation.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                     "session identity");
             output.writeLong(presentation.presentation.objectId);
+            output.writeLong(presentation.presentation.sequence);
+            output.writeLong(presentation.presentation.generation);
+            output.writeBoolean(presentation.presentation.sharedSound);
             writeString(output, presentation.presentation.value,
                     com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation.MAX_VALUE_BYTES,
                     "trigger presentation value");
@@ -615,6 +623,16 @@ final class DirectConnectWire {
                 writeString(output, effect.shader, 32, "status shader");
                 output.writeBoolean(effect.particles);
             }
+        }
+        else if(message instanceof PartyProgressionMessage) {
+            PartyProgressionMessage delivery = (PartyProgressionMessage)message;
+            output.writeByte(PARTY_PROGRESSION);
+            writeString(output, delivery.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            try { delivery.state.writeTo(new java.io.DataOutputStream(bytes)); }
+            catch(java.io.IOException impossible) { throw new ProtocolException("Cannot encode Party Progression.", impossible); }
+            output.writeInt(bytes.size());
+            output.writeBytes(bytes.toByteArray());
         }
         else if(message instanceof PartyKeysMessage) {
             PartyKeysMessage keys = (PartyKeysMessage)message;
@@ -1180,6 +1198,25 @@ final class DirectConnectWire {
                 }
                 catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid native effects.", invalid); }
                 break;
+            case PARTY_PROGRESSION: {
+                String partySession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 4, "Party Progression length");
+                int partyBytes = input.readInt();
+                if(partyBytes < 0 || partyBytes > com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.MAX_BYTES)
+                    throw new ProtocolException("Party Progression length outside bounds.");
+                requireReadable(input, partyBytes, "Party Progression");
+                byte[] partyPayload = new byte[partyBytes]; input.readBytes(partyPayload);
+                java.io.DataInputStream partyInput = new java.io.DataInputStream(new java.io.ByteArrayInputStream(partyPayload));
+                try {
+                    message = new PartyProgressionMessage(partySession,
+                            com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.readFrom(partyInput));
+                    if(partyInput.available() != 0) throw new ProtocolException("Trailing Party Progression bytes.");
+                }
+                catch(java.io.IOException | IllegalArgumentException invalid) {
+                    throw new ProtocolException("Invalid Party Progression.", invalid);
+                }
+                break;
+            }
             case PARTY_KEYS:
                 String keySession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
                 requireReadable(input, 12, "Party Keys");
@@ -1300,15 +1337,20 @@ final class DirectConnectWire {
             case TRIGGER_PRESENTATION:
                 String triggerShowSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
-                requireReadable(input, 8, "trigger presentation");
+                requireReadable(input, 25, "trigger presentation");
                 long triggerShowObject = input.readLong();
+                long triggerShowSequence = input.readLong(), triggerShowGeneration = input.readLong();
+                int triggerSoundScope = input.readUnsignedByte();
+                if(triggerSoundScope > 1) throw new ProtocolException("Invalid trigger sound scope.");
+                boolean triggerSharedSound = triggerSoundScope == 1;
                 String triggerShowValue = readString(input,
                         com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation.MAX_VALUE_BYTES,
                         "trigger presentation value");
                 try {
                     message = new TriggerPresentationMessage(triggerShowSession,
                             new com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation(
-                                    triggerShowObject, triggerShowValue));
+                                    triggerShowObject, triggerShowValue, triggerShowSequence,
+                                    triggerShowGeneration, triggerSharedSound));
                 }
                 catch(IllegalArgumentException invalid) {
                     throw new ProtocolException("Invalid trigger presentation.", invalid);
@@ -2658,6 +2700,17 @@ final class DirectConnectWire {
         }
     }
 
+    static final class PartyProgressionMessage implements Message {
+        final String sessionId;
+        final com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot state;
+        PartyProgressionMessage(String sessionId,
+                com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot state) {
+            if(sessionId == null || state == null) throw new IllegalArgumentException("Missing Party Progression.");
+            this.sessionId = sessionId;
+            this.state = state;
+        }
+    }
+
     static final class PartyKeysMessage implements Message {
         final String sessionId;
         final long revision;
@@ -2789,58 +2842,50 @@ final class DirectConnectWire {
     }
 
     private static final class TcpMessageDecoder extends MessageToMessageDecoder<ByteBuf> {
-        private byte[] combatBytes;
-        private int combatOffset;
+        private byte[] snapshotBytes;
+        private int snapshotOffset;
+        private int fragmentKind;
 
-        @Override
-        protected void decode(io.netty.channel.ChannelHandlerContext context, ByteBuf input,
+        @Override protected void decode(io.netty.channel.ChannelHandlerContext context, ByteBuf input,
                 List<Object> output) throws Exception {
             int start = input.readerIndex();
-            boolean part = input.readableBytes() >= 5
-                    && input.getInt(start) == DirectConnectProtocol.MAGIC
-                    && input.getUnsignedByte(start + 4) == COMBAT_STATE_PART;
-            if(!part) {
-                if(combatBytes != null) throw new ProtocolException("Interrupted combat snapshot.");
+            int kind = input.readableBytes() >= 5 && input.getInt(start) == DirectConnectProtocol.MAGIC
+                    ? input.getUnsignedByte(start + 4) : -1;
+            if(kind != COMBAT_STATE_PART && kind != PARTY_PROGRESSION_PART) {
+                if(snapshotBytes != null) throw new ProtocolException("Interrupted snapshot.");
                 output.add(DirectConnectWire.decode(input));
                 return;
             }
-            requireReadable(input, COMBAT_PART_HEADER_BYTES, "combat fragment header");
+            requireReadable(input, COMBAT_PART_HEADER_BYTES, "snapshot fragment header");
             input.skipBytes(5);
-            int total = input.readInt();
-            int offset = input.readInt();
-            int size = input.readableBytes();
-            if(total <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES
-                    || total > DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES
+            int total = input.readInt(), offset = input.readInt(), size = input.readableBytes();
+            int bound = kind == COMBAT_STATE_PART ? DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES : MAX_PARTY_MESSAGE_BYTES;
+            if(total <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES || total > bound
                     || offset < 0 || offset >= total
                     || size != Math.min(COMBAT_PART_BYTES, total - offset)
-                    || (combatBytes == null ? offset != 0
-                            : total != combatBytes.length || offset != combatOffset)) {
-                throw new ProtocolException("Malformed or out-of-order combat fragment.");
+                    || (snapshotBytes == null ? offset != 0
+                            : kind != fragmentKind || total != snapshotBytes.length || offset != snapshotOffset)) {
+                throw new ProtocolException("Malformed or out-of-order snapshot fragment.");
             }
-            if(combatBytes == null) {
-                // Reject fragments of unrelated messages before allocating the assembly.
+            if(snapshotBytes == null) {
+                int expected = kind == COMBAT_STATE_PART ? COMBAT_STATE : PARTY_PROGRESSION;
                 if(size < 5 || input.getInt(input.readerIndex()) != DirectConnectProtocol.MAGIC
-                        || input.getUnsignedByte(input.readerIndex() + 4) != COMBAT_STATE) {
-                    throw new ProtocolException("Only combat snapshots may be fragmented.");
+                        || input.getUnsignedByte(input.readerIndex() + 4) != expected) {
+                    throw new ProtocolException("Fragment does not contain its declared snapshot kind.");
                 }
-                combatBytes = new byte[total];
-                combatOffset = 0;
+                snapshotBytes = new byte[total]; snapshotOffset = 0; fragmentKind = kind;
             }
-            input.readBytes(combatBytes, combatOffset, size);
-            combatOffset += size;
-            if(combatOffset == total) {
-                ByteBuf assembled = Unpooled.wrappedBuffer(combatBytes);
-                combatBytes = null;
-                combatOffset = 0;
+            input.readBytes(snapshotBytes, snapshotOffset, size); snapshotOffset += size;
+            if(snapshotOffset == total) {
+                ByteBuf assembled = Unpooled.wrappedBuffer(snapshotBytes);
+                snapshotBytes = null; snapshotOffset = 0;
                 try { output.add(DirectConnectWire.decode(assembled)); }
                 finally { assembled.release(); }
             }
         }
 
-        @Override
-        public void channelInactive(io.netty.channel.ChannelHandlerContext context) throws Exception {
-            combatBytes = null;
-            combatOffset = 0;
+        @Override public void channelInactive(io.netty.channel.ChannelHandlerContext context) throws Exception {
+            snapshotBytes = null; snapshotOffset = 0;
             super.channelInactive(context);
         }
     }
@@ -2857,15 +2902,18 @@ final class DirectConnectWire {
                     output.add(encoded.retain());
                     return;
                 }
-                if(!(message instanceof CombatStateMessage)
-                        || total > DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES) {
+                int fragmentType = message instanceof CombatStateMessage ? COMBAT_STATE_PART
+                        : message instanceof PartyProgressionMessage ? PARTY_PROGRESSION_PART : -1;
+                int bound = fragmentType == COMBAT_STATE_PART
+                        ? DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES : MAX_PARTY_MESSAGE_BYTES;
+                if(fragmentType < 0 || total > bound) {
                     throw new ProtocolException("TCP frame exceeded protocol size bound.");
                 }
                 for(int offset = 0; offset < total; offset += COMBAT_PART_BYTES) {
                     int size = Math.min(COMBAT_PART_BYTES, total - offset);
                     ByteBuf part = context.alloc().buffer(COMBAT_PART_HEADER_BYTES + size);
                     part.writeInt(DirectConnectProtocol.MAGIC);
-                    part.writeByte(COMBAT_STATE_PART);
+                    part.writeByte(fragmentType);
                     part.writeInt(total);
                     part.writeInt(offset);
                     part.writeBytes(encoded, offset, size);

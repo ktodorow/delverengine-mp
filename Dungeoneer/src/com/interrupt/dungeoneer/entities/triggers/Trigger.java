@@ -124,6 +124,7 @@ public class Trigger extends Entity {
 	
 	@Override
 	public void tick(Level level, float delta) {
+        if(level != null && level.nativeTriggerReplica) return;
 		
 		// check for touch events
 		if(triggerType != TriggerType.USE) {
@@ -197,6 +198,7 @@ public class Trigger extends Entity {
 	}
 
 	public void fire(ParticipantContext participant, String value) {
+        if(Game.instance != null && Game.instance.level != null && Game.instance.level.nativeTriggerReplica) return;
 
 		// Check if we can actually fire now
 		if(triggersDuring != GameTime.WHENEVER) {
@@ -216,7 +218,7 @@ public class Trigger extends Entity {
 		// Track secrets
 		if(isSecret) {
 			isSecret = false;
-			Game.instance.player.history.foundSecret();
+			Game.instance.level.recordSecretDiscovery(this);
 		}
 
 		// Triggering an already triggered trigger will do nothing
@@ -254,7 +256,9 @@ public class Trigger extends Entity {
 	
 	// triggers can be delayed, fire the actual trigger here
 	public void doTriggerEvent(String value) {
+        if(Game.instance != null && Game.instance.level != null && Game.instance.level.nativeTriggerReplica) return;
 		Audio.playPositionedSound(triggerSound, new Vector3((float)x,(float)y,(float)z), 0.8f, 11f);
+        Game.instance.level.publishTriggerSound(this);
 		Game.instance.level.trigger(this, triggersId, triggerValue, triggeringParticipant);
 		presentForActivator(value);
 	}

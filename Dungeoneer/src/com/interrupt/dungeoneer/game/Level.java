@@ -64,6 +64,20 @@ public class Level {
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeRangedPresentationListener nativeRangedPresentationListener;
 	public transient com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawnerListener nativeMonsterSpawnerListener;
 	public transient com.interrupt.dungeoneer.multiplayer.items.TriggerPresentationListener nativeTriggerPresentationListener;
+	/** Client replicas only present Host outcomes; they never execute native trigger chains. */
+	public transient boolean nativeTriggerReplica;
+	public transient java.util.function.Consumer<Entity> nativeSecretDiscoveryListener;
+	public transient java.util.function.Consumer<Entity> nativeTriggerSoundListener;
+
+	public void publishTriggerSound(Entity source) {
+		if(!nativeTriggerReplica && nativeTriggerSoundListener != null) nativeTriggerSoundListener.accept(source);
+	}
+
+	public void recordSecretDiscovery(Entity source) {
+		if(nativeTriggerReplica) return;
+		if(nativeSecretDiscoveryListener != null) nativeSecretDiscoveryListener.accept(source);
+		else Game.instance.player.history.foundSecret();
+	}
 
 	/** Multiplayer only: builds this floor identically on every peer. Cleared after prepared build. */
 	public transient SharedFloorBuild sharedFloorBuild;
@@ -3640,6 +3654,7 @@ public class Level {
 	// trigger an entity by id while retaining the initiating Participant
 	public void trigger(Entity instigator, String triggersId, String triggerValue,
 			ParticipantContext participant) {
+		if(nativeTriggerReplica) return;
 		if(triggersId == null || triggersId.equals("")) return;
 
 		try {

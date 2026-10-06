@@ -67,6 +67,137 @@ public class DirectConnectCampaignPersistenceTest {
 
     @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
+    @Test public void coldResumeRetainsUnspentPartyKeysWithHostSubset() throws Exception {
+        File root = temporaryFolder.newFolder("party-keys");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster roster = store.loadOrCreate("friends", 2,
+                AvatarCatalog.ownedV108Humanoids(), identity('1'),
+                new SlotPresentation("Host", AvatarCatalog.HUMANOID_1));
+        roster.approve(new SlotClaimRequest(identity('2'),
+                new SlotPresentation("Friend", AvatarCatalog.HUMANOID_2), 2, null),
+                new SecureRandom());
+        store.save(roster);
+        DirectConnectCompatibility compatibility = compatibility();
+        store.campaignSaves().save(save(compatibility, roster));
+        DirectConnectHost first = DirectConnectHost.start(0, compatibility, roster, store);
+        try {
+            first.startSession();
+            first.getItemWorld().initializePartyKeys(3);
+            assertTrue(first.getItemWorld().spendPartyKey());
+            assertEquals(2, first.getPartyKeys());
+            first.persistCampaign();
+        }
+        finally { first.close(); }
+        DirectConnectHost resumed = DirectConnectHost.start(0, compatibility, roster, store);
+        try {
+            resumed.startSession();
+            assertEquals("Absent collector does not lose Party's remaining keys", 2,
+                    resumed.getPartyKeys());
+        }
+        finally { resumed.close(); }
+    }
+
+    @Test public void nativeStoryHistorySurvivesColdResumeWithoutReplacingSlotGoldOrUpgrades()
+            throws Exception {
+        File root = temporaryFolder.newFolder("party-story");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        DirectConnectCompatibility compatibility = compatibility();
+        store.campaignSaves().save(save(compatibility, roster));
+        Game previous = Game.instance;
+        HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> previousStrings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        com.interrupt.managers.StringManager.localizedStrings =
+                new HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
+        DirectConnectHost first = DirectConnectHost.start(0, compatibility, roster, store);
+        try {
+            first.startSession();
+            Game game = partyStoryGame();
+            DirectConnectItemController items = new DirectConnectItemController(first);
+            items.prepare(game);
+            game.progression.progressionTriggers.put("quest:gate", "opened");
+            game.progression.untilDeathProgressionTriggers.put("story:lever", "pulled");
+            game.progression.messagesSeen.put("campfire", 2);
+            game.progression.uniqueItemsSpawned.add("Axe of Testing");
+            game.progression.uniqueTilesSeen.add("secret-room");
+            game.progression.dungeonAreasSeen.add("CAVES");
+            game.progression.sawTutorial = true;
+            game.progression.partySecretsFound = 2;
+            items.update(game);
+            first.persistCampaign();
+        }
+        finally { first.close(); }
+        DirectConnectHost resumed = DirectConnectHost.start(0, compatibility, roster, store);
+        try {
+            resumed.startSession();
+            Game game = partyStoryGame();
+            game.progression.gold = 97;
+            game.progression.inventoryUpgrades = 3;
+            game.progression.hotbarUpgrades = 2;
+            game.initializePartyProgression(resumed.getPartyProgression());
+            com.interrupt.dungeoneer.entities.triggers.TriggeredMessage dialogue =
+                    new com.interrupt.dungeoneer.entities.triggers.TriggeredMessage();
+            dialogue.messageFile = "first.dat,second.dat,third.dat,last.dat";
+            dialogue.progressionKey = "campfire";
+            dialogue.init(game.level, Level.Source.LEVEL_START);
+            assertEquals("last.dat", dialogue.messageFile);
+            game.progression.progressionTriggers.put("native:initialized", "yes");
+            new DirectConnectItemController(resumed).prepare(game);
+            assertEquals("Native init facts survive bridge attach", "yes",
+                    game.progression.progressionTriggers.get("native:initialized"));
+            assertEquals(2, game.progression.partySecretsFound);
+            assertEquals("opened", game.progression.progressionTriggers.get("quest:gate"));
+            assertEquals("pulled", game.progression.untilDeathProgressionTriggers.get("story:lever"));
+            assertEquals(Integer.valueOf(2), game.progression.messagesSeen.get("campfire"));
+            assertTrue(game.progression.uniqueItemsSpawned.contains("Axe of Testing", false));
+            assertTrue(game.progression.uniqueTilesSeen.contains("secret-room", false));
+            assertTrue(game.progression.dungeonAreasSeen.contains("CAVES", false));
+            assertTrue(game.progression.sawTutorial);
+            assertEquals(97, game.progression.gold);
+            assertEquals(3, game.progression.inventoryUpgrades);
+            assertEquals(2, game.progression.hotbarUpgrades);
+        }
+        finally {
+            resumed.close();
+            Game.instance = previous;
+            com.interrupt.managers.StringManager.localizedStrings = previousStrings;
+        }
+    }
+
+    @Test public void nativeVictoryArchivesCompletedPartyFactsAtCaptureBoundary() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("party-victory"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        DirectConnectCompatibility compatibility = compatibility();
+        store.campaignSaves().save(save(compatibility, roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
+        try {
+            host.startSession();
+            com.interrupt.dungeoneer.game.Progression nativeState = new com.interrupt.dungeoneer.game.Progression();
+            nativeState.won = true;
+            nativeState.sawTutorial = true;
+            host.setNativeFloorCapture(() -> {
+                host.publishPartyProgression(nativeState);
+                return new byte[] { 1, 2, 3 };
+            });
+            CampaignSave captured = host.persistCampaign();
+            assertEquals(CampaignSave.Outcome.COMPLETED, captured.getOutcome());
+            assertTrue(captured.getPartyProgression().victory);
+            assertTrue(store.campaignSaves().isArchived(roster.getCampaignId()));
+        }
+        finally { host.close(); }
+    }
+
+    private Game partyStoryGame() {
+        Game game = new org.objenesis.ObjenesisStd().newInstance(Game.class);
+        game.player = new Player();
+        game.player.inventory.clear();
+        game.progression = new com.interrupt.dungeoneer.game.Progression();
+        game.level = new Level(4, 4);
+        Game.instance = game;
+        return game;
+    }
+
     @Test public void coldResumeStartsWithHostSubsetAndPreservesAbsentSlotState()
             throws Exception {
         File root = temporaryFolder.newFolder("campaigns");
@@ -125,7 +256,17 @@ public class DirectConnectCampaignPersistenceTest {
                 new SecureRandom()).getSlot();
         store.save(roster);
         DirectConnectCompatibility compatibility = compatibility();
-        store.campaignSaves().save(save(compatibility, roster));
+        CampaignSave base = save(compatibility, roster);
+        com.interrupt.dungeoneer.game.Progression story = new com.interrupt.dungeoneer.game.Progression();
+        story.progressionTriggers.put("resume:party-gate", "opened");
+        story.sawTutorial = true; story.partySecretsFound = 2;
+        store.campaignSaves().save(new CampaignSave(base.getCompatibility(), base.getCampaignId(),
+                base.getCapacity(), base.getStartingLives(), base.getOutcome(), base.getFloorId(),
+                base.getFloorSeed(), base.getFloorFingerprint(), base.getNativeWorldGeneration(),
+                base.getSlots(), base.getParticipants(), base.getPhysicalItems(), base.getCombat(),
+                base.getDoors(), base.getBreakables(), base.getActorEffects(), base.getMonsterSpawns(),
+                base.getConsumedMonsterSpawners(), base.getNativeFloor(), 2, 3L,
+                com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.capture(story, 7L)));
         MemoryReconnectTokens tokens = new MemoryReconnectTokens();
         tokens.save("friends", friend.getReconnectToken());
 
@@ -140,6 +281,10 @@ public class DirectConnectCampaignPersistenceTest {
 
             assertEquals(4L, host.getNativeWorldGeneration());
             assertEquals(4L, client.getNativeWorldGeneration());
+            assertEquals("opened", client.getPartyProgression().persistent.get("resume:party-gate"));
+            assertTrue(client.getPartyProgression().tutorialCompleted);
+            assertEquals(2, client.getPartyProgression().secretsFound);
+            assertEquals(2, client.getPartyKeys());
             assertEquals(1, client.getPhysicalItems().size());
             assertEquals(1, client.getDoorSnapshots().size());
             assertEquals(1, client.getBreakableSnapshots().size());
@@ -635,9 +780,9 @@ public class DirectConnectCampaignPersistenceTest {
             game.level.nativeTriggerPresentationListener = (trigger, who, value) ->
                     delivered.add(who.getValue());
             trap.doTriggerEvent("");
-            assertEquals("The client's own copy shows messages; Host's screen does not",
+            assertEquals("Host targets client UI; Host screen stays clear",
                     0, trap.presented);
-            assertTrue("Nothing to send: that client ran its own copy", delivered.isEmpty());
+            assertEquals(Collections.singletonList("campaign-slot-2"), delivered);
             assertEquals(com.interrupt.dungeoneer.entities.triggers.Trigger.TriggerStatus.WAITING,
                     elsewhere.getTriggerStatus());
         }

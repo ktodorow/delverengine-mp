@@ -155,6 +155,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private final CampaignRosterStore rosterStore;
     private final CampaignSaveStore campaignSaveStore;
     private CampaignSave durableCampaign;
+    private com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression =
+            com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty();
     private final boolean resumedCampaign;
     private final SharedFloorFingerprint savedFloorFingerprint;
     private boolean resumeNativeWorldPending;
@@ -302,6 +304,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             ownedFloorId = compatibility.usesOpenSourceTestContent()
                     ? null : saved.getFloorId();
             itemWorld.restore(saved.getPhysicalItems());
+            itemWorld.restorePartyKeys(saved.getPartyKeys(), saved.getKeyRevision());
+            partyProgression = saved.getPartyProgression();
             for(DoorSnapshot door : saved.getDoors()) doorSnapshots.put(door.entityId, door);
             for(BreakableSnapshot breakable : saved.getBreakables()) {
                 breakableSnapshots.put(breakable.entityId, breakable);
@@ -1153,13 +1157,22 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 nativeWorldGeneration, decal));
     }
 
+    private long triggerPresentationSequence;
+
+    /** Shared native positional sound; full state baselines never replay this one-shot cue. */
+    public synchronized void publishTriggerSound(long objectId) {
+        broadcast(new DirectConnectWire.TriggerPresentationMessage(sessionId,
+                new com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation(objectId, "",
+                        ++triggerPresentationSequence, nativeWorldGeneration, true)));
+    }
+
     /** Screen-only part of a trigger a client used, shown on that client's screen alone. */
     public synchronized void deliverTriggerPresentation(ParticipantId participant, long objectId,
             String value) {
         com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation presentation;
         try {
             presentation = new com.interrupt.dungeoneer.multiplayer.items.TriggerPresentation(
-                    objectId, value);
+                    objectId, value, ++triggerPresentationSequence, nativeWorldGeneration, false);
         }
         catch(IllegalArgumentException invalid) {
             // Presentation only: the chain already ran on Host, so a bad value is not fatal.
@@ -1529,6 +1542,21 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     }
 
     @Override public int getPartyKeys() { return itemWorld.getPartyKeys(); }
+
+    public synchronized com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot getPartyProgression() {
+        return partyProgression;
+    }
+
+    /** Render thread hands over detached native facts; repeated frames do not advance revision. */
+    public synchronized void publishPartyProgression(com.interrupt.dungeoneer.game.Progression nativeState) {
+        com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot next =
+                com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.capture(
+                        nativeState, partyProgression.revision + 1L);
+        if(!next.sameFacts(partyProgression)) {
+            partyProgression = next;
+            broadcast(new DirectConnectWire.PartyProgressionMessage(sessionId, next));
+        }
+    }
 
     public synchronized void publishPhysicalItems() {
         long keyRevision = itemWorld.getKeyRevision();
@@ -2377,6 +2405,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             connection.channel.write(new DirectConnectWire.NativeDynamicStateMessage(sessionId,
                     ++nativeDynamicSequence, state, nativeWorldGeneration));
         }
+        connection.channel.write(new DirectConnectWire.PartyProgressionMessage(sessionId, partyProgression));
         connection.channel.write(new DirectConnectWire.PartyKeysMessage(sessionId,
                 itemWorld.getKeyRevision(), itemWorld.getPartyKeys()));
         for(com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress : economy.progressSnapshot()) {
@@ -2969,6 +2998,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 || partyStatus == null) {
             throw new IllegalStateException("Campaign play must start before it can be saved.");
         }
+        // Render-thread capture synchronizes final Party facts before outcome is chosen.
+        byte[] nativeFloor = captureNativeFloor();
         List<CampaignSave.ParticipantState> participants =
                 new ArrayList<CampaignSave.ParticipantState>();
         for(CampaignSlot slot : roster.getSlots()) {
@@ -2992,13 +3023,15 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         CombatSnapshot combat = mergeAbsentCombat(combatEncounter.getSnapshot(currentHostTick()));
         CampaignSave saved = new CampaignSave(compatibility, roster.getCampaignId(),
                 roster.getCapacity(), startingLives, partyWiped
-                        ? CampaignSave.Outcome.DEFEATED : CampaignSave.Outcome.ACTIVE,
+                        ? CampaignSave.Outcome.DEFEATED : partyProgression.victory
+                                ? CampaignSave.Outcome.COMPLETED : CampaignSave.Outcome.ACTIVE,
                 sharedFloorId(), sharedFloorSeed, hostFloorFingerprint,
                 nativeWorldGeneration, roster.getSlots(), participants, itemWorld.snapshot(),
                 combat, getDoorSnapshots(), getBreakableSnapshots(), savedActorEffects(combat),
                 new ArrayList<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn>(
                         nativeMonsterSpawns),
-                new ArrayList<String>(consumedMonsterSpawners), captureNativeFloor());
+                new ArrayList<String>(consumedMonsterSpawners), nativeFloor,
+                itemWorld.getPartyKeys(), itemWorld.getKeyRevision(), partyProgression);
         lastCapturedCampaign = saved;
         return saved;
     }

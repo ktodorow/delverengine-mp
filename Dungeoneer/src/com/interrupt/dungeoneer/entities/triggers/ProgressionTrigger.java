@@ -35,6 +35,7 @@ public class ProgressionTrigger extends Trigger {
 
 	@Override
 	public void doTriggerEvent(String value) {
+        if(Game.instance != null && Game.instance.level != null && Game.instance.level.nativeTriggerReplica) return;
 		ParticipantContext participant = getTriggeringParticipantContext();
 		if(participant == null) participant = LocalPlayerCompatibilityAdapter.fromGame();
 		PartyProgression progression = participant.getPartyProgression();
@@ -45,8 +46,9 @@ public class ProgressionTrigger extends Trigger {
 			if(progressionType == ProgressionType.ONCE) {
 				if (pv == null || pv.isEmpty()) {
 					if(checkProgressionValue(progression)) {
-						super.doTriggerEvent(value);
+						// Commit before downstream native chains can re-enter this ONCE gate.
 						updateProgressionValue(progression);
+						super.doTriggerEvent(value);
 					}
 					else {
 						triggerOnFail();

@@ -441,7 +441,10 @@ public class GameApplication extends Game {
         }
         else directConnectPeer.recordSharedFloorFingerprint(floorBuild.getFingerprint());
         if(host != null) {
-            host.setNativeFloorCapture(() -> NativeFloorSave.capture(GameManager.getGame().level));
+            host.setNativeFloorCapture(() -> {
+                host.publishPartyProgression(GameManager.getGame().progression);
+                return NativeFloorSave.capture(GameManager.getGame().level);
+            });
             host.adoptNativeTileRules(GameManager.getGame().level);
         }
         directConnectMovementController =
