@@ -174,6 +174,7 @@ public class Game {
 		if(itemManager == null) {
 			itemManager = new ItemManager();
 		}
+        if(GameApplication.isDirectConnectSession()) itemManager.setCampaignPeer(GameApplication.instance.getDirectConnectPeer());
 
 		// Load enemy data
 		MonsterManager mm = modManager.loadMonsterManager(gameData.monsterDataFiles);

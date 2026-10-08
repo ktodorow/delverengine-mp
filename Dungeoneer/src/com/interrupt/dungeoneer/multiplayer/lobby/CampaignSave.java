@@ -30,8 +30,9 @@ public final class CampaignSave {
      * 2: late Monster spawns and consumed floor MonsterSpawners, needed to rebuild the floor.
      * 3: Host Active Floor checkpoint in Delver's own level format (absent in format 2).
      * 4: Party Progression and Party Keys.
+     * 5: personal Slot knowledge and shared potion appearance/effect mapping.
      */
-    public static final int FORMAT = 4;
+    public static final int FORMAT = 5;
     public static final int MAX_CONSUMED_MONSTER_SPAWNERS = 4096;
     public static final int MAX_SPAWNER_KEY_BYTES = 512;
 
@@ -43,10 +44,19 @@ public final class CampaignSave {
         private final MovementEntityState movement;
         private final ParticipantProgress progress;
         private final boolean holdingOrb;
+        private final com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge knowledge;
 
         public ParticipantState(int campaignSlot, PartyMemberStatus party,
                 MovementEntityState movement, ParticipantProgress progress,
                 boolean holdingOrb) {
+            this(campaignSlot, party, movement, progress, holdingOrb,
+                    com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.empty());
+        }
+
+        public ParticipantState(int campaignSlot, PartyMemberStatus party,
+                MovementEntityState movement, ParticipantProgress progress, boolean holdingOrb,
+                com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge knowledge) {
+            if(knowledge == null) throw new IllegalArgumentException("Saved personal knowledge is required.");
             if(campaignSlot < 1 || campaignSlot > 4 || party == null
                     || party.getCampaignSlot() != campaignSlot) {
                 throw new IllegalArgumentException("Saved Participant does not match its Campaign Slot.");
@@ -63,6 +73,7 @@ public final class CampaignSave {
             this.movement = movement;
             this.progress = progress;
             this.holdingOrb = holdingOrb;
+            this.knowledge = knowledge;
         }
 
         public int getCampaignSlot() { return campaignSlot; }
@@ -70,6 +81,7 @@ public final class CampaignSave {
         public MovementEntityState getMovement() { return movement; }
         public ParticipantProgress getProgress() { return progress; }
         public boolean isHoldingOrb() { return holdingOrb; }
+        public com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge getPersonalKnowledge() { return knowledge; }
     }
 
     private final DirectConnectCompatibility compatibility;
@@ -91,6 +103,7 @@ public final class CampaignSave {
     private final List<NativeMonsterSpawn> monsterSpawns;
     private final List<String> consumedMonsterSpawners;
     private final byte[] nativeFloor;
+    private final com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping potionMapping;
     private final int partyKeys;
     private final long keyRevision;
     private final com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression;
@@ -167,6 +180,26 @@ public final class CampaignSave {
             List<String> consumedMonsterSpawners, byte[] nativeFloor,
             int partyKeys, long keyRevision,
             com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression) {
+        this(compatibility, campaignId, capacity, startingLives, outcome, floorId, floorSeed,
+                floorFingerprint, nativeWorldGeneration, slots, participants, physicalItems,
+                combat, doors, breakables, actorEffects, monsterSpawns, consumedMonsterSpawners,
+                nativeFloor, partyKeys, keyRevision, partyProgression,
+                com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.fromItems(physicalItems));
+    }
+
+    public CampaignSave(DirectConnectCompatibility compatibility, String campaignId,
+            int capacity, int startingLives, Outcome outcome, String floorId,
+            long floorSeed, SharedFloorFingerprint floorFingerprint,
+            long nativeWorldGeneration, List<CampaignSlot> slots,
+            List<ParticipantState> participants, List<PhysicalItemState> physicalItems,
+            CombatSnapshot combat, List<DoorSnapshot> doors,
+            List<BreakableSnapshot> breakables,
+            List<ActorEffectsSnapshot> actorEffects, List<NativeMonsterSpawn> monsterSpawns,
+            List<String> consumedMonsterSpawners, byte[] nativeFloor,
+            int partyKeys, long keyRevision,
+            com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression,
+            com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping potionMapping) {
+        if(potionMapping == null) throw new IllegalArgumentException("Saved potion mapping is required.");
         if(partyProgression == null) throw new IllegalArgumentException("Saved Party Progression is required.");
         if(partyKeys < 0 || partyKeys > 1000000 || keyRevision < 0
                 || keyRevision == 0 && partyKeys != 0) {
@@ -319,7 +352,10 @@ public final class CampaignSave {
         this.partyKeys = partyKeys;
         this.keyRevision = keyRevision;
         this.partyProgression = partyProgression;
+        this.potionMapping = potionMapping;
     }
+
+    public com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping getPotionMapping() { return potionMapping; }
 
     public DirectConnectCompatibility getCompatibility() { return compatibility; }
     public String getCampaignId() { return campaignId; }

@@ -64,6 +64,7 @@ import java.util.WeakHashMap;
 public final class DirectConnectItemController implements Player.ItemAuthorityListener, CombatWeaponResolver {
     private final DirectConnectPeer peer;
     private final DirectConnectHost host;
+    private final com.interrupt.dungeoneer.multiplayer.knowledge.NativeKnowledgeController knowledgeController;
     private final Map<String, Item> templates = new LinkedHashMap<String, Item>();
     private final Map<String, ItemModification> modifications = new LinkedHashMap<String, ItemModification>();
     private final Map<Long, Item> nativeItems = new LinkedHashMap<Long, Item>();
@@ -102,6 +103,17 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     public void setConsumableConsumer(ConsumableConsumer consumer) {
         consumableConsumer = consumer;
+    }
+
+    /** Native automap output seam; only remote markers authorized for this viewer. */
+    public List<MovementEntityState> getMapMarkers() {
+        return game == null ? java.util.Collections.emptyList() : knowledgeController.mapMarkers(game.level);
+    }
+
+    public boolean isLocalMapMarkerVisible() {
+        if(peer.getPartyStatus() == null || peer.getLocalMovementEntityId() == null) return true;
+        PartyMemberStatus local = peer.getPartyStatus().getMember((int)peer.getLocalMovementEntityId().getValue());
+        return local == null || local.getState() != PartyMemberState.SPECTATING;
     }
 
     /** Campaign Slot economy decisions that share this bridge's request identities. */
@@ -163,6 +175,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     public DirectConnectItemController(DirectConnectPeer peer) {
         this.peer = peer;
         host = peer instanceof DirectConnectHost ? (DirectConnectHost)peer : null;
+        knowledgeController = new com.interrupt.dungeoneer.multiplayer.knowledge.NativeKnowledgeController(peer);
     }
 
     public void prepare(Game current) {
@@ -242,6 +255,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             Game.ShowMessage(com.interrupt.managers.StringManager.get(feedback.localizationKey), 3, 1f);
         }
         applyStates();
+        knowledgeController.prepare(game);
         game.player.keys = peer.getPartyKeys();
         if(host == null) for(DoorSnapshot door : peer.getDoorSnapshots()) {
             Entity entity = objects.get(door.entityId);
@@ -278,6 +292,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     public void update(Game current) {
         if(game == null) return;
+        knowledgeController.update(game);
         reportEquipment();
         reportSpending();
         reportWield();
@@ -342,6 +357,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     private void attach(Game current) {
         game = current;
+        if(game.itemManager != null) game.itemManager.setCampaignPeer(peer);
         if(host != null && game.progression != null) {
             if(host.isResumedCampaign()) game.initializePartyProgression(host.getPartyProgression());
             // Same native tutorial-entry rule also applies at headless/session bridge boundary.
@@ -882,7 +898,14 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 // authority owns its in-flight lifetime. Inventory tombstone still removes it.
                 if(!item.nativePresentationReplica) item.isActive = false;
                 if(pendingConsumption.remove(state.entityId) != null) {
-                    if(item instanceof Potion) ((Potion)item).presentDrink(game.player);
+                    if(item instanceof Potion) {
+                        Potion potion = (Potion)item;
+                        com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge knowledge = peer.getPersonalKnowledge();
+                        boolean learned = knowledge != null
+                                && (knowledge.potionMask & (1 << potion.potionType.ordinal())) != 0
+                                && !game.player.discoveredPotions.contains(potion.potionType, true);
+                        potion.presentDrink(game.player, learned);
+                    }
                     else if(item instanceof Food) ((Food)item).presentEat(game.player);
                     else if(item instanceof Scroll) ((Scroll)item).presentRead(game.player, host == null);
                     pendingConsumptionAim.remove(state.entityId);
@@ -1284,7 +1307,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         return value;
     }
 
-    private static String templateKey(Item item) {
+    public static String templateKey(Item item) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest((item.getClass().getName()
                     + "\n" + item.name + "\n" + item.tex).getBytes(StandardCharsets.UTF_8));
@@ -1307,6 +1330,15 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 && a.velocityX == b.velocityX && a.velocityY == b.velocityY
                 && a.velocityZ == b.velocityZ && a.rotationX == b.rotationX
                 && a.rotationY == b.rotationY && a.rotationZ == b.rotationZ;
+    }
+
+    @Override public void synchronizeInventory(ParticipantId participant, Player player) {
+        player.inventory.clear();
+        for(PhysicalItemState state : peer.getPhysicalItems()) {
+            if(state.consumed || !participant.equals(state.owner) || !state.equipmentSlot.isEmpty()) continue;
+            Item item = nativeItems.get(state.entityId);
+            if(item != null) player.inventory.add(item);
+        }
     }
 
     @Override public void synchronizeEquipment(ParticipantId participant, Player player) {

@@ -3276,10 +3276,15 @@ public class Level {
 		if(e.isActive && e.isSolid) staticSpatialhash.AddEntity(e);
 	}
 
-	public void tick(float delta) {		
+	/** Multiplayer owns revelation per Campaign Slot, never per camera. */
+	public transient boolean personalMapManaged = false;
+
+	public void revealSeenTiles(Player player) { updateSeenTiles(player); }
+
+	public void tick(float delta) {
 		Player player = Game.instance.player;
 		
-		if(mapIsDirty || lastPlayerTileX != (int)player.x || lastPlayerTileY != (int)player.y) {
+		if(!personalMapManaged && (mapIsDirty || lastPlayerTileX != (int)player.x || lastPlayerTileY != (int)player.y)) {
 			updateSeenTiles(player);
 		}
 		

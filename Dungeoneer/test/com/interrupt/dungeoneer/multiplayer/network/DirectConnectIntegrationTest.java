@@ -78,6 +78,516 @@ public class DirectConnectIntegrationTest {
 
     private int campaignStoreCounter;
 
+    @Test public void threePeerKnowledgeStaysPrivateAndWarmReconnectKeepsOwnFacts() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("private-knowledge");
+        HostFixture fixture = host(compatibility, 3, "private-knowledge");
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient owner = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+        DirectConnectClient observer = null, returning = null;
+        try {
+            awaitPhase(owner, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue())); awaitPhase(owner, DirectConnectPhase.LOBBY);
+            observer = approveClient(fixture, compatibility, '3', "Observer", AvatarCatalog.HUMANOID_3);
+            fixture.host.startSession(); awaitPhase(owner, DirectConnectPhase.READY); awaitPhase(observer, DirectConnectPhase.READY);
+            String floor = fixture.host.getStatus().getFloorId();
+            java.util.BitSet bits = new java.util.BitSet(); bits.set(15);
+            com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge facts =
+                    new com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge(1, 16).learnMap(floor,
+                            new com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge(4, 4, bits));
+            ParticipantId slot = new ParticipantId("campaign-slot-2");
+            fixture.host.publishPersonalKnowledge(slot, facts);
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(owner.getPersonalKnowledge().revision < facts.revision && System.currentTimeMillis() < deadline) Thread.sleep(10);
+            assertEquals(16, owner.getPersonalKnowledge().potionMask);
+            assertTrue(owner.getPersonalKnowledge().map(floor, 4, 4).isExplored(3, 3));
+            fixture.host.publishPersonalKnowledge(slot, new com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge(1, 1));
+            fixture.host.publishPersonalKnowledge(slot, facts);
+            assertEquals(facts.revision, fixture.host.getPersonalKnowledge(slot).revision);
+            assertEquals(0, observer.getPersonalKnowledge().potionMask); assertTrue(observer.getPersonalKnowledge().maps.isEmpty());
+            assertEquals(0, fixture.host.getPersonalKnowledge().potionMask); assertTrue(fixture.host.getPersonalKnowledge().maps.isEmpty());
+            owner.close();
+            returning = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
+            awaitPhase(returning, DirectConnectPhase.READY);
+            assertEquals(facts.revision, returning.getPersonalKnowledge().revision);
+            assertEquals(16, returning.getPersonalKnowledge().potionMask);
+            assertTrue(returning.getPersonalKnowledge().map(floor, 4, 4).isExplored(3, 3));
+            assertEquals(0, observer.getPersonalKnowledge().revision);
+        }
+        finally { owner.close(); if(observer != null) observer.close(); if(returning != null) returning.close(); fixture.close(); }
+    }
+
+    @Test public void spectatorFollowKeepsPersonalMapAndHidesCameraMarker() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("spectator-map");
+        HostFixture fixture = host(compatibility, 2, "spectator-map");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.setStartingLives(1); fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            ParticipantId local = new ParticipantId("campaign-slot-1"), remote = new ParticipantId("campaign-slot-2");
+            fixture.host.setNativeParticipantPosition(local, 8.5f, 8.5f, .5f);
+            fixture.host.setNativeParticipantPosition(remote, 24.5f, 24.5f, .5f);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame(); game.level = knowledgeLevel(32, 32);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController hostItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            hostItems.prepare(game); hostItems.update(game);
+            String floor = fixture.host.getStatus().getFloorId();
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(!client.getPersonalKnowledge().maps.containsKey(floor) && System.currentTimeMillis() < deadline) Thread.sleep(10);
+            assertTrue(client.getPersonalKnowledge().map(floor, 32, 32).isExplored(24, 24));
+            fixture.host.applyNativeParticipantDamage("test", remote, 999, 24.5f, 24.5f, .5f);
+            deadline = System.currentTimeMillis() + 15000;
+            while(client.getPartyStatus().getMember(2).getState() != PartyMemberState.SPECTATING && System.currentTimeMillis() < deadline) Thread.sleep(10);
+            assertEquals(PartyMemberState.SPECTATING, client.getPartyStatus().getMember(2).getState());
+            com.interrupt.dungeoneer.game.Game followed = nativePartyGame(); followed.level = knowledgeLevel(32, 32);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client);
+            items.prepare(followed);
+            followed.player.x = 8.5f; followed.player.y = 8.5f;
+            followed.level.tick(0); items.update(followed);
+            assertFalse("Spectator native camera tick cannot reveal followed region", followed.level.getTile(8, 8).seen);
+            assertTrue("Followed living Participant marker remains private", items.getMapMarkers().isEmpty());
+            assertFalse("Native local arrow cannot expose followed remote position", items.isLocalMapMarkerVisible());
+            assertFalse(fixture.host.getPersonalKnowledge(remote).map(floor, 32, 32).isExplored(8, 8));
+        }
+        finally { if(client != null) client.close(); fixture.close(); com.interrupt.dungeoneer.game.Game.instance = previous; StringManager.localizedStrings = strings; }
+    }
+
+    @Test public void automapMarkersRequireViewersExploredTile() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("personal-markers");
+        HostFixture fixture = host(compatibility, 2, "personal-markers");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            ParticipantId local = new ParticipantId("campaign-slot-1"), remote = new ParticipantId("campaign-slot-2");
+            fixture.host.setNativeParticipantPosition(local, 8.5f, 8.5f, .5f);
+            fixture.host.setNativeParticipantPosition(remote, 24.5f, 24.5f, .5f);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame(); game.level = knowledgeLevel(32, 32);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            items.prepare(game); items.update(game);
+            assertTrue("Unexplored remote tile hides marker", items.getMapMarkers().isEmpty());
+            fixture.host.setNativeParticipantPosition(remote, 9.5f, 8.5f, .5f);
+            assertEquals("Known remote tile shows one marker; own body excluded", 1, items.getMapMarkers().size());
+            assertEquals(2L, items.getMapMarkers().get(0).getEntityId().getValue());
+            fixture.host.setNativeParticipantPosition(remote, 24.5f, 24.5f, .5f);
+            game.player.x = 24.5f; game.player.y = 24.5f;
+            assertTrue("Camera location cannot authorize unexplored marker", items.getMapMarkers().isEmpty());
+        }
+        finally { if(client != null) client.close(); fixture.close(); com.interrupt.dungeoneer.game.Game.instance = previous; StringManager.localizedStrings = strings; }
+    }
+
+    @Test public void futureNativePotionLootKeepsCampaignMappingAfterColdResume() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("potion-mapping");
+        HostFixture fixture = host(compatibility, 2, "potion-mapping");
+        DirectConnectHost resumed = null;
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame(); game.itemManager = potionCatalogue();
+            new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host).prepare(game);
+            com.badlogic.gdx.math.MathUtils.random.setSeed(10); com.interrupt.dungeoneer.game.Game.rand.setSeed(10);
+            Map<String, com.interrupt.dungeoneer.entities.items.Potion.PotionType> expected = potionRolls(game, 100);
+            assertEquals(7, expected.size());
+            fixture.host.persistCampaign(); client.close(); client = null; fixture.close();
+            resumed = DirectConnectHost.start(0, compatibility, fixture.roster, fixture.store);
+            MemoryReconnectTokens tokens = new MemoryReconnectTokens(); tokens.save("potion-mapping", fixture.roster.getSlot(2).getReconnectToken());
+            client = client(resumed.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2, 2, tokens, compatibility);
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            resumed.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game restored = nativePartyGame(); restored.itemManager = potionCatalogue();
+            new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(resumed).prepare(restored);
+            com.badlogic.gdx.math.MathUtils.random.setSeed(999); com.interrupt.dungeoneer.game.Game.rand.setSeed(999);
+            assertEquals("Future Host loot must use saved campaign appearance/effect mapping", expected, potionRolls(restored, 100));
+            com.interrupt.dungeoneer.game.Game remote = nativePartyGame(); remote.itemManager = potionCatalogue();
+            new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client).prepare(remote);
+            com.badlogic.gdx.math.MathUtils.random.setSeed(4321); com.interrupt.dungeoneer.game.Game.rand.setSeed(4321);
+            assertEquals("Returning peer uses same physical mapping with independent RNG history", expected, potionRolls(remote, 100));
+            assertEquals(0, client.getPersonalKnowledge().potionMask);
+        }
+        finally {
+            if(client != null) client.close(); if(resumed != null) resumed.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous; StringManager.localizedStrings = strings;
+            com.badlogic.gdx.math.MathUtils.random.setSeed(1); com.interrupt.dungeoneer.game.Game.rand.setSeed(1);
+        }
+    }
+
+    private static com.interrupt.managers.ItemManager potionCatalogue() {
+        com.interrupt.managers.ItemManager manager = new com.interrupt.managers.ItemManager();
+        manager.potions = new com.badlogic.gdx.utils.Array<>();
+        for(int i = 0; i < 7; i++) {
+            com.interrupt.dungeoneer.entities.items.Potion potion = new com.interrupt.dungeoneer.entities.items.Potion();
+            potion.name = "Appearance " + i; potion.tex = i; manager.potions.add(potion);
+        }
+        return manager;
+    }
+
+    private static Map<String, com.interrupt.dungeoneer.entities.items.Potion.PotionType> potionRolls(com.interrupt.dungeoneer.game.Game game, int count) {
+        com.interrupt.dungeoneer.game.Game.instance = game;
+        Map<String, com.interrupt.dungeoneer.entities.items.Potion.PotionType> result = new java.util.LinkedHashMap<>();
+        for(int i = 0; i < count; i++) {
+            com.interrupt.dungeoneer.entities.items.Potion potion = game.itemManager.GetRandomPotion();
+            result.put(potion.name, potion.potionType);
+        }
+        return result;
+    }
+
+    @Test public void separatedParticipantsExploreNativeTilesPersonally() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("personal-exploration");
+        HostFixture fixture = host(compatibility, 2, "personal-exploration");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<>();
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            ParticipantId local = new ParticipantId("campaign-slot-1"), remote = new ParticipantId("campaign-slot-2");
+            fixture.host.setNativeParticipantPosition(local, 8.5f, 8.5f, .5f);
+            fixture.host.setNativeParticipantPosition(remote, 24.5f, 24.5f, .5f);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            game.level = knowledgeLevel(32, 32);
+            for(int y = 0; y < 32; y++) game.level.tiles[10 + y * 32] = new com.interrupt.dungeoneer.tiles.SolidTile();
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            items.prepare(game); items.update(game);
+            String floor = fixture.host.getStatus().getFloorId();
+            assertTrue("Living Host discovers native visible tiles", fixture.host.getPersonalKnowledge(local).map(floor, 32, 32).isExplored(8, 8));
+            assertTrue("Native adjacent wall remains mapped", game.level.getTile(10, 8).seen);
+            assertFalse("Native wall blocks nearby unseen room", game.level.getTile(12, 8).seen);
+            assertTrue("Remote living Participant discovers own tiles", fixture.host.getPersonalKnowledge(remote).map(floor, 32, 32).isExplored(24, 24));
+            assertFalse("Host cannot inherit remote exploration", game.level.getTile(24, 24).seen);
+            assertFalse(fixture.host.getPersonalKnowledge(remote).map(floor, 32, 32).isExplored(8, 8));
+            fixture.host.applyNativeParticipantDamage("test", remote, 999, 24.5f, 24.5f, .5f);
+            fixture.host.setNativeParticipantPosition(remote, 4.5f, 24.5f, .5f);
+            game.player.x = 4.5f; game.player.y = 24.5f;
+            items.prepare(game); items.update(game);
+            assertFalse("Downed body or followed camera cannot explore", fixture.host.getPersonalKnowledge(remote).map(floor, 32, 32).isExplored(4, 24));
+        }
+        finally { if(client != null) client.close(); fixture.close(); com.interrupt.dungeoneer.game.Game.instance = previous; StringManager.localizedStrings = strings; }
+    }
+
+    @Test public void potionKnowledgeSurvivesColdSubsetSaveAndReturningSlot() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("personal-save");
+        HostFixture fixture = host(compatibility, 2, "personal-save");
+        DirectConnectClient client = null;
+        DirectConnectHost subset = null, resumed = null;
+        ParticipantId owner = new ParticipantId("campaign-slot-2");
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.entities.Player learned = new com.interrupt.dungeoneer.entities.Player();
+            learned.discoveredPotions.add(com.interrupt.dungeoneer.entities.items.Potion.PotionType.restore);
+            String floor = fixture.host.getStatus().getFloorId();
+            java.util.BitSet ownerBits = new java.util.BitSet(); ownerBits.set(15);
+            java.util.BitSet hostBits = new java.util.BitSet(); hostBits.set(0);
+            fixture.host.publishPersonalKnowledge(owner, fixture.host.getPersonalKnowledge(owner).learn(learned).learnMap(floor,
+                    new com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge(4, 4, ownerBits)));
+            fixture.host.publishPersonalKnowledge(new ParticipantId("campaign-slot-1"), fixture.host.getPersonalKnowledge().learnMap(floor,
+                    new com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge(4, 4, hostBits)));
+            fixture.host.persistCampaign(); client.close(); client = null; fixture.close();
+            subset = DirectConnectHost.start(0, compatibility, fixture.roster, fixture.store);
+            subset.startSession();
+            assertEquals("Cold resume keeps absent Slot's potion knowledge", 16, subset.getPersonalKnowledge(owner).potionMask);
+            assertEquals(0, subset.getPersonalKnowledge().potionMask);
+            assertTrue(subset.getPersonalKnowledge(owner).map(floor, 4, 4).isExplored(3, 3));
+            assertFalse(subset.getPersonalKnowledge().map(floor, 4, 4).isExplored(3, 3));
+            subset.persistCampaign(); subset.close(); subset = null;
+            resumed = DirectConnectHost.start(0, compatibility, fixture.roster, fixture.store);
+            MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+            tokens.save("personal-save", fixture.roster.getSlot(2).getReconnectToken());
+            client = client(resumed.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2, 2, tokens, compatibility);
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            resumed.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            assertEquals("Returning Slot gets personal baseline before READY", 16, client.getPersonalKnowledge().potionMask);
+            assertEquals(0, resumed.getPersonalKnowledge().potionMask);
+            assertTrue(client.getPersonalKnowledge().map(floor, 4, 4).isExplored(3, 3));
+            assertFalse(client.getPersonalKnowledge().map(floor, 4, 4).isExplored(0, 0));
+            assertTrue(resumed.getPersonalKnowledge().map(floor, 4, 4).isExplored(0, 0));
+        }
+        finally {
+            if(client != null) client.close(); if(subset != null) subset.close();
+            if(resumed != null) resumed.close(); fixture.close();
+        }
+    }
+
+    @Test public void remoteParticipantCanUseNativeIdentifyWithoutTeachingHost() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("personal-identify");
+        HostFixture fixture = host(compatibility, 2, "personal-identify");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        com.badlogic.gdx.Application previousApp = com.badlogic.gdx.Gdx.app;
+        StringManager.localizedStrings = new HashMap<>();
+        com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
+                (proxy, method, args) -> null);
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
+                    new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(fixture.host);
+            movement.update(game, new com.interrupt.dungeoneer.GameInput() {
+                @Override public boolean isJumpPressed() { return false; }
+            }, 0f);
+            DirectConnectCombatController combat = new DirectConnectCombatController(fixture.host, movement, false);
+            combat.prepare(game);
+            com.interrupt.dungeoneer.entities.items.Scroll scroll = new com.interrupt.dungeoneer.entities.items.Scroll();
+            scroll.spell = new com.interrupt.dungeoneer.entities.spells.Identify();
+            scroll.spell.doCastVfx = false; scroll.spell.castSound = "";
+            assertTrue("Native Identify must work for remote living Participant",
+                    combat.consumeNativeItem(new ParticipantId("campaign-slot-2"), scroll,
+                            new com.badlogic.gdx.math.Vector3(1, 0, 0)));
+            assertTrue("Remote identification must not teach Host", game.player.discoveredPotions.size == 0);
+            combat.dispose(); movement.dispose();
+        }
+        finally {
+            if(client != null) client.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            StringManager.localizedStrings = strings; com.badlogic.gdx.Gdx.app = previousApp;
+        }
+    }
+
+    @Test public void remoteIdentifyUpdatesOwningTooltipOnly() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("personal-identify");
+        HostFixture fixture = host(compatibility, 2, "personal-identify");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        com.badlogic.gdx.Application previousApp = com.badlogic.gdx.Gdx.app;
+        com.interrupt.managers.HUDManager oldHudManager = com.interrupt.dungeoneer.game.Game.hudManager;
+        com.interrupt.dungeoneer.ui.Hud oldHud = com.interrupt.dungeoneer.game.Game.hud;
+        com.interrupt.dungeoneer.game.Game.hudManager = new com.interrupt.managers.HUDManager();
+        com.interrupt.dungeoneer.game.Game.hudManager.quickSlots = new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() {} };
+        com.interrupt.dungeoneer.game.Game.hudManager.backpack = new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() {} };
+        com.interrupt.dungeoneer.game.Game.hud = new com.interrupt.dungeoneer.ui.Hud() { @Override public void refreshEquipLocations() {} };
+        StringManager.localizedStrings = new HashMap<>();
+        com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
+                (proxy, method, args) -> null);
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            com.interrupt.dungeoneer.entities.items.Potion potion = new com.interrupt.dungeoneer.entities.items.Potion();
+            potion.potionType = com.interrupt.dungeoneer.entities.items.Potion.PotionType.poison;
+            game.player.inventory.add(potion);
+            com.interrupt.dungeoneer.entities.items.Scroll scroll = new com.interrupt.dungeoneer.entities.items.Scroll();
+            scroll.spell = new com.interrupt.dungeoneer.entities.spells.Identify();
+            scroll.spell.doCastVfx = false; scroll.spell.castSound = "";
+            game.player.inventory.add(scroll);
+            com.interrupt.dungeoneer.entities.items.Armor worn = new com.interrupt.dungeoneer.entities.items.Armor();
+            worn.identified = false; game.player.inventory.add(worn);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            items.prepare(game); items.update(game);
+            com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
+                    new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(fixture.host);
+            movement.update(game, new com.interrupt.dungeoneer.GameInput() {
+                @Override public boolean isJumpPressed() { return false; }
+            }, 0f);
+            DirectConnectCombatController combat = new DirectConnectCombatController(fixture.host, movement, false);
+            combat.setWeaponResolver(items); combat.prepare(game);
+            com.interrupt.dungeoneer.entities.items.Scroll ownedScroll = null;
+            com.interrupt.dungeoneer.entities.items.Armor ownedArmor = null;
+            long scrollId = 0;
+            for(PhysicalItemState state : fixture.host.getPhysicalItems()) {
+                if(new ParticipantId("campaign-slot-2").equals(state.owner) && items.physicalEntity(state.entityId) instanceof com.interrupt.dungeoneer.entities.items.Armor) {
+                    ownedArmor = (com.interrupt.dungeoneer.entities.items.Armor)items.physicalEntity(state.entityId);
+                    fixture.host.getItemWorld().registerEquipment(state.entityId, "ARMOR", true);
+                }
+                if(new ParticipantId("campaign-slot-2").equals(state.owner) && items.physicalEntity(state.entityId) instanceof com.interrupt.dungeoneer.entities.items.Scroll) {
+                    ownedScroll = (com.interrupt.dungeoneer.entities.items.Scroll)items.physicalEntity(state.entityId); scrollId = state.entityId;
+                }
+            }
+            assertNotNull(ownedScroll);
+            assertNotNull(ownedArmor);
+            assertTrue("Native Identify must work for remote living Participant",
+                    combat.consumeNativeItem(new ParticipantId("campaign-slot-2"), ownedScroll,
+                            new com.badlogic.gdx.math.Vector3(1, 0, 0)));
+            assertFalse("Native Identify visits backpack, not worn armor", ownedArmor.identified);
+            assertTrue("Remote identification must not teach Host", game.player.discoveredPotions.size == 0);
+            com.interrupt.dungeoneer.game.Game clientGame = nativePartyGame();
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController clientItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client);
+            clientItems.rememberTemplate(potion); clientItems.rememberTemplate(scroll); clientItems.rememberTemplate(worn);
+            long deadline = System.currentTimeMillis() + 2000;
+            do { clientItems.prepare(clientGame); Thread.sleep(10); }
+            while(!clientGame.player.discoveredPotions.contains(potion.potionType, true) && System.currentTimeMillis() < deadline);
+            assertTrue("Owning native tooltip must learn carried potion", clientGame.player.discoveredPotions.contains(potion.potionType, true));
+            assertEquals(potion.GetIdentifiedName(), potion.GetInfoText());
+            boolean observed = false;
+            for(com.interrupt.dungeoneer.multiplayer.combat.NativeSpellPresentation effect : client.drainNativeSpellPresentations()) {
+                if(effect.sourceId.equals("participant:campaign-slot-2") && effect.itemId == scrollId) observed = true;
+            }
+            assertTrue("Accepted personal spell retains native caster/item presentation identity", observed);
+            com.interrupt.dungeoneer.game.Game.instance = game;
+            assertFalse(game.player.discoveredPotions.contains(potion.potionType, true));
+            combat.dispose(); movement.dispose();
+        }
+        finally {
+            if(client != null) client.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            com.interrupt.dungeoneer.game.Game.hudManager = oldHudManager; com.interrupt.dungeoneer.game.Game.hud = oldHud;
+            StringManager.localizedStrings = strings; com.badlogic.gdx.Gdx.app = previousApp;
+        }
+    }
+
+    @Test public void remoteFillMapRevealsCasterWithoutRevealingHost() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("personal-map");
+        HostFixture fixture = host(compatibility, 2, "personal-map");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        com.badlogic.gdx.Application previousApp = com.badlogic.gdx.Gdx.app;
+        com.interrupt.managers.HUDManager oldHudManager = com.interrupt.dungeoneer.game.Game.hudManager;
+        com.interrupt.dungeoneer.ui.Hud oldHud = com.interrupt.dungeoneer.game.Game.hud;
+        com.interrupt.dungeoneer.game.Game.hudManager = new com.interrupt.managers.HUDManager();
+        com.interrupt.dungeoneer.game.Game.hudManager.quickSlots = new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() {} };
+        com.interrupt.dungeoneer.game.Game.hudManager.backpack = new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() {} };
+        com.interrupt.dungeoneer.game.Game.hud = new com.interrupt.dungeoneer.ui.Hud() { @Override public void refreshEquipLocations() {} };
+        StringManager.localizedStrings = new HashMap<>();
+        com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
+                (proxy, method, args) -> null);
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            game.level = knowledgeLevel(4, 4);
+            com.interrupt.dungeoneer.entities.items.Potion potion = new com.interrupt.dungeoneer.entities.items.Potion();
+            potion.potionType = com.interrupt.dungeoneer.entities.items.Potion.PotionType.poison;
+            game.player.inventory.add(potion);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            items.prepare(game); items.update(game);
+            com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
+                    new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(fixture.host);
+            movement.update(game, new com.interrupt.dungeoneer.GameInput() {
+                @Override public boolean isJumpPressed() { return false; }
+            }, 0f);
+            DirectConnectCombatController combat = new DirectConnectCombatController(fixture.host, movement, false);
+            combat.setWeaponResolver(items); combat.prepare(game);
+            com.interrupt.dungeoneer.entities.items.Scroll scroll = new com.interrupt.dungeoneer.entities.items.Scroll();
+            scroll.spell = new com.interrupt.dungeoneer.entities.spells.FillMap();
+            scroll.spell.doCastVfx = false; scroll.spell.castSound = "";
+            assertTrue("Native Fill Map must work for remote living Participant",
+                    combat.consumeNativeItem(new ParticipantId("campaign-slot-2"), scroll,
+                            new com.badlogic.gdx.math.Vector3(1, 0, 0)));
+            assertFalse("Remote Fill Map must leave Host map unexplored", game.level.getTile(0, 0).seen);
+            com.interrupt.dungeoneer.game.Game clientGame = nativePartyGame();
+            clientGame.level = knowledgeLevel(4, 4);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController clientItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client);
+            clientItems.rememberTemplate(potion);
+            long deadline = System.currentTimeMillis() + 2000;
+            do { clientItems.prepare(clientGame); Thread.sleep(10); }
+            while(!clientGame.level.getTile(0, 0).seen && System.currentTimeMillis() < deadline);
+            assertTrue("Owning native map must show filled floor", clientGame.level.getTile(0, 0).seen);
+            assertTrue(clientGame.level.getTile(3, 3).seen);
+            com.interrupt.dungeoneer.game.Game.instance = game;
+            assertFalse(game.level.getTile(3, 3).seen);
+            combat.dispose(); movement.dispose();
+        }
+        finally {
+            if(client != null) client.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            com.interrupt.dungeoneer.game.Game.hudManager = oldHudManager; com.interrupt.dungeoneer.game.Game.hud = oldHud;
+            StringManager.localizedStrings = strings; com.badlogic.gdx.Gdx.app = previousApp;
+        }
+    }
+
+    private static com.interrupt.dungeoneer.game.Level knowledgeLevel(int width, int height) {
+        com.interrupt.dungeoneer.game.Level level = new com.interrupt.dungeoneer.game.Level(width, height);
+        for(int index = 0; index < level.tiles.length; index++) {
+            com.interrupt.dungeoneer.tiles.Tile tile = new com.interrupt.dungeoneer.tiles.Tile();
+            tile.floorHeight = 0; tile.ceilHeight = 3;
+            level.tiles[index] = tile;
+        }
+        return level;
+    }
+
+    @Test public void acceptedDrinkLearnsOnHostBeforeConsumerFeedback() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("personal-drink");
+        HostFixture fixture = host(compatibility, 2, "personal-drink");
+        DirectConnectClient client = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        com.badlogic.gdx.Application previousApp = com.badlogic.gdx.Gdx.app;
+        com.interrupt.managers.HUDManager oldHudManager = com.interrupt.dungeoneer.game.Game.hudManager;
+        com.interrupt.dungeoneer.ui.Hud oldHud = com.interrupt.dungeoneer.game.Game.hud;
+        com.interrupt.dungeoneer.game.Game.hudManager = new com.interrupt.managers.HUDManager();
+        com.interrupt.dungeoneer.game.Game.hudManager.quickSlots = new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() {} };
+        com.interrupt.dungeoneer.game.Game.hudManager.backpack = new com.interrupt.dungeoneer.ui.Hotbar() { @Override public void refresh() {} };
+        com.interrupt.dungeoneer.game.Game.hud = new com.interrupt.dungeoneer.ui.Hud() { @Override public void refreshEquipLocations() {} };
+        StringManager.localizedStrings = new HashMap<>();
+        com.badlogic.gdx.Gdx.app = (com.badlogic.gdx.Application)java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
+                (proxy, method, args) -> null);
+        try {
+            client = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            com.interrupt.dungeoneer.entities.items.Potion potion = new com.interrupt.dungeoneer.entities.items.Potion();
+            potion.potionType = com.interrupt.dungeoneer.entities.items.Potion.PotionType.restore;
+            game.player.inventory.add(potion);
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            items.prepare(game); items.update(game);
+            com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
+                    new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(fixture.host);
+            movement.update(game, new com.interrupt.dungeoneer.GameInput() {
+                @Override public boolean isJumpPressed() { return false; }
+            }, 0f);
+            DirectConnectCombatController combat = new DirectConnectCombatController(fixture.host, movement, false);
+            combat.setWeaponResolver(items); combat.prepare(game);
+            items.setConsumableConsumer(combat::consumeNativeItem);
+            PhysicalItemState owned = null;
+            ParticipantId consumer = new ParticipantId("campaign-slot-2");
+            for(PhysicalItemState state : fixture.host.getPhysicalItems()) if(consumer.equals(state.owner)) owned = state;
+            assertNotNull(owned);
+            com.interrupt.dungeoneer.game.Game.rand.setSeed(0);
+            client.submitItemAction(1, ItemAction.CONSUME, owned.entityId);
+            client.submitItemAction(1, ItemAction.CONSUME, owned.entityId);
+            long acceptedDeadline = System.currentTimeMillis() + 2000;
+            do { items.prepare(game); items.update(game); Thread.sleep(10); }
+            while(!fixture.host.getItemWorld().get(owned.entityId).consumed && System.currentTimeMillis() < acceptedDeadline);
+            assertTrue("Accepted native drink spent physical potion", fixture.host.getItemWorld().get(owned.entityId).consumed);
+            assertEquals("Native lucky drink learned durably on Host", 16, fixture.host.getPersonalKnowledge(consumer).potionMask);
+            assertEquals(0, fixture.host.getPersonalKnowledge().potionMask);
+            com.interrupt.dungeoneer.game.Game clientGame = nativePartyGame();
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController clientItems =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(client);
+            clientItems.rememberTemplate(potion);
+            long deadline = System.currentTimeMillis() + 2000;
+            do { clientItems.prepare(clientGame); Thread.sleep(10); }
+            while(!clientGame.player.discoveredPotions.contains(potion.potionType, true) && System.currentTimeMillis() < deadline);
+            assertTrue("Owning tooltip restores accepted drink knowledge before feedback", clientGame.player.discoveredPotions.contains(potion.potionType, true));
+            assertEquals(potion.GetIdentifiedName(), potion.GetInfoText());
+            com.interrupt.dungeoneer.game.Game.instance = game;
+            assertFalse(game.player.discoveredPotions.contains(potion.potionType, true));
+            combat.dispose(); movement.dispose();
+        }
+        finally {
+            if(client != null) client.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            com.interrupt.dungeoneer.game.Game.hudManager = oldHudManager; com.interrupt.dungeoneer.game.Game.hud = oldHud;
+            com.interrupt.dungeoneer.game.Game.rand.setSeed(1);
+            StringManager.localizedStrings = strings; com.badlogic.gdx.Gdx.app = previousApp;
+        }
+    }
+
     @Test public void fullFloorCombatRecoversThroughGateConditionsAndMalformedPeer() throws Exception {
         String previous = System.getProperty(DirectConnectNetworkSimulation.PROPERTY);
         System.setProperty(DirectConnectNetworkSimulation.PROPERTY, "gate");

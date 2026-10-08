@@ -33,6 +33,9 @@ import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
 import java.util.List;
 
 public interface DirectConnectPeer extends AutoCloseable {
+    default com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge getPersonalKnowledge() { return com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.empty(); }
+    default com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping getPotionMapping() { return com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.empty(); }
+    default void publishPotionMapping(com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping mapping) { }
     default List<ItemActionResult> drainItemActionResults() { return java.util.Collections.emptyList(); }
     DirectConnectStatus getStatus();
 

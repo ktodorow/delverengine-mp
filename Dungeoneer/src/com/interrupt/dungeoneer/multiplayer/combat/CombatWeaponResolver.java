@@ -7,6 +7,7 @@ import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
 /** Render-thread lookup; only Host-owned inventory identities can select weapon data. */
 public interface CombatWeaponResolver {
     default void synchronizeEquipment(ParticipantId participant, com.interrupt.dungeoneer.entities.Player player) { }
+    default void synchronizeInventory(ParticipantId participant, com.interrupt.dungeoneer.entities.Player player) { }
     long identity(Weapon weapon);
     default long physicalIdentity(Entity entity) { return 0L; }
     default Entity physicalEntity(long entityId) { return null; }

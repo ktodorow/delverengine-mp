@@ -94,6 +94,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Direct Connect client whose private Launcher Identity claims one persistent Campaign Slot. */
 public final class DirectConnectClient implements DirectConnectPeer {
+    private com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge personalKnowledge = com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.empty();
     private static final int MAX_PENDING_MOVEMENT_INPUTS =
             DirectConnectProtocol.MAX_INPUT_FRAMES * 4;
 
@@ -1206,6 +1207,25 @@ public final class DirectConnectClient implements DirectConnectPeer {
         return partyProgression;
     }
 
+    @Override public synchronized com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge getPersonalKnowledge() { return personalKnowledge; }
+
+    private com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping potionMapping = com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.empty();
+    @Override public synchronized com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping getPotionMapping() { return potionMapping; }
+    private synchronized void potionMapping(DirectConnectWire.PotionMappingMessage message) {
+        if(!sessionId.equals(message.sessionId) || !message.state.effects.entrySet().containsAll(potionMapping.effects.entrySet())) {
+            fail("Campaign potion mapping changed or belongs to another session."); return;
+        }
+        potionMapping = message.state;
+    }
+
+    private synchronized void personalKnowledge(DirectConnectWire.PersonalKnowledgeMessage message) {
+        if(!sessionId.equals(message.sessionId) || !message.participant.equals(new ParticipantId("campaign-slot-" + campaignSlot))
+                || message.generation != getNativeWorldGeneration()) {
+            fail("Personal knowledge belongs to another session, slot or floor."); return;
+        }
+        if(message.state.revision > personalKnowledge.revision) personalKnowledge = message.state;
+    }
+
     private synchronized void partyProgression(DirectConnectWire.PartyProgressionMessage message) {
         if(!sessionId.equals(message.sessionId)) { fail("Party Progression belongs to another session."); return; }
         if(message.state.revision > partyProgressionRevision) {
@@ -1455,6 +1475,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof DirectConnectWire.MonsterEffectsMessage && sessionId != null
                     && campaignSlot != 0) {
                 monsterEffects((DirectConnectWire.MonsterEffectsMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.PotionMappingMessage && sessionId != null && campaignSlot != 0) {
+                potionMapping((DirectConnectWire.PotionMappingMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.PersonalKnowledgeMessage && sessionId != null
+                    && campaignSlot != 0) {
+                personalKnowledge((DirectConnectWire.PersonalKnowledgeMessage)message);
             }
             else if(message instanceof DirectConnectWire.PartyProgressionMessage && sessionId != null
                     && campaignSlot != 0) {

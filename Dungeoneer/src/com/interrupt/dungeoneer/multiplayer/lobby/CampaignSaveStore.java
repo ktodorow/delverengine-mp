@@ -121,7 +121,7 @@ public final class CampaignSaveStore {
         CampaignSave loaded;
         try(DataInputStream input = new DataInputStream(
                 new BufferedInputStream(new FileInputStream(file)))) {
-            loaded = read(input);
+            loaded = read(input, expectedCompatibility);
             if(input.read() != -1) throw corrupt(file, "file has trailing data", null);
         }
         catch(EOFException ex) {
@@ -396,7 +396,7 @@ public final class CampaignSaveStore {
         finally { if(temporary != null && temporary.exists() && !temporary.delete()) temporary.deleteOnExit(); }
     }
 
-    private CampaignSave read(DataInputStream input) throws IOException {
+    private CampaignSave read(DataInputStream input, DirectConnectCompatibility expected) throws IOException {
         if(input.readInt() != MAGIC) throw new IllegalArgumentException("Campaign Save magic is invalid.");
         int format = input.readInt();
         if(format < 2) {
@@ -416,6 +416,13 @@ public final class CampaignSaveStore {
         }
         DirectConnectCompatibility compatibility = new DirectConnectCompatibility(
                 input.readUTF(), input.readUTF(), input.readUTF());
+        // Explicit predecessor migration; content identity remains checked by loadFile.
+        if(format < 5 && protocol <= 47
+                && compatibility.getBuildId().equals("mp-v108-prototype-campaign-library-51")
+                && expected.getBuildId().equals("mp-v108-prototype-campaign-library-52")) {
+            compatibility = new DirectConnectCompatibility(expected.getBuildId(),
+                    compatibility.getContentFormat(), compatibility.getContentSha256());
+        }
         String campaignId = input.readUTF();
         int capacity = input.readInt();
         int startingLives = input.readInt();
@@ -483,10 +490,33 @@ public final class CampaignSaveStore {
         com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot progression = format >= 4
                 ? com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.readFrom(input)
                 : com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.empty();
+        if(format >= 5) {
+            int knowledgeCount = boundedCount(input.readInt(), 1, 4, "personal knowledge");
+            if(knowledgeCount != participants.size()) throw new IllegalArgumentException("Missing Slot knowledge.");
+            java.util.Set<Integer> seen = new java.util.HashSet<>();
+            for(int index = 0; index < knowledgeCount; index++) {
+                int slot = input.readInt();
+                if(!seen.add(slot)) throw new IllegalArgumentException("Duplicate Slot knowledge.");
+                com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge knowledge =
+                        com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.readFrom(input);
+                boolean found = false;
+                for(int participantIndex = 0; participantIndex < participants.size(); participantIndex++) {
+                    CampaignSave.ParticipantState old = participants.get(participantIndex);
+                    if(old.getCampaignSlot() != slot) continue;
+                    participants.set(participantIndex, new CampaignSave.ParticipantState(slot, old.getParty(),
+                            old.getMovement(), old.getProgress(), old.isHoldingOrb(), knowledge));
+                    found = true; break;
+                }
+                if(!found) throw new IllegalArgumentException("Knowledge belongs to absent Slot.");
+            }
+        }
+        com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping mapping = format >= 5
+                ? com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.readFrom(input)
+                : com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.fromItems(items);
         return new CampaignSave(compatibility, campaignId, capacity, startingLives, outcome,
                 floorId, floorSeed, fingerprint, nativeWorldGeneration, slots, participants,
                 items, combat, doors, breakables, actorEffects, spawns, spawners, nativeFloor,
-                partyKeys, keyRevision, progression);
+                partyKeys, keyRevision, progression, mapping);
     }
 
     private void write(DataOutputStream output, CampaignSave campaign) throws IOException {
@@ -556,6 +586,12 @@ public final class CampaignSaveStore {
         output.writeInt(campaign.getPartyKeys());
         output.writeLong(campaign.getKeyRevision());
         campaign.getPartyProgression().writeTo(output);
+        output.writeInt(campaign.getParticipants().size());
+        for(CampaignSave.ParticipantState participant : campaign.getParticipants()) {
+            output.writeInt(participant.getCampaignSlot());
+            participant.getPersonalKnowledge().writeTo(output);
+        }
+        campaign.getPotionMapping().writeTo(output);
     }
 
     private static void writeParty(DataOutputStream out, PartyMemberStatus value) throws IOException {

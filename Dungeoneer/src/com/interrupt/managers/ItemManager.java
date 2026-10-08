@@ -295,11 +295,19 @@ public class ItemManager {
 		return item;
 	}
 
+    private transient com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer campaignPeer;
+    private transient com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping appliedPotionMapping;
+
+    public void setCampaignPeer(com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer peer) {
+        campaignPeer = peer; appliedPotionMapping = null;
+    }
+
 	public Potion GetRandomPotion() {
 		if(Game.instance.player == null || potions == null) return null;
 		
 		// fill this games shuffled potion list if it hasn't been done yet
 		if(Game.instance.player.shuffledPotions.size == 0 && potions.size > 0) {
+            appliedPotionMapping = null;
 			for(int i = 0; i < potions.size; i++) {
 				Potion p = (Potion)Copy(Potion.class, potions.get(i));
 				Game.instance.player.shuffledPotions.add(p);
@@ -316,6 +324,13 @@ public class ItemManager {
 		}
 		
 		if(Game.instance.player.shuffledPotions.size == 0) return null;
+        if(campaignPeer != null) {
+            com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping mapping = campaignPeer.getPotionMapping();
+            if(mapping != null && mapping != appliedPotionMapping) {
+                campaignPeer.publishPotionMapping(mapping.restore(Game.instance.player.shuffledPotions));
+                appliedPotionMapping = campaignPeer.getPotionMapping();
+            }
+        }
 		return (Potion)Copy(Potion.class, Game.instance.player.shuffledPotions.get(Game.rand.nextInt(Game.instance.player.shuffledPotions.size)));
 	}
 	

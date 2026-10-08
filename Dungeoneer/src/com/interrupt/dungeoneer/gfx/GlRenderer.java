@@ -683,7 +683,9 @@ public class GlRenderer {
 			uiBatch.draw(miniMap, camera2D.viewportWidth / 2f - mapSize * 1.05f, camera2D.viewportHeight / 2f - mapSize - mapSize * 0.05f, mapSize, mapSize);
 
 			uiBatch.setColor(1f,1f,1f,0.4f);
-			uiBatch.draw(itemTextures.getSprite(62),
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController mapItems =
+                    GameApplication.instance == null ? null : GameApplication.instance.getDirectConnectItemController();
+			if(mapItems == null || mapItems.isLocalMapMarkerVisible()) uiBatch.draw(itemTextures.getSprite(62),
 					markerX,
 					markerY,
 					mapSize / 4f,
@@ -693,6 +695,17 @@ public class GlRenderer {
 					0.75f,
 					0.75f,
 					game.player.rot * RADIAN_UNIT + 180f);
+
+            if(mapItems != null) {
+                uiBatch.setColor(0.6f, 0.85f, 1f, 0.75f);
+                for(com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState marker : mapItems.getMapMarkers()) {
+                    float dx = marker.getX() - game.player.x, dy = marker.getY() - game.player.y;
+                    if(Math.abs(dx) >= 10f || Math.abs(dy) >= 10f) continue;
+                    uiBatch.draw(itemTextures.getSprite(62), markerX + dx * mapSize / 20f,
+                            markerY - dy * mapSize / 20f, mapSize / 4f, mapSize / 4f,
+                            mapSize / 2f, mapSize / 2f, 0.75f, 0.75f, marker.getRotation() * RADIAN_UNIT + 180f);
+                }
+            }
 
 			uiBatch.end();
 		}

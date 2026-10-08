@@ -56,6 +56,24 @@ public class Potion extends Item {
 
     /** Inventory feedback and knowledge belong only to the consuming Participant. */
     public void presentDrink(Player player) {
+        presentDrink(player, false, true);
+    }
+
+    /** Multiplayer feedback uses the accepted Host result instead of another random roll. */
+    public void presentDrink(Player player, boolean learned) {
+        presentDrink(player, learned, false);
+    }
+
+    /** Original native chance; Host invokes once for an accepted physical consume. */
+    public boolean discoverOnDrink(Player player) {
+        if(Game.rand.nextFloat() > 0.5f && !player.discoveredPotions.contains(potionType, true)) {
+            player.discoveredPotions.add(potionType);
+            return true;
+        }
+        return false;
+    }
+
+    private void presentDrink(Player player, boolean learned, boolean roll) {
         player.history.drankPotion(this);
         Audio.playSound("cons_drink.mp3", 0.5f);
         String displayText = "";
@@ -69,8 +87,8 @@ public class Potion extends Item {
 		Game.RefreshUI();
 
 		// maybe add to discovered list
-		if(Game.rand.nextFloat() > 0.5f && !player.discoveredPotions.contains(potionType, true)) {
-			player.discoveredPotions.add(potionType);
+		if(roll ? discoverOnDrink(player) : learned) {
+			if(!player.discoveredPotions.contains(potionType, true)) player.discoveredPotions.add(potionType);
 			player.history.identified(this);
 			Game.ShowMessage(displayText + "\n" + MessageFormat.format(StringManager.get("items.Potion.discoverDisplayText"), GetIdentifiedName()), 1.5f, 1f);
 		}

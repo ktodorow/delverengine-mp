@@ -121,6 +121,13 @@ final class DirectConnectWire {
     private static final int NATIVE_DECAL = 53;
     private static final int TRIGGER_PRESENTATION = 54;
     private static final int MOVER_STATE = 55;
+    private static final int PERSONAL_KNOWLEDGE = 58;
+    static final int PERSONAL_KNOWLEDGE_PART = 59;
+    private static final int POTION_MAPPING = 60;
+    static final int POTION_MAPPING_PART = 61;
+    private static final int MAX_MAPPING_MESSAGE_BYTES = com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.MAX_BYTES + 128;
+    private static final int MAX_KNOWLEDGE_MESSAGE_BYTES =
+            com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.MAX_BYTES + 256;
     private static final int PARTY_PROGRESSION = 56;
     static final int PARTY_PROGRESSION_PART = 57;
     private static final int MAX_PARTY_MESSAGE_BYTES =
@@ -623,6 +630,26 @@ final class DirectConnectWire {
                 writeString(output, effect.shader, 32, "status shader");
                 output.writeBoolean(effect.particles);
             }
+        }
+        else if(message instanceof PotionMappingMessage) {
+            PotionMappingMessage delivery = (PotionMappingMessage)message;
+            output.writeByte(POTION_MAPPING);
+            writeString(output, delivery.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            try { delivery.state.writeTo(new java.io.DataOutputStream(bytes)); }
+            catch(java.io.IOException impossible) { throw new ProtocolException("Cannot encode potion mapping.", impossible); }
+            output.writeInt(bytes.size()); output.writeBytes(bytes.toByteArray());
+        }
+        else if(message instanceof PersonalKnowledgeMessage) {
+            PersonalKnowledgeMessage delivery = (PersonalKnowledgeMessage)message;
+            output.writeByte(PERSONAL_KNOWLEDGE);
+            writeString(output, delivery.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            writeString(output, delivery.participant.getValue(), 64, "knowledge owner");
+            output.writeLong(delivery.generation);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            try { delivery.state.writeTo(new java.io.DataOutputStream(bytes)); }
+            catch(java.io.IOException impossible) { throw new ProtocolException("Cannot encode personal knowledge.", impossible); }
+            output.writeInt(bytes.size()); output.writeBytes(bytes.toByteArray());
         }
         else if(message instanceof PartyProgressionMessage) {
             PartyProgressionMessage delivery = (PartyProgressionMessage)message;
@@ -1198,6 +1225,39 @@ final class DirectConnectWire {
                 }
                 catch(IllegalArgumentException invalid) { throw new ProtocolException("Invalid native effects.", invalid); }
                 break;
+            case POTION_MAPPING: {
+                String mappingSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 4, "potion mapping length");
+                int size = input.readInt();
+                if(size < 0 || size > com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.MAX_BYTES) throw new ProtocolException("Potion mapping outside bounds.");
+                requireReadable(input, size, "potion mapping");
+                byte[] payload = new byte[size]; input.readBytes(payload);
+                java.io.DataInputStream stream = new java.io.DataInputStream(new java.io.ByteArrayInputStream(payload));
+                try {
+                    message = new PotionMappingMessage(mappingSession, com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.readFrom(stream));
+                    if(stream.available() != 0) throw new ProtocolException("Trailing potion mapping.");
+                }
+                catch(java.io.IOException | IllegalArgumentException invalid) { throw new ProtocolException("Invalid potion mapping.", invalid); }
+                break;
+            }
+            case PERSONAL_KNOWLEDGE: {
+                String knowledgeSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                ParticipantId owner = new ParticipantId(readString(input, 64, "knowledge owner"));
+                requireReadable(input, 12, "personal knowledge header");
+                long generation = input.readLong(); int size = input.readInt();
+                if(size < 0 || size > com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.MAX_BYTES)
+                    throw new ProtocolException("Personal knowledge bytes outside bounds.");
+                requireReadable(input, size, "personal knowledge");
+                byte[] payload = new byte[size]; input.readBytes(payload);
+                java.io.DataInputStream stream = new java.io.DataInputStream(new java.io.ByteArrayInputStream(payload));
+                try {
+                    message = new PersonalKnowledgeMessage(knowledgeSession, owner, generation,
+                            com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.readFrom(stream));
+                    if(stream.available() != 0) throw new ProtocolException("Trailing personal knowledge.");
+                }
+                catch(java.io.IOException | IllegalArgumentException invalid) { throw new ProtocolException("Invalid personal knowledge.", invalid); }
+                break;
+            }
             case PARTY_PROGRESSION: {
                 String partySession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
                 requireReadable(input, 4, "Party Progression length");
@@ -2700,6 +2760,27 @@ final class DirectConnectWire {
         }
     }
 
+    static final class PotionMappingMessage implements Message {
+        final String sessionId;
+        final com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping state;
+        PotionMappingMessage(String sessionId, com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping state) {
+            if(sessionId == null || state == null) throw new IllegalArgumentException("Missing potion mapping.");
+            this.sessionId = sessionId; this.state = state;
+        }
+    }
+
+    static final class PersonalKnowledgeMessage implements Message {
+        final String sessionId;
+        final ParticipantId participant;
+        final long generation;
+        final com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge state;
+        PersonalKnowledgeMessage(String sessionId, ParticipantId participant, long generation, com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge state) {
+            if(sessionId == null || participant == null || generation < 1 || state == null)
+                throw new IllegalArgumentException("Missing personal knowledge identity.");
+            this.sessionId = sessionId; this.participant = participant; this.generation = generation; this.state = state;
+        }
+    }
+
     static final class PartyProgressionMessage implements Message {
         final String sessionId;
         final com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot state;
@@ -2851,7 +2932,7 @@ final class DirectConnectWire {
             int start = input.readerIndex();
             int kind = input.readableBytes() >= 5 && input.getInt(start) == DirectConnectProtocol.MAGIC
                     ? input.getUnsignedByte(start + 4) : -1;
-            if(kind != COMBAT_STATE_PART && kind != PARTY_PROGRESSION_PART) {
+            if(kind != COMBAT_STATE_PART && kind != PARTY_PROGRESSION_PART && kind != PERSONAL_KNOWLEDGE_PART && kind != POTION_MAPPING_PART) {
                 if(snapshotBytes != null) throw new ProtocolException("Interrupted snapshot.");
                 output.add(DirectConnectWire.decode(input));
                 return;
@@ -2859,7 +2940,9 @@ final class DirectConnectWire {
             requireReadable(input, COMBAT_PART_HEADER_BYTES, "snapshot fragment header");
             input.skipBytes(5);
             int total = input.readInt(), offset = input.readInt(), size = input.readableBytes();
-            int bound = kind == COMBAT_STATE_PART ? DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES : MAX_PARTY_MESSAGE_BYTES;
+            int bound = kind == COMBAT_STATE_PART ? DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES
+                    : kind == PERSONAL_KNOWLEDGE_PART ? MAX_KNOWLEDGE_MESSAGE_BYTES
+                    : kind == POTION_MAPPING_PART ? MAX_MAPPING_MESSAGE_BYTES : MAX_PARTY_MESSAGE_BYTES;
             if(total <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES || total > bound
                     || offset < 0 || offset >= total
                     || size != Math.min(COMBAT_PART_BYTES, total - offset)
@@ -2868,7 +2951,9 @@ final class DirectConnectWire {
                 throw new ProtocolException("Malformed or out-of-order snapshot fragment.");
             }
             if(snapshotBytes == null) {
-                int expected = kind == COMBAT_STATE_PART ? COMBAT_STATE : PARTY_PROGRESSION;
+                int expected = kind == COMBAT_STATE_PART ? COMBAT_STATE
+                        : kind == PERSONAL_KNOWLEDGE_PART ? PERSONAL_KNOWLEDGE
+                        : kind == POTION_MAPPING_PART ? POTION_MAPPING : PARTY_PROGRESSION;
                 if(size < 5 || input.getInt(input.readerIndex()) != DirectConnectProtocol.MAGIC
                         || input.getUnsignedByte(input.readerIndex() + 4) != expected) {
                     throw new ProtocolException("Fragment does not contain its declared snapshot kind.");
@@ -2903,9 +2988,13 @@ final class DirectConnectWire {
                     return;
                 }
                 int fragmentType = message instanceof CombatStateMessage ? COMBAT_STATE_PART
-                        : message instanceof PartyProgressionMessage ? PARTY_PROGRESSION_PART : -1;
+                        : message instanceof PartyProgressionMessage ? PARTY_PROGRESSION_PART
+                        : message instanceof PersonalKnowledgeMessage ? PERSONAL_KNOWLEDGE_PART
+                        : message instanceof PotionMappingMessage ? POTION_MAPPING_PART : -1;
                 int bound = fragmentType == COMBAT_STATE_PART
-                        ? DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES : MAX_PARTY_MESSAGE_BYTES;
+                        ? DirectConnectProtocol.MAX_COMBAT_SNAPSHOT_BYTES
+                        : fragmentType == PERSONAL_KNOWLEDGE_PART ? MAX_KNOWLEDGE_MESSAGE_BYTES
+                        : fragmentType == POTION_MAPPING_PART ? MAX_MAPPING_MESSAGE_BYTES : MAX_PARTY_MESSAGE_BYTES;
                 if(fragmentType < 0 || total > bound) {
                     throw new ProtocolException("TCP frame exceeded protocol size bound.");
                 }

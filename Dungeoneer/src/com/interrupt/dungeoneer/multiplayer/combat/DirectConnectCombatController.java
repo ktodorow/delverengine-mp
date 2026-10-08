@@ -1,4 +1,5 @@
 package com.interrupt.dungeoneer.multiplayer.combat;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 
 import com.badlogic.gdx.graphics.Color;
 import com.interrupt.dungeoneer.Audio;
@@ -240,20 +241,60 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         com.interrupt.dungeoneer.entities.Actor target = participant.equals(localParticipantId())
                 ? attachedPlayer : remoteAvatar(AuthoritativeCombatEncounter.participantTargetId(participant));
         if(target == null) return false;
-        if(item instanceof com.interrupt.dungeoneer.entities.items.Potion)
-            ((com.interrupt.dungeoneer.entities.items.Potion)item).applyNativeEffect(target);
+        if(item instanceof com.interrupt.dungeoneer.entities.items.Potion) {
+            com.interrupt.dungeoneer.entities.items.Potion potion = (com.interrupt.dungeoneer.entities.items.Potion)item;
+            potion.applyNativeEffect(target);
+            Player owner = authoritativePlayer(participant);
+            DirectConnectHost host = (DirectConnectHost)peer;
+            host.getPersonalKnowledge(participant).applyTo(owner);
+            if(potion.discoverOnDrink(owner))
+                host.publishPersonalKnowledge(participant, host.getPersonalKnowledge(participant).learn(owner));
+        }
         else if(item instanceof com.interrupt.dungeoneer.entities.items.Food)
             ((com.interrupt.dungeoneer.entities.items.Food)item).applyNativeEffect(target);
         else if(item instanceof com.interrupt.dungeoneer.entities.items.Scroll) {
             if(direction == null) return false;
             com.interrupt.dungeoneer.entities.items.Scroll scroll =
                     (com.interrupt.dungeoneer.entities.items.Scroll)item;
+            if(scroll.spell instanceof com.interrupt.dungeoneer.entities.spells.Identify
+                    || scroll.spell instanceof com.interrupt.dungeoneer.entities.spells.FillMap) {
+                DirectConnectHost host = (DirectConnectHost)peer;
+                Player owner = target instanceof Player ? (Player)target : authoritativePlayer(participant);
+                owner.x = target.x; owner.y = target.y; owner.z = target.z;
+                if(target instanceof RemoteAvatar) owner.multiplayerDamageSource = participant.getValue();
+                if(target instanceof RemoteAvatar && weaponResolver != null) weaponResolver.synchronizeInventory(participant, owner);
+                host.getPersonalKnowledge(participant).applyTo(owner);
+                com.interrupt.dungeoneer.game.Level level = attachedLevel;
+                com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge visible =
+                        com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge.capture(level);
+                com.badlogic.gdx.utils.Array<com.badlogic.gdx.math.Vector2> dirty = new com.badlogic.gdx.utils.Array<>(level.dirtyMapTiles);
+                String floor = peer.getStatus().getFloorId();
+                long previousSpellItemId = pendingNativeSpellItemId;
+                pendingNativeSpellItemId = weaponResolver == null ? 0L : weaponResolver.physicalIdentity(item);
+                try {
+                    host.getPersonalKnowledge(participant).map(floor, level.width, level.height).applyTo(level, false);
+                    scroll.applyNativeEffect(owner, direction);
+                    com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge learned =
+                            host.getPersonalKnowledge(participant).learn(owner);
+                    if(scroll.spell instanceof com.interrupt.dungeoneer.entities.spells.FillMap)
+                        learned = learned.learnMap(floor, com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge.capture(level));
+                    host.publishPersonalKnowledge(participant, learned);
+                }
+                finally {
+                    pendingNativeSpellItemId = previousSpellItemId;
+                    visible.applyTo(level, false);
+                    level.dirtyMapTiles.clear(); level.dirtyMapTiles.addAll(dirty);
+                }
+                return true;
+            }
             if(target instanceof RemoteAvatar && isPersonalPlayerSpell(scroll.spell)) return false;
             float previousX = target.x, previousY = target.y, previousZ = target.z;
             long previousSpellItemId = pendingNativeSpellItemId;
             pendingNativeSpellItemId = weaponResolver == null ? 0L
                     : weaponResolver.physicalIdentity(item);
-            try { scroll.applyNativeEffect(target, direction); }
+            try {
+                scroll.applyNativeEffect(target, direction);
+            }
             finally { pendingNativeSpellItemId = previousSpellItemId; }
             if(target.x != previousX || target.y != previousY || target.z != previousZ) {
                 nativeAuthority.setNativeParticipantPosition(participant,

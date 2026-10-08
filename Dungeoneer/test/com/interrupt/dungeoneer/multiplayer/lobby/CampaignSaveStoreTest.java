@@ -40,6 +40,31 @@ import static org.junit.Assert.fail;
 public class CampaignSaveStoreTest {
     @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
+    @Test public void previousBuildMigratesWithoutInventingPersonalKnowledge() throws Exception {
+        File root = temporaryFolder.newFolder("knowledge-migration");
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        CampaignSave original = save("friends", compatibility("mp-v108-prototype-campaign-library-51"));
+        store.save(original);
+        File file = new File(new File(root, "friends"), "campaign.save");
+        try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
+            legacy.seek(4); legacy.writeInt(4); legacy.writeInt(47);
+            // Format 5 adds count, two empty Slot records, and empty potion mapping.
+            legacy.setLength(legacy.length() - 48);
+        }
+        byte[] before = Files.readAllBytes(file.toPath());
+        DirectConnectCompatibility next = compatibility("mp-v108-prototype-campaign-library-52");
+        CampaignSave migrated = store.load("friends", next);
+        assertEquals(next.getBuildId(), migrated.getCompatibility().getBuildId());
+        for(CampaignSave.ParticipantState participant : migrated.getParticipants()) {
+            assertEquals(0, participant.getPersonalKnowledge().potionMask);
+            assertTrue(participant.getPersonalKnowledge().maps.isEmpty());
+        }
+        assertEquals(41, migrated.getParticipant(2).getProgress().gold);
+        assertTrue(Arrays.equals(before, Files.readAllBytes(new File(file.getParentFile(),
+                "campaign.save.before-format-" + CampaignSave.FORMAT).toPath())));
+        assertEquals(next.getBuildId(), store.load("friends", next).getCompatibility().getBuildId());
+    }
+
     @Test public void roundTripKeepsCampaignIdentityCharacterFloorAndItemState() throws Exception {
         File root = temporaryFolder.newFolder("campaigns");
         CampaignSaveStore store = new CampaignSaveStore(root);
@@ -87,7 +112,7 @@ public class CampaignSaveStoreTest {
         File legacy = new File(new File(root, "legacy"), "campaign.save");
         try(RandomAccessFile file = new RandomAccessFile(legacy, "rw")) {
             file.seek(4L); file.writeInt(2);
-            file.setLength(file.length() - 51L);
+            file.setLength(file.length() - 99L);
         }
         CampaignSave loaded = store.load("legacy", compatibility);
         assertFalse(loaded.hasNativeFloor());
@@ -166,8 +191,8 @@ public class CampaignSaveStoreTest {
         File file = new File(new File(root, "friends"), "campaign.save");
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
             legacy.seek(4); legacy.writeInt(3);
-            // Format 4 appends 12 key bytes and 38 bytes for empty shared facts.
-            legacy.setLength(legacy.length() - 50);
+            // Formats 4/5 append shared facts plus two empty personal records/mapping.
+            legacy.setLength(legacy.length() - 98);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         CampaignSave migrated = store.load("friends", original.getCompatibility());
@@ -186,7 +211,7 @@ public class CampaignSaveStoreTest {
         store.save(original);
         File file = new File(new File(root, "friends"), "campaign.save");
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
-            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 51);
+            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 99);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         store.load("friends", original.getCompatibility());
@@ -235,7 +260,7 @@ public class CampaignSaveStoreTest {
         new CampaignSaveStore(root).save(original);
         File file = new File(new File(root, "friends"), "campaign.save");
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
-            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 51);
+            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 99);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         CampaignSaveStore failing = new CampaignSaveStore(root, (source, target) -> {

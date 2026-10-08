@@ -53,6 +53,103 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class DirectConnectWireTest {
+    @Test public void unversionedPersonalFactsAreRejectedBeforeDelivery() throws Exception {
+        ByteBuf bytes = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.PersonalKnowledgeMessage("s", new ParticipantId("campaign-slot-2"), 1,
+                        new com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge(1, 1)));
+        // Empty floor collection leaves a 16-byte personal payload at end of envelope.
+        bytes.setLong(bytes.writerIndex() - 16, 0L);
+        try { DirectConnectWire.decodeDatagram(bytes); fail("Unversioned personal facts accepted"); }
+        catch(DirectConnectWire.ProtocolException expected) { }
+        finally { bytes.release(); }
+    }
+
+    @Test public void personalFloorMapUsesBoundedFramesAndArrivesAtomically() throws Exception {
+        java.util.BitSet explored = new java.util.BitSet(); explored.set(0, 128 * 128);
+        com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge expected =
+                com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.empty().learnMap("floor",
+                        new com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge(128, 128, explored));
+        EmbeddedChannel outbound = new EmbeddedChannel(), inbound = new EmbeddedChannel();
+        DirectConnectWire.configureTcp(outbound.pipeline()); DirectConnectWire.configureTcp(inbound.pipeline());
+        try {
+            outbound.writeOutbound(new DirectConnectWire.PersonalKnowledgeMessage("session", new ParticipantId("campaign-slot-2"), 1, expected));
+            ByteBuf frames = Unpooled.buffer(), part;
+            while((part = outbound.readOutbound()) != null) { frames.writeBytes(part); part.release(); }
+            int count = 0;
+            try {
+                while(frames.isReadable()) {
+                    int size = frames.getInt(frames.readerIndex());
+                    assertTrue(size <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES);
+                    inbound.writeInbound(frames.readRetainedSlice(size + 4)); count++;
+                    if(frames.isReadable()) assertNull("Partial personal map must remain invisible", inbound.readInbound());
+                }
+            }
+            finally { frames.release(); }
+            assertTrue(count > 1);
+            DirectConnectWire.PersonalKnowledgeMessage result = inbound.readInbound();
+            assertEquals(expected.maps, result.state.maps);
+            assertEquals("campaign-slot-2", result.participant.getValue());
+            assertNull(inbound.readInbound());
+        }
+        finally { outbound.finishAndReleaseAll(); inbound.finishAndReleaseAll(); }
+    }
+
+    @Test public void malformedPersonalPayloadsRejectCountsBitsDimensionsAndTrailingBytes() throws Exception {
+        ByteBuf valid = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.PersonalKnowledgeMessage("s", new ParticipantId("campaign-slot-2"), 1,
+                        new com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge(1, 1)));
+        try {
+            int payload = valid.writerIndex() - 16;
+            ByteBuf revision = valid.copy(); revision.setLong(payload, -1); rejectPartyDatagram(revision);
+            ByteBuf mask = valid.copy(); mask.setInt(payload + 8, 128); rejectPartyDatagram(mask);
+            ByteBuf count = valid.copy(); count.setInt(payload + 12, 65); rejectPartyDatagram(count);
+            ByteBuf size = valid.copy(); size.setInt(payload - 4,
+                    com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.MAX_BYTES + 1); rejectPartyDatagram(size);
+            ByteBuf trailing = valid.copy(); trailing.writeByte(0); rejectPartyDatagram(trailing);
+        }
+        finally { valid.release(); }
+        java.util.BitSet explored = new java.util.BitSet(); explored.set(0);
+        ByteBuf map = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.PersonalKnowledgeMessage("s", new ParticipantId("campaign-slot-2"), 1,
+                        com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.empty().learnMap("floor",
+                                new com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge(4, 4, explored))));
+        try {
+            int dimensions = map.writerIndex() - 13;
+            ByteBuf width = map.copy(); width.setInt(dimensions, 513); rejectPartyDatagram(width);
+            ByteBuf length = map.copy(); length.setInt(dimensions + 8, 3); rejectPartyDatagram(length);
+            ByteBuf outside = map.copy(); outside.setInt(dimensions, 1); outside.setInt(dimensions + 4, 1);
+            outside.setByte(outside.writerIndex() - 1, 128); rejectPartyDatagram(outside);
+        }
+        finally { map.release(); }
+    }
+
+    @Test public void malformedKnowledgeFragmentsNeverPublishPartialState() {
+        for(int kind : new int[]{DirectConnectWire.PERSONAL_KNOWLEDGE_PART, DirectConnectWire.POTION_MAPPING_PART}) {
+            assertBadFragments(knowledgeFragment(kind, 3000000, 0));
+            assertBadFragments(knowledgeFragment(kind, 2048, 1));
+            assertBadFragments(knowledgeFragment(kind, 2048, 0), knowledgeFragment(kind, 2048, 0));
+            assertBadFragments(knowledgeFragment(kind, 2048, 0), knowledgeFragment(kind, 2048, 1012));
+            ByteBuf unrelated = knowledgeFragment(kind, 2048, 0); unrelated.setByte(21, 1);
+            assertBadFragments(unrelated);
+            assertBadFragments(knowledgeFragment(kind, 2048, 0), partyFragment(2048, 1011, 1011));
+        }
+    }
+
+    @Test public void disconnectDiscardsIncompletePersonalMap() {
+        EmbeddedChannel channel = new EmbeddedChannel(); DirectConnectWire.configureTcp(channel.pipeline());
+        try {
+            channel.writeInbound(knowledgeFragment(DirectConnectWire.PERSONAL_KNOWLEDGE_PART, 2048, 0));
+            assertNull(channel.readInbound()); channel.finish(); assertNull(channel.readInbound());
+        }
+        finally { channel.finishAndReleaseAll(); }
+    }
+
+    private ByteBuf knowledgeFragment(int kind, int total, int offset) {
+        ByteBuf bytes = fragment(total, offset, 1011);
+        bytes.setByte(8, kind); bytes.setByte(21, kind == DirectConnectWire.PERSONAL_KNOWLEDGE_PART ? 58 : 60);
+        return bytes;
+    }
+
     @Test public void completePartyHistoryUsesBoundedFramesWithoutPublishingPartialFacts() throws Exception {
         com.interrupt.dungeoneer.game.Progression nativeState = new com.interrupt.dungeoneer.game.Progression();
         for(int i = 0; i < 100; i++) nativeState.progressionTriggers.put("quest-" + i,

@@ -193,6 +193,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         public void persist(HostPersistedState state) { }
     };
     private final String sessionId;
+    private final Map<ParticipantId, com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge> personalKnowledge = new LinkedHashMap<>();
     private final Map<Channel, RemoteConnection> connections =
             new LinkedHashMap<Channel, RemoteConnection>();
     private final Map<LauncherIdentity, GraceParticipant> reconnectingParticipants =
@@ -316,9 +317,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             // Rebuilt floor lacks late Monsters: Host recreates them, clients get them replayed.
             nativeMonsterSpawns.addAll(saved.getMonsterSpawns());
+            potionMapping = saved.getPotionMapping();
             restoredMonsterSpawns.addAll(saved.getMonsterSpawns());
             consumedMonsterSpawners.addAll(saved.getConsumedMonsterSpawners());
             for(CampaignSave.ParticipantState participant : saved.getParticipants()) {
+                personalKnowledge.put(new ParticipantId("campaign-slot-" + participant.getCampaignSlot()),
+                        participant.getPersonalKnowledge());
                 if(participant.getProgress() != null) {
                     economy.registerParticipant(participant.getProgress());
                 }
@@ -1548,6 +1552,36 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     }
 
     /** Render thread hands over detached native facts; repeated frames do not advance revision. */
+    @Override public synchronized com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge getPersonalKnowledge() {
+        return getPersonalKnowledge(new ParticipantId("campaign-slot-" + localMovementEntityId.getValue()));
+    }
+
+    public synchronized com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge getPersonalKnowledge(ParticipantId participant) {
+        com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge value = personalKnowledge.get(participant);
+        return value == null ? com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.empty() : value;
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping potionMapping = com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.empty();
+
+    @Override public synchronized com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping getPotionMapping() { return potionMapping; }
+
+    @Override public synchronized void publishPotionMapping(com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping next) {
+        if(!next.effects.entrySet().containsAll(potionMapping.effects.entrySet())) throw new IllegalArgumentException("Campaign potion effects cannot change.");
+        if(next.effects.equals(potionMapping.effects)) return;
+        potionMapping = next;
+        broadcast(new DirectConnectWire.PotionMappingMessage(sessionId, next));
+    }
+
+    public synchronized void publishPersonalKnowledge(ParticipantId participant, com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge next) {
+        if(next.revision <= getPersonalKnowledge(participant).revision) return;
+        personalKnowledge.put(participant, next);
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.movementDescriptor != null && participant.equals(connection.movementDescriptor.getParticipantId()))
+                connection.channel.writeAndFlush(new DirectConnectWire.PersonalKnowledgeMessage(sessionId,
+                        participant, nativeWorldGeneration, next));
+        }
+    }
+
     public synchronized void publishPartyProgression(com.interrupt.dungeoneer.game.Progression nativeState) {
         com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot next =
                 com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.capture(
@@ -2405,7 +2439,11 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             connection.channel.write(new DirectConnectWire.NativeDynamicStateMessage(sessionId,
                     ++nativeDynamicSequence, state, nativeWorldGeneration));
         }
+        connection.channel.write(new DirectConnectWire.PotionMappingMessage(sessionId, potionMapping));
         connection.channel.write(new DirectConnectWire.PartyProgressionMessage(sessionId, partyProgression));
+        connection.channel.write(new DirectConnectWire.PersonalKnowledgeMessage(sessionId,
+                connection.movementDescriptor.getParticipantId(), nativeWorldGeneration,
+                getPersonalKnowledge(connection.movementDescriptor.getParticipantId())));
         connection.channel.write(new DirectConnectWire.PartyKeysMessage(sessionId,
                 itemWorld.getKeyRevision(), itemWorld.getPartyKeys()));
         for(com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress : economy.progressSnapshot()) {
@@ -3018,7 +3056,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     economy.get(participantId(slot));
             boolean holdingOrb = previous != null && previous.isHoldingOrb();
             participants.add(new CampaignSave.ParticipantState(slot.getNumber(), party,
-                    movement, progress, holdingOrb));
+                    movement, progress, holdingOrb, getPersonalKnowledge(participantId(slot))));
         }
         CombatSnapshot combat = mergeAbsentCombat(combatEncounter.getSnapshot(currentHostTick()));
         CampaignSave saved = new CampaignSave(compatibility, roster.getCampaignId(),
@@ -3031,7 +3069,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 new ArrayList<com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn>(
                         nativeMonsterSpawns),
                 new ArrayList<String>(consumedMonsterSpawners), nativeFloor,
-                itemWorld.getPartyKeys(), itemWorld.getKeyRevision(), partyProgression);
+                itemWorld.getPartyKeys(), itemWorld.getKeyRevision(), partyProgression, potionMapping);
         lastCapturedCampaign = saved;
         return saved;
     }

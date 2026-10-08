@@ -30,6 +30,10 @@ public class Elixer extends Potion {
 	@Override
 	public void applyNativeEffect(Actor player) { }
 
+	@Override public boolean discoverOnDrink(Player player) { return false; }
+
+	@Override public void presentDrink(Player player, boolean learned) { presentDrink(player); }
+
 	/** Consumer feedback after Host acceptance; the pending choice reopens LevelUpOverlay. */
 	@Override
 	public void presentDrink(Player player) {
