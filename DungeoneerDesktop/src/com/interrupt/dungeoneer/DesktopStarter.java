@@ -23,6 +23,19 @@ import java.awt.GraphicsEnvironment;
 import java.io.IOException;
 
 public class DesktopStarter {
+    /** Preparation boundary before any GL/audio initialization. */
+    static GameApplication prepareMultiplayerMenu(DesktopLaunchOptions options,
+            java.util.function.BiFunction<java.io.File, String, java.io.File> browse)
+            throws OwnedGameCopyValidationException {
+        if(options.profileRoot == null) MultiplayerProfile.initializeDefault();
+        else MultiplayerProfile.initialize(options.profileRoot);
+        Game.isDebugMode = false;
+        Game.drawDebugBoxes = false;
+        Game.devToolsEnabled = false;
+        if(OwnedGameCopyLauncher.selectForMenu(options, browse) == null) return null;
+        return GameApplication.forMultiplayerMenu();
+    }
+
     public static void main(String[] args) {
         DesktopLaunchOptions launchOptions = DesktopLaunchOptions.parse(args);
         if(launchOptions.hasIdentityRecoveryUtility()) {
@@ -57,6 +70,7 @@ public class DesktopStarter {
         CampaignRoster campaignRoster = null;
         CampaignRosterStore campaignRosterStore = null;
         ReconnectTokenStore reconnectTokenStore = null;
+        GameApplication menuApplication = null;
 
         if (args != null) {
             for (String arg : args) {
@@ -121,13 +135,19 @@ public class DesktopStarter {
             Options.SetKeyboardBindings();
         }
         else {
-            MultiplayerProfile.initializeDefault();
+            if(launchOptions.profileRoot == null) MultiplayerProfile.initializeDefault();
+            else MultiplayerProfile.initialize(launchOptions.profileRoot);
             try {
                 if(launchOptions.inspectOwnedCopy) {
                     OwnedGameCopyLauncher.inspect(launchOptions);
                     return;
                 }
                 if(launchOptions.ownedTutorial) OwnedGameCopyLauncher.validateAndMount(launchOptions);
+                else {
+                    menuApplication = prepareMultiplayerMenu(launchOptions,
+                            OwnedGameCopyBrowser::selectForMenu);
+                    if(menuApplication == null) return;
+                }
             }
             catch(OwnedGameCopyValidationException ex) {
                 reportOwnedCopyError(ex.getMessage());
@@ -139,7 +159,7 @@ public class DesktopStarter {
         DisplayMode defaultMode = LwjglApplicationConfiguration.getDesktopDisplayMode();
 
         LwjglApplicationConfiguration config = new LwjglApplicationConfiguration();
-        config.title = launchOptions.ownedTutorial || directConnect
+        config.title = menuApplication != null || launchOptions.ownedTutorial || directConnect
                 ? "Delver Multiplayer" : "Delver Engine";
         config.fullscreen = Options.instance.fullScreen;
         config.width = defaultMode.width;
@@ -180,7 +200,7 @@ public class DesktopStarter {
         }
         else if(launchOptions.openSourceTestLevel) gameApplication = GameApplication.forOpenSourceTestLevel();
         else if(launchOptions.ownedTutorial) gameApplication = GameApplication.forOwnedTutorial();
-        else gameApplication = new GameApplication();
+        else gameApplication = menuApplication;
         Thread.setDefaultUncaughtExceptionHandler(new DesktopCrashHandler(
                 System.err,
                 new DesktopCrashHandler.Exit() {

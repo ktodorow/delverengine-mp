@@ -32,7 +32,8 @@ public class OverlayWrapperScreen extends BaseScreen {
         super.tick(delta);
 
         if(manager.current() == null) {
-            GameApplication.SetScreen(new MainMenuScreen());
+            if(GameApplication.instance.isMultiplayerLauncher()) GameApplication.instance.showMultiplayerMenu();
+            else GameApplication.SetScreen(new MainMenuScreen());
         }
     }
 

@@ -12,14 +12,34 @@ import static org.junit.Assert.fail;
 
 public class DesktopLaunchOptionsTest {
     @Test
-    public void explicitOwnedCopyEnablesOwnedTutorial() {
+    public void ownedCopySelectsMenuAssetsWithoutImplicitTutorial() {
         DesktopLaunchOptions options = DesktopLaunchOptions.parse(new String[] {
                 "--owned-copy=C:\\Games\\Delver\\delver.jar"
         });
 
-        assertTrue(options.ownedTutorial);
+        assertFalse("Owned assets should open ordinary multiplayer menu, not tutorial.",
+                options.ownedTutorial);
         assertEquals(new File("C:\\Games\\Delver\\delver.jar"), options.ownedCopy);
         assertFalse(options.inspectOwnedCopy);
+    }
+
+    @Test public void browseSelectsMenuCopyWhileTutorialRequiresExplicitMode() {
+        assertFalse(DesktopLaunchOptions.parse(new String[] {"--browse-owned-copy"}).ownedTutorial);
+        assertTrue(DesktopLaunchOptions.parse(new String[] {
+                "--owned-tutorial", "--owned-copy=C:\\Games\\Delver\\delver.jar"
+        }).ownedTutorial);
+    }
+
+    @Test public void assetSelectionCannotBeMixedWithUtilitiesOrAnotherGameEntry() {
+        assertParseFailure(new String[] {"--direct-host", "--browse-owned-copy"}, "cannot be combined");
+        assertParseFailure(new String[] {"--direct-host", "--owned-tutorial",
+                "--owned-copy=C:\\Games\\Delver\\delver.jar"}, "cannot be combined");
+        assertParseFailure(new String[] {"--network-help",
+                "--owned-copy=C:\\Games\\Delver\\delver.jar"}, "cannot be combined");
+        assertParseFailure(new String[] {"--export-identity-recovery=backup.properties",
+                "--browse-owned-copy"}, "cannot be combined");
+        assertParseFailure(new String[] {"--test-level",
+                "--owned-copy=C:\\Games\\Delver\\delver.jar"}, "cannot be combined");
     }
 
     @Test

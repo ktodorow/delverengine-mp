@@ -49,15 +49,12 @@ final class DesktopLaunchOptions {
             }
             else if(argument.equalsIgnoreCase("--browse-owned-copy")) {
                 options.browseOwnedCopy = true;
-                options.ownedTutorial = true;
             }
             else if(argument.regionMatches(true, 0, "--owned-copy=", 0, "--owned-copy=".length())) {
                 options.ownedCopy = new File(argument.substring("--owned-copy=".length()));
-                options.ownedTutorial = true;
             }
             else if(argument.equalsIgnoreCase("--owned-copy") && i + 1 < args.length) {
                 options.ownedCopy = new File(args[++i]);
-                options.ownedTutorial = true;
             }
             else if(argument.regionMatches(true, 0, "--inspect-owned-copy=", 0,
                     "--inspect-owned-copy=".length())) {
@@ -244,18 +241,20 @@ final class DesktopLaunchOptions {
                     "Choose either --direct-host or --direct-connect, not both.");
         }
         boolean directConnect = options.directHost || options.directConnectAddress != null;
-        boolean directOwnedCopy = directConnect && options.ownedCopy != null
-                && !options.browseOwnedCopy && !options.inspectOwnedCopy;
+        boolean assetSelection = options.ownedCopy != null || options.browseOwnedCopy;
+        if(options.openSourceTestLevel && (assetSelection || options.ownedTutorial || options.inspectOwnedCopy)) {
+            throw new IllegalArgumentException("Open-source test level cannot be combined with owned game entry.");
+        }
         if(directConnect
                 && (options.openSourceTestLevel || options.inspectOwnedCopy
-                        || (options.ownedTutorial && !directOwnedCopy))) {
+                        || options.ownedTutorial || options.browseOwnedCopy)) {
             throw new IllegalArgumentException(
                     "Direct Connect cannot be combined with another launch mode.");
         }
         if(options.hasNetworkUtility()
                 && (options.directHost || options.directConnectAddress != null
                         || options.openSourceTestLevel || options.ownedTutorial
-                        || options.inspectOwnedCopy)) {
+                        || options.inspectOwnedCopy || assetSelection)) {
             throw new IllegalArgumentException(
                     "Network discovery, diagnostics, or help cannot be combined with a game launch mode.");
         }
@@ -266,7 +265,7 @@ final class DesktopLaunchOptions {
         if(options.hasIdentityRecoveryUtility()
                 && (options.directHost || options.directConnectAddress != null
                         || options.openSourceTestLevel || options.ownedTutorial
-                        || options.inspectOwnedCopy || options.hasNetworkUtility())) {
+                        || options.inspectOwnedCopy || assetSelection || options.hasNetworkUtility())) {
             throw new IllegalArgumentException(
                     "Identity Recovery import or export cannot be combined with a game or network utility mode.");
         }

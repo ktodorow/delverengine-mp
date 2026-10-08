@@ -17,6 +17,8 @@ task run(dependsOn: classes, type: JavaExec) {
     standardInput = System.in
     workingDir = project.assetsDir
     ignoreExitValue = true
+    if(project.hasProperty("ownedCopy")) args "--owned-copy=" + project.property("ownedCopy")
+    if(project.hasProperty("profileRoot")) args "--profile-root=" + project.property("profileRoot")
 }
 
 task runTestLevel(dependsOn: classes, type: JavaExec) {

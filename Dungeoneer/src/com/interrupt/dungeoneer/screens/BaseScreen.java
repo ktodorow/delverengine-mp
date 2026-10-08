@@ -187,7 +187,10 @@ public class BaseScreen implements Screen {
 			if(splashScreenInfo != null && splashScreenInfo.backgroundImage != null) {
 				backgroundTexture = Art.loadTexture(splashScreenInfo.backgroundImage);
 				if(backgroundTexture != null) {
-					backgroundTexture.setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear);
+					Texture.TextureFilter filter = GameApplication.instance != null
+                            && GameApplication.instance.isMultiplayerLauncher()
+                            ? Texture.TextureFilter.Nearest : Texture.TextureFilter.Linear;
+                    backgroundTexture.setFilter(filter, filter);
 				}
 			}
 		}

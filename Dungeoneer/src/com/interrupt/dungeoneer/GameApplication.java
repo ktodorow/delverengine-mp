@@ -54,6 +54,7 @@ public class GameApplication extends Game {
 
     private enum StartupMode {
         NORMAL,
+        MULTIPLAYER_MENU,
         OPEN_SOURCE_TEST_LEVEL,
         OWNED_TUTORIAL,
         DIRECT_CONNECT_HOST,
@@ -93,6 +94,18 @@ public class GameApplication extends Game {
 
     public GameApplication() {
         this(StartupMode.NORMAL, null, 0, null, null, null, null, 0, null, 0);
+    }
+
+    public boolean isMultiplayerLauncher() { return startupMode == StartupMode.MULTIPLAYER_MENU; }
+
+    public static GameApplication forMultiplayerMenu() {
+        if(!OwnedGameCopyMount.isMounted()) {
+            throw new IllegalStateException("Owned Game Copy must be mounted before native multiplayer startup.");
+        }
+        GameApplication application = new GameApplication(StartupMode.MULTIPLAYER_MENU);
+        application.directConnectPort = com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.DEFAULT_PORT;
+        application.directConnectCampaignCapacity = 2;
+        return application;
     }
 
     private GameApplication(StartupMode startupMode) {
@@ -171,6 +184,13 @@ public class GameApplication extends Game {
 
 	@Override
 	public void create() {
+        if(isMultiplayerLauncher()) {
+            Gdx.app.setLogLevel(Application.LOG_INFO);
+            ensureNativeRendering();
+            mainMenuScreen = new SplashScreen();
+            setScreen(mainMenuScreen);
+            return;
+        }
         if(startupMode == StartupMode.DIRECT_CONNECT_HOST
                 || startupMode == StartupMode.DIRECT_CONNECT_CLIENT) {
             createDirectConnect();
@@ -256,6 +276,8 @@ public class GameApplication extends Game {
     public void connectDirectConnectSession(String address, int port, LauncherIdentity identity,
             SlotPresentation presentation, int requestedSlot, ReconnectTokenStore tokens) {
         openDirectConnectSession(() -> {
+            directConnectRoster = null;
+            directConnectRosterStore = null;
             directConnectAddress = address;
             directConnectPort = port;
             directConnectLauncherIdentity = identity;
@@ -334,6 +356,7 @@ public class GameApplication extends Game {
     }
 
     private void showDirectConnectSession(DirectConnectPeer peer) {
+        Screen completedMenu = getScreen() instanceof MultiplayerMenuScreen ? getScreen() : null;
         CampaignLibraryScreen completedLibrary = campaignLibraryScreen;
         DirectConnectSessionScreen completedSession = directConnectScreen;
         campaignLibraryScreen = null;
@@ -341,6 +364,7 @@ public class GameApplication extends Game {
         setScreen(directConnectScreen);
         if(completedLibrary != null) completedLibrary.dispose();
         if(completedSession != null) completedSession.dispose();
+        if(completedMenu != null) completedMenu.dispose();
     }
 
     private void showCampaignLibrary() {
@@ -352,6 +376,48 @@ public class GameApplication extends Game {
                 new CampaignLibrary(directConnectRosterStore, AvatarCatalog.ownedV108Humanoids(),
                         directConnectLauncherIdentity, directConnectPresentation), directConnectCampaignCapacity);
         setScreen(campaignLibraryScreen);
+    }
+
+    /** Native title/menu owns navigation; session policy stays in the reusable flow. */
+    public void showMultiplayerMenu() {
+        if(!isMultiplayerLauncher()) throw new IllegalStateException("Native multiplayer entry is required.");
+        if(getDirectConnectPeer() != null) sessionFlow.leave();
+        Screen previous = getScreen();
+        setScreen(new MultiplayerMenuScreen(this));
+        if(previous != null) previous.dispose();
+        if(previous == mainMenuScreen) mainMenuScreen = null;
+        directConnectScreen = null;
+        campaignLibraryScreen = null;
+    }
+
+    public void showMultiplayerHostLibrary() {
+        directConnectLauncherIdentity = com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentityStore.loadOrCreate();
+        directConnectPresentation = new SlotPresentation("Host", AvatarCatalog.HUMANOID_1);
+        directConnectRosterStore = new CampaignRosterStore();
+        Screen previous = getScreen();
+        showCampaignLibrary();
+        if(previous != null) previous.dispose();
+    }
+
+    /** Temporary existing-session route; full remembered presentation form belongs to #45. */
+    public void promptMultiplayerConnect() {
+        final Screen expected = getScreen();
+        Gdx.input.getTextInput(new com.badlogic.gdx.Input.TextInputListener() {
+            @Override public void input(String address) {
+                Gdx.app.postRunnable(() -> {
+                    if(getScreen() != expected || getDirectConnectPeer() != null) return;
+                    try {
+                        connectDirectConnectSession(address.trim(), directConnectPort,
+                                com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentityStore.loadOrCreate(),
+                                new SlotPresentation("Participant", AvatarCatalog.HUMANOID_2), 0,
+                                new com.interrupt.dungeoneer.multiplayer.lobby.ProfileReconnectTokenStore());
+                    }
+                    catch(RuntimeException failure) { showDirectConnectFailure(failure.getMessage()); }
+                });
+            }
+            @Override public void canceled() { }
+        }, "Connect to Host", directConnectAddress == null ? "127.0.0.1" : directConnectAddress,
+                "Host address (port " + directConnectPort + ")");
     }
 
     private DirectConnectCompatibility createDirectConnectCompatibility() {
@@ -368,6 +434,11 @@ public class GameApplication extends Game {
     public void returnToDirectConnectSession() {
         DirectConnectPeer stopped = sessionFlow.getPeer();
         if(stopped == null) {
+            if(isMultiplayerLauncher()) {
+                releaseDirectConnectResources();
+                showMultiplayerMenu();
+                return;
+            }
             if(directConnectRosterStore != null) {
                 releaseDirectConnectResources();
                 showCampaignLibrary();
@@ -379,6 +450,12 @@ public class GameApplication extends Game {
         sessionFlow.leave();
         if(stopped instanceof DirectConnectHost) showCampaignLibrary();
         else {
+            if(isMultiplayerLauncher()) {
+                showMultiplayerMenu();
+                if(phase == DirectConnectPhase.FAILED || phase == DirectConnectPhase.REJECTED
+                        || phase == DirectConnectPhase.DISCONNECTED) showDirectConnectFailure(reason);
+                return;
+            }
             showDirectConnectSession(stopped);
             if(phase == DirectConnectPhase.FAILED || phase == DirectConnectPhase.REJECTED
                     || phase == DirectConnectPhase.DISCONNECTED) showDirectConnectFailure(reason);
@@ -392,6 +469,7 @@ public class GameApplication extends Game {
     public void showDirectConnectFailure(String message) {
         if(directConnectScreen != null) directConnectScreen.showFailure(message);
         else if(campaignLibraryScreen != null) campaignLibraryScreen.showFailure(message);
+        else if(getScreen() instanceof MultiplayerMenuScreen) ((MultiplayerMenuScreen)getScreen()).showFailure(message);
     }
 
     /** Transition floors keep theme in native generator section definitions, not in their .bin. */
@@ -794,7 +872,14 @@ public class GameApplication extends Game {
                 || campaignLibraryScreen != null;
         try { if(getDirectConnectPeer() != null) getDirectConnectPeer().close(); }
         finally {
-            try { if(directResources) releaseDirectConnectResources(); }
+            try {
+                if(directResources) releaseDirectConnectResources();
+                else if(isMultiplayerLauncher()) {
+                    if(getScreen() != null) getScreen().dispose();
+                    BaseScreen.freeBackgroundLevel();
+                    com.interrupt.dungeoneer.Audio.stopLoopingSounds();
+                }
+            }
             finally {
                 SteamApi.api.dispose();
                 com.interrupt.dungeoneer.game.Game.threadPool.shutdownNow();
@@ -886,6 +971,11 @@ public class GameApplication extends Game {
                 if(application.getDirectConnectPeer() == expected && application.getScreen() == screen)
                     application.leaveDirectConnectSession();
             });
+            return;
+        }
+
+        if(instance.isMultiplayerLauncher()) {
+            instance.showMultiplayerMenu();
             return;
         }
 		instance.mainScreen.didStart = false;

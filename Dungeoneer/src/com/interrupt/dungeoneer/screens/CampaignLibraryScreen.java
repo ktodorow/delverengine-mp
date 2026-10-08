@@ -44,7 +44,10 @@ public final class CampaignLibraryScreen implements Screen {
         refresh();
     }
 
-    @Override public void show() { }
+    @Override public void show() {
+        Gdx.input.setInputProcessor(null);
+        Gdx.input.setCursorCatched(false);
+    }
 
     @Override
     public void render(float delta) {
@@ -94,6 +97,12 @@ public final class CampaignLibraryScreen implements Screen {
 
     private void handleInput() {
         if(opening || promptOpen) return;
+        if(application.isMultiplayerLauncher() && Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) {
+            Gdx.app.postRunnable(() -> {
+                if(!disposed && application.getScreen() == this) application.showMultiplayerMenu();
+            });
+            return;
+        }
         if(Gdx.input.isKeyJustPressed(Input.Keys.UP) && !entries.isEmpty()) {
             selected = (selected + entries.size() - 1) % entries.size();
         }

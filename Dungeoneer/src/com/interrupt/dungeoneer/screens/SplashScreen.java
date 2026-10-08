@@ -101,6 +101,10 @@ public class SplashScreen extends BaseScreen {
 
         ui = new Stage(viewport);
         ui.addListener(new InputListener() {
+            @Override public boolean keyDown(InputEvent event, int keycode) {
+                goToNextScreen();
+                return true;
+            }
             @Override
             public boolean touchDown(InputEvent event, float x, float y, int pointer, int button) {
                 goToNextScreen();
@@ -182,6 +186,11 @@ public class SplashScreen extends BaseScreen {
         }
 
         renderer.drawCenteredText("2018 Priority Interrupt Games", -yPos - fontSize * 1.7f, fontSize * 0.15f, greyColor, blackColor);
+        if(GameApplication.instance.isMultiplayerLauncher()) {
+            renderer.drawCenteredText("Unofficial Multiplayer | "
+                    + com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol.BUILD_ID,
+                    -yPos - fontSize * 2f, fontSize * 0.12f, greyColor, blackColor);
+        }
 		
 		renderer.uiBatch.end();
 
@@ -214,7 +223,9 @@ public class SplashScreen extends BaseScreen {
         if(isFadingOut) {
             float fade = lerp.apply(Math.min((tickCount - fadeStartTick) / (fadeEndTick - fadeStartTick), 1));
             if (fade <= 0) {
-                GameApplication.SetScreen(new MainMenuScreen());
+                if(GameApplication.instance.isMultiplayerLauncher()) GameApplication.instance.showMultiplayerMenu();
+                else GameApplication.SetScreen(new MainMenuScreen());
+                return;
             }
         }
 
@@ -225,6 +236,14 @@ public class SplashScreen extends BaseScreen {
 
         // tick needs to be down here to not clear gamepad events
         super.tick(delta);
+    }
+
+    @Override public void dispose() {
+        if(ui != null) {
+            if(Gdx.input.getInputProcessor() == ui) Gdx.input.setInputProcessor(null);
+            ui.dispose();
+            ui = null;
+        }
     }
 
 }

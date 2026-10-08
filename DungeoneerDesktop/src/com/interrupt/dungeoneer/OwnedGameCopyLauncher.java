@@ -20,6 +20,47 @@ import java.util.Set;
 final class OwnedGameCopyLauncher {
     private OwnedGameCopyLauncher() { }
 
+    /** File chooser is a system boundary; validation and mounting remain real. */
+    static OwnedGameCopy selectForMenu(DesktopLaunchOptions options,
+            java.util.function.BiFunction<File, String, File> browse)
+            throws OwnedGameCopyValidationException {
+        OwnedGameCopyValidator validator = KnownV108OwnedGameCopies.validator();
+        File selected = options.ownedCopy;
+        String problem = "Select your compatible Delver v1.08 delver.jar.";
+        if(options.browseOwnedCopy) {
+            selected = browse.apply(selected == null ? OwnedGameCopySelectionStore.load() : selected, problem);
+            if(selected == null) return null;
+        }
+        else if(selected == null) {
+            Set<File> candidates = new LinkedHashSet<File>();
+            File remembered = OwnedGameCopySelectionStore.load();
+            if(remembered != null) candidates.add(remembered);
+            if(OSUtils.isWindows()) candidates.addAll(OwnedGameCopyLocator.findWindowsCandidates());
+            for(File candidate : candidates) {
+                try { return validateMountAndRemember(validator, candidate); }
+                catch(OwnedGameCopyValidationException rejected) {
+                    selected = candidate;
+                    problem = "Unable to use Delver archive: " + rejected.getMessage()
+                            + "\nBrowse to your compatible original delver.jar.";
+                }
+            }
+            // Failed detection goes through editable selection, never back into invalid startup.
+            selected = browse.apply(selected, problem);
+            if(selected == null) return null;
+        }
+        while(true) {
+            if(selected != null) {
+                try { return validateMountAndRemember(validator, selected); }
+                catch(OwnedGameCopyValidationException rejected) {
+                    problem = "Unable to use Delver archive: " + rejected.getMessage()
+                            + "\nSelect a compatible original delver.jar or cancel startup.";
+                }
+            }
+            selected = browse.apply(selected, problem);
+            if(selected == null) return null;
+        }
+    }
+
     static void inspect(DesktopLaunchOptions options) throws OwnedGameCopyValidationException {
         File archive = options.ownedCopy;
         if(archive == null) {
