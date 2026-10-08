@@ -70,6 +70,17 @@ public final class AuthoritativeEconomy {
         return ledger == null ? null : ledger.snapshot(participant);
     }
 
+    /** Host atomic travel may replace an exhausted character, retaining monotonic revisions. */
+    public synchronized void restoreParticipant(ParticipantProgress saved) {
+        if(saved == null) throw new IllegalArgumentException("Saved progress is required.");
+        if(!ledgers.containsKey(saved.participantId) && ledgers.size() >= MAX_PARTICIPANTS)
+            throw new IllegalStateException("Economy supports four Campaign Slots.");
+        Ledger ledger = new Ledger(saved);
+        revision = Math.max(revision, saved.revision);
+        ledger.revision = ++revision;
+        ledgers.put(saved.participantId, ledger);
+    }
+
     public synchronized List<ParticipantProgress> progressSnapshot() {
         List<ParticipantProgress> result = new ArrayList<ParticipantProgress>();
         for(Map.Entry<ParticipantId, Ledger> entry : ledgers.entrySet()) {

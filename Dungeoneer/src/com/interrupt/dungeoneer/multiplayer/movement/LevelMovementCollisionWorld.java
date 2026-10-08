@@ -97,7 +97,14 @@ public final class LevelMovementCollisionWorld implements MovementCollisionWorld
             }
         }
         float spawnX, spawnY, rotation;
-        if(startX != null && startY != null) {
+        if(level.multiplayerArrival != null && level.multiplayerArrival.length == 4) {
+            spawnX = level.multiplayerArrival[0]; spawnY = level.multiplayerArrival[1]; rotation = level.multiplayerArrival[3];
+        }
+        else if(level.up != null) {
+            spawnX = level.up.x; spawnY = level.up.y + 0.05f;
+            rotation = (float)Math.toRadians(level.up.exitRotation + 180f);
+        }
+        else if(startX != null && startY != null) {
             spawnX = startX + 0.5f;
             spawnY = startY + 0.5f;
             rotation = startRotation == null ? 0f : (float)Math.toRadians(-(startRotation + 180f));

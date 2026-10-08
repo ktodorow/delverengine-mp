@@ -42,6 +42,7 @@ import java.io.File;
 import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -127,6 +128,220 @@ public class OwnedSharedFloorBuildTest {
         TextureAtlas.cachedAtlases = previousSpriteAtlases;
         Options.instance.graphicsDetailLevel = previousDetail;
         Options.instance.gfxQuality = previousQuality;
+    }
+
+    @org.junit.Rule public org.junit.rules.TemporaryFolder travelStorage = new org.junit.rules.TemporaryFolder();
+
+    @Test public void partyTravelInstallsNativeDestinationAndRestoresSourceOnAscent() throws Exception {
+        buildFloor("levels/tutorial.bin", null, 77L, 3, 1f, 1L);
+        GameManager.renderer = new ObjenesisStd().newInstance(GenerationRenderer.class);
+        Game game = Game.instance;
+        game.level = NativeFloorRecipe.campaign(1, 1).build(0x2727L);
+        Level source = game.level;
+        int changedTile = 0; while(source.tiles[changedTile] == null || source.tiles[changedTile].renderSolid) changedTile++;
+        source.tiles[changedTile].floorHeight = 0.27f;
+        com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore store = new com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore(
+                travelStorage.newFolder("native-travel"), new java.security.SecureRandom());
+        StringBuilder identity = new StringBuilder(); while(identity.length() < 64) identity.append('1');
+        com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster roster = store.loadOrCreate("native-travel", 2,
+                com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog.ownedV108Humanoids(),
+                new com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity(identity.toString()),
+                new com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation("Host", "humanoid-1"));
+        com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost host = com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost.start(0,
+                com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility.forOpenSourceTestFloor(new byte[] { 27 }),
+                roster, store, new LevelMovementCollisionWorld(game.level));
+        com.interrupt.dungeoneer.multiplayer.network.DirectConnectClient friend = com.interrupt.dungeoneer.multiplayer.network.DirectConnectClient.connect(
+                "127.0.0.1", host.getBoundPort(), new com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity(identity.toString().replace('1', '2')),
+                new com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation("Friend", "humanoid-2"), 0,
+                new com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore() {
+                    public String load(String campaign) { return null; } public void save(String campaign, String token) { }
+                }, com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility.forOpenSourceTestFloor(new byte[] { 27 }));
+        try {
+            awaitNativePhase(friend, com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.AWAITING_APPROVAL);
+            host.approve(identity.toString().replace('1', '2'));
+            awaitNativePhase(friend, com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.LOBBY);
+            host.startSession();
+            awaitNativePhase(friend, com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY);
+            host.setNativeFloorCapture(() -> NativeFloorSave.capture(game.level));
+            host.setSessionPaused(true);
+            host.activateCampaignFloor("campaign:1", "campaign:1", 0x2727L, source.multiplayerBuiltFingerprint,
+                    () -> source, level -> game.level = level);
+            host.setSessionPaused(false);
+            NativePartyTravel travel = new NativePartyTravel(host, slot -> { throw new AssertionError("Living Host stays same character"); },
+                    game::installPartyFloor);
+            travel.update(game); host.completeNativeWorld(host.getNativeWorldGeneration());
+            com.interrupt.dungeoneer.entities.Stairs down = source.down;
+            host.setNativeParticipantPosition(new ParticipantId("campaign-slot-1"), down.x, down.y + 0.05f, source.getTile((int)down.x, (int)down.y).floorHeight + 0.5f);
+            host.setNativeParticipantPosition(new ParticipantId("campaign-slot-2"), down.x, down.y + 0.05f, source.getTile((int)down.x, (int)down.y).floorHeight + 0.5f);
+            host.requestPartyTransition("stairs:down"); awaitLoading(host); travel.update(game);
+            assertEquals(2, NativeFloorRecipe.decode(game.level.multiplayerNativeRecipe).campaignIndex);
+            assertTrue(game.level != source);
+            assertTrue("Native player ignores arrival stairs until stepping away", game.player.ignoreStairs);
+            host.acknowledgePartyDestination(host.getNativeWorldGeneration());
+            friend.acknowledgePartyDestination(host.getNativeWorldGeneration());
+            long release = System.currentTimeMillis() + 8000L;
+            while(host.isSessionPaused() && System.currentTimeMillis() < release) Thread.sleep(10L);
+            assertFalse(host.isSessionPaused()); travel.update(game);
+            com.interrupt.dungeoneer.entities.Stairs up = game.level.up;
+            if(up == null) {
+                up = new com.interrupt.dungeoneer.entities.Stairs(); up.direction = com.interrupt.dungeoneer.entities.Stairs.StairDirection.up;
+                up.x = game.level.down.x; up.y = game.level.down.y; up.z = game.level.down.z; game.level.entities.add(up);
+            }
+            travel.update(game);
+            host.setNativeParticipantPosition(new ParticipantId("campaign-slot-1"), up.x, up.y + 0.05f, game.level.getTile((int)up.x, (int)up.y).floorHeight + 0.5f);
+            host.setNativeParticipantPosition(new ParticipantId("campaign-slot-2"), up.x, up.y + 0.05f, game.level.getTile((int)up.x, (int)up.y).floorHeight + 0.5f);
+            host.requestPartyTransition("stairs:up"); awaitLoading(host); travel.update(game);
+            assertEquals(1, NativeFloorRecipe.decode(game.level.multiplayerNativeRecipe).campaignIndex);
+            assertEquals("Visited floor restores changed native terrain", 0.27f, game.level.tiles[changedTile].floorHeight, 0f);
+            com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState arrival = host.persistCampaign().getParticipant(1).getMovement();
+            assertEquals("Ascent arrives at down stairs", game.level.down.x, arrival.getX(), 0.01f);
+            assertEquals(game.level.down.y + 0.05f, arrival.getY(), 0.01f);
+            host.acknowledgePartyDestination(host.getNativeWorldGeneration());
+            friend.acknowledgePartyDestination(host.getNativeWorldGeneration());
+            release = System.currentTimeMillis() + 8000L;
+            while(host.isSessionPaused() && System.currentTimeMillis() < release) Thread.sleep(10L);
+            com.interrupt.dungeoneer.entities.triggers.TriggeredWarp warp = new com.interrupt.dungeoneer.entities.triggers.TriggeredWarp();
+            warp.generated = false; warp.levelToLoad = "levels/shop-interstitial.bin"; warp.levelTheme = "DUNGEON";
+            warp.x = game.level.down.x; warp.y = game.level.down.y;
+            warp.z = game.level.getTile((int)warp.x, (int)warp.y).floorHeight + 0.5f;
+            game.level.non_collidable_entities.add(warp); travel.update(game);
+            for(int slot = 1; slot <= 2; slot++) host.setNativeParticipantPosition(new ParticipantId("campaign-slot-" + slot), warp.x, warp.y, warp.z);
+            host.requestPartyTransition(PartyPortals.key(warp)); awaitLoading(host); travel.update(game);
+            assertEquals("campaign:1", game.level.multiplayerParentArea);
+            assertEquals("levels/shop-interstitial.bin", game.level.levelFileName);
+            assertFalse("Distinct parent areas never share branch despite Java hash collisions",
+                    PartyPortals.branchArea("FB", warp).equals(PartyPortals.branchArea("Ea", warp)));
+            host.acknowledgePartyDestination(host.getNativeWorldGeneration()); friend.acknowledgePartyDestination(host.getNativeWorldGeneration());
+            release = System.currentTimeMillis() + 8000L;
+            while(host.isSessionPaused() && System.currentTimeMillis() < release) Thread.sleep(10L);
+            com.interrupt.dungeoneer.entities.triggers.TriggeredWarp exit = new com.interrupt.dungeoneer.entities.triggers.TriggeredWarp();
+            exit.isExit = true;
+            com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState branchSpawn = host.persistCampaign().getParticipant(1).getMovement();
+            exit.x = branchSpawn.getX(); exit.y = branchSpawn.getY(); exit.z = branchSpawn.getZ();
+            game.level.non_collidable_entities.add(exit); travel.update(game);
+            for(int slot = 1; slot <= 2; slot++) host.setNativeParticipantPosition(new ParticipantId("campaign-slot-" + slot), exit.x, exit.y, exit.z);
+            host.requestPartyTransition(PartyPortals.key(exit)); awaitLoading(host); travel.update(game);
+            assertEquals("campaign:1", host.getActiveAreaKey());
+            assertEquals(0.27f, game.level.tiles[changedTile].floorHeight, 0f);
+            com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState branchReturn = host.persistCampaign().getParticipant(1).getMovement();
+            assertEquals(warp.x, branchReturn.getX(), 0.01f); assertEquals(warp.y, branchReturn.getY(), 0.01f);
+        }
+        finally { friend.close(); host.close(); }
+    }
+
+    private static void awaitNativePhase(com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer peer,
+            com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase phase) throws Exception {
+        long deadline = System.currentTimeMillis() + 8000L;
+        while(peer.getStatus().getPhase() != phase && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+        assertEquals(phase, peer.getStatus().getPhase());
+    }
+
+    private static void awaitLoading(com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost host) throws Exception {
+        long deadline = System.currentTimeMillis() + 8000L;
+        while(System.currentTimeMillis() < deadline) {
+            if(host.getPartyTransition().phase == PartyTransition.Phase.LOADING) return;
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("Native travel never reached loading: " + host.getPartyTransition().phase);
+    }
+
+    @Test public void startingTutorialCarriesRecipeForBranchReturnAndColdObserver() throws Exception {
+        buildFloor("levels/tutorial.bin", null, 77L, 3, 1f, 1L);
+        GameManager.renderer = new ObjenesisStd().newInstance(GenerationRenderer.class);
+        com.interrupt.dungeoneer.GameApplication app = new ObjenesisStd().newInstance(com.interrupt.dungeoneer.GameApplication.class);
+        java.lang.reflect.Method loader = com.interrupt.dungeoneer.GameApplication.class.getDeclaredMethod("loadDirectConnectLevel", String.class);
+        loader.setAccessible(true);
+        Level legacy = buildFloor("levels/tutorial.bin", null, 0x2799L, 3, 1f, 1L);
+        SharedFloorFingerprint legacyFingerprint = legacy.multiplayerBuiltFingerprint;
+        Game.instance.progression = new Progression();
+        Level initial = (Level)loader.invoke(app, com.interrupt.dungeoneer.GameApplication.OWNED_TUTORIAL_FLOOR);
+        assertTrue("Starting tutorial must retain native recipe for branch returns/cold observers", initial.multiplayerNativeRecipe != null);
+        initial.sharedFloorBuild = new SharedFloorBuild(0x2799L); initial.loadForCampaign();
+        assertEquals("Starting floor keeps predecessor construction for existing Campaign resume", legacyFingerprint, initial.multiplayerBuiltFingerprint);
+        Game.instance.player.level = 9;
+        Level observer = NativeFloorRecipe.decode(initial.multiplayerNativeRecipe).definition();
+        observer.multiplayerNativeRecipe = initial.multiplayerNativeRecipe;
+        observer.sharedFloorBuild = new SharedFloorBuild(0x2799L); observer.loadForCampaign();
+        assertEquals(initial.multiplayerBuiltFingerprint, observer.multiplayerBuiltFingerprint);
+        assertEquals("Temporary construction level cannot alter observer character", 9, Game.instance.player.level);
+    }
+
+    @Test public void destinationBuildKeepsSourceProgressionUntouchedUntilSceneCommit() {
+        buildFloor("levels/tutorial.bin", null, 77L, 3, 1f, 1L);
+        GameManager.renderer = new ObjenesisStd().newInstance(GenerationRenderer.class);
+        com.interrupt.dungeoneer.game.Progression original = Game.instance.progression;
+        original.dungeonAreasSeen.clear(); original.uniqueTilesSeen.clear(); original.uniqueItemsSpawned.clear();
+        com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot before =
+                com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.capture(original, 1L);
+        Level candidate = NativeFloorRecipe.campaign(1, 1).build(0x27ABL);
+        assertTrue("Refused save must not leave destination construction history on source",
+                before.sameFacts(com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.capture(Game.instance.progression, 1L)));
+        assertTrue(original == Game.instance.progression);
+        Game.instance.installPartyFloor(candidate);
+        assertTrue("Successful scene commit retains destination construction facts",
+                original.dungeonAreasSeen.contains(candidate.theme, false));
+    }
+
+    @Test public void nativeRecipeRebuildIgnoresLaterCampaignConstructionHistory() {
+        buildFloor("levels/tutorial.bin", null, 77L, 3, 1f, 1L);
+        GameManager.renderer = new ObjenesisStd().newInstance(GenerationRenderer.class);
+        NativeFloorRecipe recipe = NativeFloorRecipe.campaign(1, 1);
+        String encoded = recipe.encode();
+        Level first = recipe.build(0x2788L);
+        Game.instance.progression.markDungeonAreaAsSeen(first.theme);
+        Game.instance.progression.uniqueTilesSeen.add("newer-floor-tile");
+        Game.instance.progression.uniqueItemsSpawned.add("newer-floor-item");
+        Level replay = NativeFloorRecipe.decode(encoded).build(0x2788L);
+        assertEquals("Cold observer reconstructs original floor, not a later-history variant",
+                first.multiplayerBuiltFingerprint, replay.multiplayerBuiltFingerprint);
+    }
+
+    @Test public void nativeTravelRecipeBuildsStandardLayoutAndKeepsWarpAppearance() {
+        buildFloor("levels/tutorial.bin", null, 77L, 3, 1f, 1L);
+        GameManager.renderer = new ObjenesisStd().newInstance(GenerationRenderer.class);
+        NativeFloorRecipe campaign = NativeFloorRecipe.campaign(1, Game.instance.player.level);
+        Level dungeon = NativeFloorRecipe.decode(campaign.encode()).build(0x2727L);
+        assertTrue(dungeon.generated);
+        assertTrue(dungeon.down != null);
+        assertTrue(dungeon.multiplayerBuiltFingerprint != null);
+        com.interrupt.dungeoneer.entities.triggers.TriggeredWarp warp = new com.interrupt.dungeoneer.entities.triggers.TriggeredWarp();
+        warp.generated = false; warp.levelToLoad = "levels/shop-interstitial.bin";
+        warp.levelTheme = "CAVE"; warp.fogStart = 1.5f; warp.fogEnd = 9f; warp.spawnMonsters = false;
+        warp.fogColor = new com.badlogic.gdx.graphics.Color(0.4f, 0.1f, 0.2f, 1f);
+        NativeFloorRecipe recipe = NativeFloorRecipe.decode(NativeFloorRecipe.warp(warp, 3).encode());
+        Level shop = recipe.build(0x2728L);
+        assertEquals("CAVE", shop.theme);
+        assertEquals(1.5f, shop.fogStart, 0f); assertEquals(9f, shop.fogEnd, 0f);
+        assertEquals(warp.fogColor, shop.fogColor);
+        assertFalse(shop.spawnMonsters);
+        assertTrue(shop.multiplayerBuiltFingerprint != null);
+    }
+
+    @Test public void nativeGeneratedCampaignFloorUsesSharedSeedAcrossPeerSettings() {
+        buildFloor("levels/tutorial.bin", null, 77L, 3, 1f, 1L);
+        GameManager.renderer = new ObjenesisStd().newInstance(GenerationRenderer.class);
+        Level host = firstGeneratedCampaignFloor();
+        SharedFloorBuild hostBuild = new SharedFloorBuild(0xCAFE27L);
+        host.sharedFloorBuild = hostBuild; host.load();
+        assertTrue("Native generated build must finish its Shared Floor fingerprint", hostBuild.getFingerprint() != null);
+        Options.instance.graphicsDetailLevel = 1; Options.instance.gfxQuality = 0.25f;
+        Game.rand.setSeed(999L);
+        Game.instance.progression = new Progression();
+        Level client = firstGeneratedCampaignFloor();
+        SharedFloorBuild clientBuild = new SharedFloorBuild(0xCAFE27L);
+        client.sharedFloorBuild = clientBuild; client.load();
+        assertEquals(hostBuild.getFingerprint(), clientBuild.getFingerprint());
+        assertTrue("Native generated floor retains down stairs", host.down != null);
+        assertEquals(host.up != null, client.up != null);
+    }
+
+    static class GenerationRenderer extends SharedFloorLevelBuildTest.HeadlessRenderer {
+        @Override public void makeMapTextureForLevel(Level level) { }
+    }
+
+    private Level firstGeneratedCampaignFloor() {
+        for(Level definition : Game.buildLevelLayout()) if(definition.generated) return definition;
+        throw new AssertionError("Native campaign must contain generated dungeon floors");
     }
 
     @Test public void vanillaShopFloorDiffersBetweenPeersWithDifferentSettings() {

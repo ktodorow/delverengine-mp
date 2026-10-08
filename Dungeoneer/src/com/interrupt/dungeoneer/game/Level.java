@@ -81,6 +81,14 @@ public class Level {
 
 	/** Multiplayer only: builds this floor identically on every peer. Cleared after prepared build. */
 	public transient SharedFloorBuild sharedFloorBuild;
+    public transient com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint multiplayerBuiltFingerprint;
+    public transient com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot multiplayerBuiltProgression;
+    /** Scalar travel metadata stored in Host's native checkpoint. */
+    public String multiplayerNativeRecipe;
+    public String multiplayerParentArea, multiplayerParentFloor, multiplayerParentRecipe;
+    public long multiplayerParentSeed;
+    public float[] multiplayerReturnPosition, multiplayerArrival;
+
 
 	/** Host only: this floor is a Campaign Save checkpoint, loaded like a single-player save. */
 	public transient boolean restoredCampaignFloor;
@@ -341,6 +349,7 @@ public class Level {
 	/** Build a preselected campaign floor without enabling DelvEdit play-test semantics. */
 	public void loadForCampaign() {
 		if(!restoredCampaignFloor) {
+            if(multiplayerNativeRecipe != null) { load(); return; }
 			loadPreparedLevel(true);
 			return;
 		}
@@ -412,11 +421,11 @@ public class Level {
 		init(Source.LEVEL_START);
 
 		editorMarkers.clear();
-		if(shared != null) shared.finish(this);
+		if(shared != null) { shared.finish(this); multiplayerBuiltFingerprint = shared.getFingerprint(); }
 	}
 
 	public void generate(Source source) {
-		Random levelRand = new Random();
+		Random levelRand = sharedFloorBuild == null ? new Random() : new Random(Game.rand.nextLong());
 
 		entities = new Array<>();
 		non_collidable_entities = new Array<>();
@@ -442,7 +451,8 @@ public class Level {
 
 			// Try to generate a level
 			try {
-				generator = new DungeonGenerator(new Random(), dungeonLevel);
+				generator = new DungeonGenerator(sharedFloorBuild == null ? new Random() : new Random(Game.rand.nextLong()),
+                            dungeonLevel, sharedFloorBuild != null);
 				generatedLevel = generator.MakeDungeon(theme, roomGeneratorType, roomGeneratorChance, progression);
 				isValid = checkIsValidLevel(generatedLevel, dungeonLevel);
 			}
@@ -601,10 +611,38 @@ public class Level {
 	}
 
 	public void load(Source source) {
+        SharedFloorBuild shared = sharedFloorBuild;
+        Game game = Game.instance;
+        Progression current = game == null ? null : game.progression;
+        com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe recipe = multiplayerNativeRecipe == null ? null
+                : com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe.decode(multiplayerNativeRecipe);
+        Progression construction = recipe == null ? null : recipe.constructionProgression(current);
+        boolean prepared = recipe != null && recipe.isPrepared();
+        if(shared != null && !prepared) shared.begin();
+        int characterLevel = game == null || game.player == null ? 1 : game.player.level;
+        if(game != null && recipe != null && game.player != null) game.player.level = recipe.characterLevel;
+        if(game != null && construction != null) game.progression = construction;
+        boolean completed = false;
+        try {
+            if(prepared) loadPreparedLevel(true);
+            else loadNative(source);
+            if(shared != null && !prepared) { shared.finish(this); multiplayerBuiltFingerprint = shared.getFingerprint(); }
+            completed = true;
+        }
+        finally {
+            if(game != null && construction != null) game.progression = current;
+            if(game != null && recipe != null && game.player != null) game.player.level = characterLevel;
+            if(completed) com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe.mergeConstruction(current, construction);
+            if(shared != null && !prepared) shared.end();
+            sharedFloorBuild = null;
+        }
+    }
+
+    private void loadNative(Source source) {
 		needsSaving = true;
 		isLoaded = true;
 		
-		Random levelRand = new Random();
+		Random levelRand = sharedFloorBuild == null ? new Random() : new Random(Game.rand.nextLong());
 		
 		entities = new Array<Entity>();
 		non_collidable_entities = new Array<Entity>();
@@ -667,7 +705,8 @@ public class Level {
 
                 // Try to generate a level
 				try {
-                    generator = new DungeonGenerator(new Random(), dungeonLevel);
+                    generator = new DungeonGenerator(sharedFloorBuild == null ? new Random() : new Random(Game.rand.nextLong()),
+                            dungeonLevel, sharedFloorBuild != null);
                     generated = generator.MakeDungeon(theme, roomGeneratorType, roomGeneratorChance, progression);
                     isValid = checkIsValidLevel(generated, dungeonLevel);
                 }
@@ -2256,6 +2295,7 @@ public class Level {
 	}
 
 	Color ambientTileLighting = new Color();
+    public void setWarpAmbientTileLighting(Color color) { ambientTileLighting.set(color); }
 	Color tempLightColor = new Color();
 	public Color getAmbientTileLighting(float x, float y, float z) {
 		ambientTileLighting.set(Color.BLACK);

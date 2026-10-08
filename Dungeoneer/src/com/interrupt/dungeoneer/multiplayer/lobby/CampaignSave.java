@@ -32,8 +32,9 @@ public final class CampaignSave {
      * 4: Party Progression and Party Keys.
      * 5: personal Slot knowledge and shared potion appearance/effect mapping.
      * 6: logical Active area identity, Dormant Floors and frozen death-drop timers.
+     * 7: unclaimed death-scatter provenance for atomic Fresh Return cleanup.
      */
-    public static final int FORMAT = 6;
+    public static final int FORMAT = 7;
     public static final int MAX_CONSUMED_MONSTER_SPAWNERS = 4096;
     public static final int MAX_SPAWNER_KEY_BYTES = 512;
 
@@ -107,6 +108,7 @@ public final class CampaignSave {
     private final String activeAreaKey;
     private final List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> dormantFloors;
     private final java.util.Map<Long, Long> dropTimers;
+    private java.util.Map<Long, Integer> scatterOwners = Collections.emptyMap();
     private final com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping potionMapping;
     private final int partyKeys;
     private final long keyRevision;
@@ -404,8 +406,31 @@ public final class CampaignSave {
                 floorId, floorSeed, floorFingerprint, nativeWorldGeneration, slots, participants,
                 physicalItems, combat, doors, breakables, actorEffects, monsterSpawns,
                 consumedMonsterSpawners, nativeFloor, partyKeys, keyRevision, partyProgression,
-                potionMapping, activeAreaKey, dormantFloors, dropTimers);
+                potionMapping, activeAreaKey, dormantFloors, dropTimers).withScatterOwners(scatterOwners);
     }
+
+    /** Original character's unclaimed death scatter; pickup removes provenance. */
+    public CampaignSave withScatterOwners(java.util.Map<Long, Integer> owners) {
+        if(owners == null || owners.size() > (dormantFloors.size() + 1) * 4096)
+            throw new IllegalArgumentException("Scatter provenance exceeds bounds.");
+        java.util.Map<Long, PhysicalItemState> items = new java.util.HashMap<>();
+        for(PhysicalItemState item : physicalItems) items.put(item.entityId, item);
+        for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor : dormantFloors)
+            for(PhysicalItemState item : floor.getWorldItems()) items.put(item.entityId, item);
+        for(java.util.Map.Entry<Long, Integer> entry : owners.entrySet()) {
+            PhysicalItemState item = items.get(entry.getKey());
+            if(item == null || item.consumed || item.owner != null || entry.getValue() == null
+                    || getParticipant(entry.getValue()) == null)
+                throw new IllegalArgumentException("Scatter provenance needs unclaimed item and Campaign Slot.");
+        }
+        CampaignSave copy = new CampaignSave(compatibility, campaignId, capacity, startingLives, outcome,
+                floorId, floorSeed, floorFingerprint, nativeWorldGeneration, slots, participants, physicalItems,
+                combat, doors, breakables, actorEffects, monsterSpawns, consumedMonsterSpawners, nativeFloor,
+                partyKeys, keyRevision, partyProgression, potionMapping, activeAreaKey, dormantFloors, dropTimers);
+        copy.scatterOwners = Collections.unmodifiableMap(new java.util.LinkedHashMap<>(owners));
+        return copy;
+    }
+    public java.util.Map<Long, Integer> getScatterOwners() { return scatterOwners; }
 
     public String getActiveAreaKey() { return activeAreaKey; }
     public List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> getDormantFloors() { return dormantFloors; }

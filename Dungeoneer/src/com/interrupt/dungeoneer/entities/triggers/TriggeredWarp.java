@@ -82,6 +82,10 @@ public class TriggeredWarp extends Trigger {
 	@Override
 	public void doTriggerEvent(String value) {
 		triggerStatus=TriggerStatus.WAITING;
+        if(GameApplication.isDirectConnectSession()) {
+            GameApplication.requestPartyTravel(this, getTriggeringParticipantContext());
+            return;
+        }
 		// A client's avatar cannot move Host's whole session; Party travel rules own that (#27).
 		if(!activatedHere()) return;
 

@@ -67,6 +67,249 @@ public class DirectConnectCampaignPersistenceTest {
 
     @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
+    @Test public void abandonedLastLifeReturnsFreshAtNewFloorBeforeAtomicInstall() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("abandon-fresh"), new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        store.campaignSaves().save(save(compatibility(), roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        DirectConnectClient friend = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
+                roster.getSlot(2).getPresentation(), 2, new ReconnectTokenStore() {
+                    public String load(String campaign) { return roster.getSlot(2).getReconnectToken(); }
+                    public void save(String campaign, String token) { }
+                }, compatibility());
+        try {
+            awaitPhase(friend, DirectConnectPhase.LOBBY);
+            host.startSession(); awaitPhase(friend, DirectConnectPhase.READY); host.setSessionPaused(true);
+            final Level[] active = { nativeDormancyFloor() };
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
+            host.activatePartyDestination("dungeon:2", "levels/second.bin", 123L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> {
+                        active[0] = level;
+                        CampaignSave atomic = store.campaignSaves().load("friends", compatibility());
+                        assertEquals("Abandoned last Life returns immediately at new destination", 3,
+                                atomic.getParticipant(2).getParty().getRemainingLives());
+                        assertEquals(8, atomic.getParticipant(2).getParty().getHealth());
+                        assertEquals(0, atomic.getParticipant(2).getProgress().gold);
+                        assertEquals(0, atomic.getParticipant(2).getParty().getBleedoutTicks());
+                        assertTrue(atomic.getActorEffects().isEmpty());
+                    }, slot -> new com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter(
+                            new ParticipantProgress(new ParticipantId("campaign-slot-" + slot), 0L,
+                                    0, 0, 1, 4, 4, 4, 4, 4, 4, 0, 8, 12, 5), Collections.emptyList()));
+            assertEquals(PartyMemberState.CONNECTED, host.getPartyStatus().getMember(2).getState());
+        }
+        finally { friend.close(); host.close(); }
+    }
+
+    @Test public void visitedArrivalAbandonsDownedWithoutFreshReturn() throws Exception {
+        for(int oldLives : new int[] { 1, 2 }) {
+            CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("visited-abandon-" + oldLives), new SecureRandom());
+            CampaignRoster roster = persistenceRoster(store);
+            CampaignSave source = withFloor(save(compatibility(), roster), com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(nativeDormancyFloor()));
+            List<CampaignSave.ParticipantState> participants = new ArrayList<>(source.getParticipants());
+            CampaignSave.ParticipantState old = participants.get(1);
+            participants.set(1, new CampaignSave.ParticipantState(2,
+                    old.getParty().withIncapacitation(PartyMemberState.DOWNED, oldLives, 99, 0, 0),
+                    old.getMovement(), old.getProgress(), old.isHoldingOrb(), old.getPersonalKnowledge()));
+            source = new CampaignSave(source.getCompatibility(), source.getCampaignId(), source.getCapacity(), source.getStartingLives(),
+                    source.getOutcome(), source.getFloorId(), source.getFloorSeed(), source.getFloorFingerprint(), source.getNativeWorldGeneration(),
+                    source.getSlots(), participants, source.getPhysicalItems(), source.getCombat(), source.getDoors(), source.getBreakables(),
+                    source.getActorEffects(), source.getMonsterSpawns(), source.getConsumedMonsterSpawners(), source.getNativeFloor(),
+                    source.getPartyKeys(), source.getKeyRevision(), source.getPartyProgression(), source.getPotionMapping());
+            source = source.withFloorHistory("origin", Collections.singletonList(
+                    com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.fromCampaign("visited", source)), Collections.emptyMap());
+            store.campaignSaves().save(source);
+            DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+            DirectConnectClient friend = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'), roster.getSlot(2).getPresentation(), 2,
+                    new ReconnectTokenStore() {
+                        public String load(String campaign) { return roster.getSlot(2).getReconnectToken(); }
+                        public void save(String campaign, String token) { }
+                    }, compatibility());
+            try {
+                awaitPhase(friend, DirectConnectPhase.LOBBY); host.startSession(); awaitPhase(friend, DirectConnectPhase.READY); host.setSessionPaused(true);
+                host.activatePartyDestination("visited", source.getFloorId(), 101L, null,
+                        () -> { throw new AssertionError("Visited destination must restore"); }, level -> { },
+                        slot -> { throw new AssertionError("Visited destination must not roll Fresh Return"); });
+                CampaignSave installed = store.campaignSaves().load("friends", compatibility());
+                PartyMemberStatus returned = installed.getParticipant(2).getParty();
+                assertEquals(oldLives - 1, returned.getRemainingLives());
+                assertEquals(oldLives == 1 ? 0 : 4, returned.getHealth());
+                assertEquals(oldLives == 1 ? PartyMemberState.SPECTATING : PartyMemberState.CONNECTED, returned.getState());
+                assertTrue("Life loss applies gold penalty without fresh character reset", installed.getParticipant(2).getProgress().gold > 0);
+                assertTrue(installed.getActorEffects().isEmpty());
+            }
+            finally { friend.close(); host.abortCampaignRecovery("Visited travel test cleanup."); host.close(); }
+        }
+    }
+
+    @Test public void reconnectGraceKeepsFreshBodyAndRefusedWriteKeepsAbandonedSourceIntact() throws Exception {
+        File root = temporaryFolder.newFolder("travel-grace");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store); store.campaignSaves().save(save(compatibility(), roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        ReconnectTokenStore tokens = new ReconnectTokenStore() {
+            public String load(String campaign) { return roster.getSlot(2).getReconnectToken(); }
+            public void save(String campaign, String token) { }
+        };
+        DirectConnectClient friend = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
+                roster.getSlot(2).getPresentation(), 2, tokens, compatibility());
+        try {
+            awaitPhase(friend, DirectConnectPhase.LOBBY); host.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            host.setSessionPaused(true); friend.close();
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(host.getPartyStatus().getMember(2).getState() != PartyMemberState.RECONNECTING
+                    && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            final Level[] active = { nativeDormancyFloor() };
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
+            java.util.function.IntFunction<com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter> starter = slot ->
+                    new com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter(new ParticipantProgress(
+                            new ParticipantId("campaign-slot-" + slot), 0, 0, 0, 1, 4, 4, 4, 4, 4, 4, 0, 8, 12, 5), Collections.emptyList());
+            File primary = new File(new File(root, "friends"), "campaign.save");
+            byte[] before = java.nio.file.Files.readAllBytes(primary.toPath());
+            File refusedBackup = new File(primary.getParentFile(), "campaign.previous");
+            assertTrue(refusedBackup.mkdir()); File blocker = new File(refusedBackup, "blocked"); assertTrue(blocker.createNewFile());
+            long generation = host.getNativeWorldGeneration();
+            try {
+                host.activatePartyDestination("new", "levels/new.bin", 101L, null,
+                        DirectConnectCampaignPersistenceTest::nativeDormancyFloor,
+                        level -> { throw new AssertionError("Refused save cannot install destination"); }, starter);
+                org.junit.Assert.fail("Refused atomic replacement must fail");
+            }
+            catch(IllegalStateException expected) { }
+            assertArrayEquals(before, java.nio.file.Files.readAllBytes(primary.toPath()));
+            assertEquals(generation, host.getNativeWorldGeneration());
+            assertEquals(1, host.getPartyStatus().getMember(2).getRemainingLives());
+            assertEquals(37, host.getEconomy().get(new ParticipantId("campaign-slot-2")).gold);
+            assertTrue(blocker.delete()); assertTrue(refusedBackup.delete());
+            host.activatePartyDestination("new", "levels/new.bin", 101L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> active[0] = level, starter);
+            assertEquals("Frozen body remains reclaimable during grace", PartyMemberState.RECONNECTING,
+                    host.getPartyStatus().getMember(2).getState());
+            assertTrue(host.getPartyStatus().getMember(2).getEntityId() != null);
+            friend = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
+                    roster.getSlot(2).getPresentation(), 2, tokens, compatibility());
+            awaitPhase(friend, DirectConnectPhase.READY);
+            assertEquals(3, friend.getPartyStatus().getMember(2).getRemainingLives());
+            assertEquals(8, friend.getPartyStatus().getMember(2).getHealth());
+            assertEquals(PartyMemberState.CONNECTED, friend.getPartyStatus().getMember(2).getState());
+        }
+        finally { friend.close(); host.close(); }
+    }
+
+    @Test public void firstArrivalResetsDisconnectedSpectatorInsideAtomicTravelSave() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("fresh-absent"), new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        CampaignSave original = save(compatibility(), roster);
+        List<CampaignSave.ParticipantState> slots = new ArrayList<>(original.getParticipants());
+        slots.set(1, new CampaignSave.ParticipantState(2,
+                new PartyMemberStatus(2, null, "Friend", AvatarCatalog.HUMANOID_2, 0, 8, 0, PartyMemberState.DISCONNECTED),
+                original.getParticipant(2).getMovement(), original.getParticipant(2).getProgress(), false,
+                original.getParticipant(2).getPersonalKnowledge()));
+        store.campaignSaves().save(new CampaignSave(compatibility(), roster.getCampaignId(), 2, 3,
+                CampaignSave.Outcome.ACTIVE, original.getFloorId(), original.getFloorSeed(), null, 4L,
+                roster.getSlots(), slots, original.getPhysicalItems(),
+                new CombatSnapshot(9L, 120L, Collections.emptyList(), Arrays.asList(
+                        original.getCombat().getCombatant("participant:campaign-slot-1"),
+                        new CombatantSnapshot("participant:campaign-slot-2", CombatantKind.PARTICIPANT, 0, 8))),
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList()));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            final Level[] active = { nativeDormancyFloor() };
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
+            ParticipantId friend = new ParticipantId("campaign-slot-2");
+            host.getItemWorld().registerParticipant(friend, 12);
+            PhysicalItemState oldGear = host.getItemWorld().spawn("old-armor", friend, 1f, 1f, 0f);
+            final CampaignSave[] atomic = { null };
+            host.activatePartyDestination("dungeon:2", "levels/second.bin", 123L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> {
+                        active[0] = level;
+                        atomic[0] = store.campaignSaves().load("friends", compatibility());
+                    }, slot -> new com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter(
+                            new ParticipantProgress(new ParticipantId("campaign-slot-" + slot), 0L,
+                                    0, 0, 1, 4, 4, 4, 4, 4, 4, 0, 8, 12, 5),
+                            Collections.singletonList(new com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter.Starter(
+                                    "new-sword", ItemProperties.DEFAULT, ""))));
+            CampaignSave.ParticipantState fresh = atomic[0].getParticipant(2);
+            assertEquals(3, fresh.getParty().getRemainingLives());
+            assertEquals(8, fresh.getParty().getHealth());
+            assertEquals(0, fresh.getProgress().gold);
+            assertEquals(1, fresh.getProgress().level);
+            assertEquals(0, fresh.getProgress().experience);
+            assertFalse(atomic[0].getPhysicalItems().stream().anyMatch(i -> i.entityId == oldGear.entityId && !i.consumed));
+            assertEquals(1, atomic[0].getPhysicalItems().stream().filter(i -> friend.equals(i.owner)).count());
+            assertTrue("Fresh Return belongs to first atomic destination write", atomic[0].getNativeWorldGeneration() > 1L);
+        }
+        finally { host.close(); }
+    }
+
+    @Test public void freshReturnRemovesOnlyOwnUnclaimedScatterAcrossPreservedFloors() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("fresh-scatter"), new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        CampaignSave original = save(compatibility(), roster);
+        List<CampaignSave.ParticipantState> participants = new ArrayList<>(original.getParticipants());
+        CampaignSave.ParticipantState old = original.getParticipant(2);
+        participants.set(1, new CampaignSave.ParticipantState(2,
+                new PartyMemberStatus(2, null, "Friend", AvatarCatalog.HUMANOID_2, 0, 8, 0, PartyMemberState.DISCONNECTED),
+                old.getMovement(), old.getProgress(), false, old.getPersonalKnowledge()));
+        Level past = nativeDormancyFloor();
+        Item nativeDrop = new Item(); nativeDrop.multiplayerIdentity = "item:202"; past.entities.add(nativeDrop);
+        PhysicalItemState ownPast = new PhysicalItemState(202, 1, "past-scatter", null, 1f, 1f, 0f, ItemProperties.DEFAULT, false);
+        PhysicalItemState otherPast = new PhysicalItemState(203, 1, "other-scatter", null, 1f, 1f, 0f, ItemProperties.DEFAULT, false);
+        com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState prior = new com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState(
+                "past", "levels/past.bin", 99L, null, com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(past),
+                Arrays.asList(ownPast, otherPast), null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList(), Collections.singletonMap(202L, 100L));
+        List<PhysicalItemState> items = new ArrayList<>(original.getPhysicalItems());
+        items.add(new PhysicalItemState(201, 1, "source-scatter", null, 1f, 1f, 0f, ItemProperties.DEFAULT, false));
+        Map<Long, Integer> owners = new HashMap<>(); owners.put(201L, 2); owners.put(202L, 2); owners.put(203L, 1);
+        CampaignSave saved = new CampaignSave(compatibility(), "friends", 2, 3, CampaignSave.Outcome.ACTIVE,
+                original.getFloorId(), original.getFloorSeed(), null, 4L, roster.getSlots(), participants, items,
+                new CombatSnapshot(9L, 120L, Collections.emptyList(), Arrays.asList(
+                        original.getCombat().getCombatant("participant:campaign-slot-1"),
+                        new CombatantSnapshot("participant:campaign-slot-2", CombatantKind.PARTICIPANT, 0, 8))),
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList())
+                .withFloorHistory("source", Collections.singletonList(prior), Collections.emptyMap()).withScatterOwners(owners);
+        store.campaignSaves().save(saved);
+        assertEquals("Ownership survives cold save", owners, store.campaignSaves().load("friends", compatibility()).getScatterOwners());
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(nativeDormancyFloor()));
+            host.activatePartyDestination("new", "levels/new.bin", 101L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> { }, slot ->
+                            new com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter(new ParticipantProgress(
+                                    new ParticipantId("campaign-slot-" + slot), 0, 0, 0, 1, 4, 4, 4, 4, 4, 4, 0, 8, 12, 5), Collections.emptyList()));
+            CampaignSave atomic = store.campaignSaves().load("friends", compatibility());
+            assertEquals(Collections.singletonMap(203L, 1), atomic.getScatterOwners());
+            for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor : atomic.getDormantFloors()) {
+                assertFalse(floor.getWorldItems().stream().anyMatch(item -> item.entityId == 201 || item.entityId == 202));
+                assertTrue(floor.getDropTimers().isEmpty());
+                if(floor.getAreaKey().equals("past")) {
+                    assertEquals(203L, floor.getWorldItems().get(0).entityId);
+                    assertTrue("Lost scatter must not respawn from native checkpoint",
+                            com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.restore(floor.getNativeFloor()).entities.size == 0);
+                }
+            }
+        }
+        finally { host.close(); }
+        DirectConnectHost resumed = DirectConnectHost.start(0, compatibility(), roster, store,
+                new com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld(
+                        com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.restore(
+                                store.campaignSaves().load("friends", compatibility()).getNativeFloor())));
+        DirectConnectClient friend = DirectConnectClient.connect("127.0.0.1", resumed.getBoundPort(), identity('2'),
+                roster.getSlot(2).getPresentation(), 2, new ReconnectTokenStore() {
+                    public String load(String campaign) { return roster.getSlot(2).getReconnectToken(); }
+                    public void save(String campaign, String token) { }
+                }, compatibility());
+        try {
+            awaitPhase(friend, DirectConnectPhase.LOBBY); resumed.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            assertEquals(3, friend.getPartyStatus().getMember(2).getRemainingLives());
+            assertEquals(8, friend.getPartyStatus().getMember(2).getHealth());
+            assertEquals(0, resumed.getEconomy().get(new ParticipantId("campaign-slot-2")).gold);
+        }
+        finally { friend.close(); resumed.close(); }
+    }
+
     @Test public void hostActivatesOneAreaAndReturnsNativeWorldWithoutMovingItsDrops() throws Exception {
         CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("floor-history"),
                 new SecureRandom());
@@ -809,24 +1052,27 @@ public class DirectConnectCampaignPersistenceTest {
                 new SecureRandom());
         store.save(roster);
         DirectConnectCompatibility compatibility = compatibility();
-        store.campaignSaves().save(withFloor(save(compatibility, roster), new byte[] { 1, 2, 3 }));
+        byte[] oldFloor = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(nativeDormancyFloor());
+        Level nextFloor = nativeDormancyFloor(); nextFloor.tiles[0].floorHeight = 0.25f;
+        byte[] liveFloor = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(nextFloor);
+        store.campaignSaves().save(withFloor(save(compatibility, roster), oldFloor));
 
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
             host.startSession();
 
-            assertArrayEquals(new byte[] { 1, 2, 3 }, host.takeRestoredNativeFloor());
+            assertArrayEquals(oldFloor, host.takeRestoredNativeFloor());
             assertNull("Saved floor loads once", host.takeRestoredNativeFloor());
             assertArrayEquals("A checkpoint before the floor is live must keep the saved floor",
-                    new byte[] { 1, 2, 3 }, host.persistCampaign().getNativeFloor());
+                    oldFloor, host.persistCampaign().getNativeFloor());
 
-            host.setNativeFloorCapture(() -> new byte[] { 9, 9 });
-            assertArrayEquals(new byte[] { 9, 9 }, host.persistCampaign().getNativeFloor());
+            host.setNativeFloorCapture(() -> liveFloor);
+            assertArrayEquals(liveFloor, host.persistCampaign().getNativeFloor());
         }
         finally {
             host.close();
         }
-        assertArrayEquals(new byte[] { 9, 9 },
+        assertArrayEquals(liveFloor,
                 store.campaignSaves().load("friends", compatibility).getNativeFloor());
     }
 

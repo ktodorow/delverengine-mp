@@ -503,6 +503,9 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             Map.Entry<Long, Item> binding = iterator.next();
             PhysicalItemState state = active.get(binding.getKey());
             if(state == null || state.owner == null || state.consumed) {
+                if(current.player.inventory != null && current.player.inventory.contains(binding.getValue(), true)
+                        || current.player.equippedItems != null && current.player.equippedItems.containsValue(binding.getValue()))
+                    current.player.removeAuthoritativeItem(binding.getValue());
                 itemIds.remove(binding.getValue());
                 iterator.remove();
             }
@@ -575,6 +578,30 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             })) returned++;
         }
         return returned;
+    }
+
+    /** Detached native roll; Campaign save decides when it becomes live. */
+    public com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter rollFreshCharacter(int slot) {
+        Player template = startingKitTemplate();
+        if(template == null && com.interrupt.dungeoneer.owned.OwnedGameCopyMount.isMounted())
+            throw new IllegalStateException("Owned native starting character template is unavailable.");
+        Player character = template == null ? new Player() : template;
+        StartingKit kit = template == null ? new StartingKit() : rollStartingKit(template);
+        java.util.List<com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter.Starter> entries = new ArrayList<>();
+        for(Item item : kit.worn) {
+            ItemDescription description = describe(item);
+            entries.add(new com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter.Starter(
+                    description.templateId, description.properties, item.GetEquipLoc()));
+        }
+        for(Item item : kit.carried) {
+            ItemDescription description = describe(item);
+            entries.add(new com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter.Starter(
+                    description.templateId, description.properties, ""));
+        }
+        return new com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter(
+                new com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress(new ParticipantId("campaign-slot-" + slot),
+                        0L, 0, 0, 1, character.stats.ATK, character.stats.DEF, character.stats.DEX, character.stats.SPD,
+                        character.stats.MAG, character.stats.END, 0, character.maxHp, character.inventorySize, character.hotbarSize), entries);
     }
 
     /**

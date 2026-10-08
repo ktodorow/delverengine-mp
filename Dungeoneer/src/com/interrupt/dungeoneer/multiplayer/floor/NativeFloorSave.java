@@ -85,6 +85,32 @@ public final class NativeFloorSave {
         return level;
     }
 
+    /** Detached checkpoint cleanup prevents erased scatter returning from an engine graph. */
+    public static byte[] withoutItems(byte[] checkpoint, java.util.Set<Long> lost) {
+        if(checkpoint == null || lost.isEmpty()) return checkpoint;
+        Level level = restore(checkpoint);
+        java.util.IdentityHashMap<Entity, Boolean> seen = new java.util.IdentityHashMap<>();
+        removeItems(level.entities, lost, seen); removeItems(level.static_entities, lost, seen);
+        removeItems(level.non_collidable_entities, lost, seen);
+        return capture(level);
+    }
+    private static void removeItems(Array<Entity> list, java.util.Set<Long> lost,
+            java.util.IdentityHashMap<Entity, Boolean> seen) {
+        if(list == null) return;
+        for(int index = list.size - 1; index >= 0; index--) {
+            Entity entity = list.get(index);
+            if(entity == null) continue;
+            Long id = null;
+            if(entity instanceof com.interrupt.dungeoneer.entities.Item && entity.multiplayerIdentity != null
+                    && entity.multiplayerIdentity.startsWith("item:")) {
+                try { id = Long.valueOf(entity.multiplayerIdentity.substring(5)); }
+                catch(NumberFormatException invalid) { /* Native content identity, not a registered item. */ }
+            }
+            if(id != null && lost.contains(id)) { list.removeIndex(index); continue; }
+            if(seen.put(entity, Boolean.TRUE) == null) removeItems(entity.getAttached(), lost, seen);
+        }
+    }
+
     private static Array<Entity> persisted(Array<Entity> live) {
         Array<Entity> kept = new Array<Entity>(live == null ? 0 : live.size);
         if(live == null) return kept;

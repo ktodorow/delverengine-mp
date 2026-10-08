@@ -96,6 +96,31 @@ public class GameManagerEscapeTest {
         assertFalse(game.loadLevel(0, null));
     }
 
+    @Test public void nativeStairsAndWarpSubmitPartyTravelIntent() throws Exception {
+        final java.util.List<String> requests = new java.util.ArrayList<>();
+        DirectConnectPeer client = (DirectConnectPeer)Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] { DirectConnectPeer.class },
+                (proxy, method, arguments) -> {
+                    if(method.getName().equals("requestPartyTransition")) requests.add((String)arguments[0]);
+                    return null;
+                });
+        GameApplication.instance = application(client);
+        Game game = new ObjenesisStd().newInstance(Game.class);
+        game.player = new com.interrupt.dungeoneer.entities.Player();
+        game.level = new com.interrupt.dungeoneer.game.Level(4, 4);
+        Game.instance = game;
+        com.interrupt.dungeoneer.entities.Stairs down = new com.interrupt.dungeoneer.entities.Stairs();
+        down.direction = com.interrupt.dungeoneer.entities.Stairs.StairDirection.down;
+        game.level.entities.add(down);
+        com.interrupt.dungeoneer.entities.triggers.TriggeredWarp warp = new ObjenesisStd().newInstance(com.interrupt.dungeoneer.entities.triggers.TriggeredWarp.class);
+        warp.id = "shop"; game.level.entities.add(warp);
+        game.changeLevel(down); warp.doTriggerEvent("");
+        org.junit.Assert.assertEquals(2, requests.size());
+        org.junit.Assert.assertEquals("stairs:down", requests.get(0));
+        org.junit.Assert.assertTrue(requests.get(1).startsWith("warp:"));
+        assertSame(game.level, Game.instance.level);
+    }
+
     @Test public void directConnectNativeTravelCannotCreateSeparateParticipantFloors() throws Exception {
         DirectConnectPeer client = (DirectConnectPeer)Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[] { DirectConnectPeer.class },

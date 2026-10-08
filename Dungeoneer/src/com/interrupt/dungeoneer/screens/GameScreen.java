@@ -105,6 +105,18 @@ public class GameScreen implements Screen {
                 GameApplication.instance.returnToDirectConnectSession();
                 return;
             }
+            if(directConnect != null) GameApplication.instance.updateDirectConnectPartyTravel();
+            if(directConnect != null && directConnect.getPartyTransition().phase
+                    == com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.LOADING) {
+                if(networkMovementController != null) networkMovementController.prepare(game);
+                if(networkLivesController != null) networkLivesController.update(game, input, delta);
+                if(networkItemController != null) networkItemController.prepare(game);
+                if(networkEconomyController != null) networkEconomyController.prepare(game);
+                if(networkCombatController != null) networkCombatController.prepare(game);
+                com.interrupt.dungeoneer.multiplayer.floor.PartyDestination destination = directConnect.getPartyDestination();
+                if(destination != null && destination.generation == directConnect.getNativeWorldGeneration())
+                    directConnect.acknowledgePartyDestination(destination.generation);
+            }
 			handlePartyControls(directConnect);
 			if(directConnect != null && directConnect.isPartyWiped() && !partyWipeShown
 					&& game != null && !game.gameOver) {
@@ -362,7 +374,10 @@ public class GameScreen implements Screen {
     private void handlePartyControls(DirectConnectPeer peer) {
         if(peer == null || !canHandlePartyControls(peer.getStatus().getPhase(),
                 OverlayManager.instance.current() != null)) return;
-        if(Gdx.input.isKeyJustPressed(Input.Keys.T)) {
+        if(Gdx.input.isKeyJustPressed(Input.Keys.C)) {
+            peer.cancelPartyTransition();
+        }
+        else if(Gdx.input.isKeyJustPressed(Input.Keys.T)) {
             OverlayManager.instance.push(new PartyChatOverlay(peer));
         }
         else if(Gdx.input.isKeyJustPressed(Input.Keys.P)) {

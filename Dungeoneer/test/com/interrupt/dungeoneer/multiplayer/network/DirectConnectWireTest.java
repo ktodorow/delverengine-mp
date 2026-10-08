@@ -53,6 +53,29 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class DirectConnectWireTest {
+    @Test public void travelTrafficCarriesWorldGenerationAndRejectsTruncation() throws Exception {
+        DirectConnectWire.MovementInputs inputs = (DirectConnectWire.MovementInputs)roundTrip(new DirectConnectWire.MovementInputs(
+                "session", 42L, java.util.Collections.singletonList(new MovementInputFrame(1, 0f, 0f, 0f, false)), 7L));
+        assertEquals(7L, inputs.generation);
+        DirectConnectWire.CombatActionRequestMessage combat = (DirectConnectWire.CombatActionRequestMessage)roundTrip(
+                new DirectConnectWire.CombatActionRequestMessage("session", 1L, CombatAction.MELEE, 1f, 0f, 0f).atGeneration(7L));
+        assertEquals(7L, combat.generation);
+        DirectConnectWire.ReviveIntentMessage revive = (DirectConnectWire.ReviveIntentMessage)roundTrip(
+                new DirectConnectWire.ReviveIntentMessage("session", 2, true, 7L));
+        assertEquals(7L, revive.generation);
+        java.util.List<Message> travel = Arrays.asList(
+                new DirectConnectWire.TravelIntent("session", 7L, "stairs:down"),
+                new DirectConnectWire.TravelState("session", new com.interrupt.dungeoneer.multiplayer.floor.PartyTransition(
+                        2L, 7L, com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.COUNTDOWN, "stairs:down", 60)),
+                new DirectConnectWire.TravelDestination("session", new com.interrupt.dungeoneer.multiplayer.floor.PartyDestination(
+                        8L, "campaign:2", "campaign:2", 99L)), new DirectConnectWire.TravelReady("session", 8L));
+        for(Message message : travel) {
+            assertNotNull(roundTrip(message));
+            ByteBuf bytes = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT, message);
+            bytes.writerIndex(bytes.writerIndex() - 1); rejectPartyDatagram(bytes);
+        }
+    }
+
     @Test public void admissionBarriersRoundTripAndRejectMalformedBounds() throws Exception {
         for(int stage = DirectConnectWire.AdmissionSync.BEGIN; stage <= DirectConnectWire.AdmissionSync.ACTIVATED; stage++) {
             DirectConnectWire.AdmissionSync decoded = (DirectConnectWire.AdmissionSync)roundTrip(

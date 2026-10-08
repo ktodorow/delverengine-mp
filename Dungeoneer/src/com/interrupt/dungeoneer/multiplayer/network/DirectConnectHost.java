@@ -26,6 +26,7 @@ import com.interrupt.dungeoneer.multiplayer.items.DoorSnapshot;
 import com.interrupt.dungeoneer.multiplayer.items.BreakableSnapshot;
 import com.interrupt.dungeoneer.multiplayer.items.ItemRequest;
 import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
+import com.interrupt.dungeoneer.multiplayer.items.ItemProperties;
 import com.interrupt.dungeoneer.GameApplication;
 import com.interrupt.dungeoneer.multiplayer.host.AuthoritativeHostSession;
 import com.interrupt.dungeoneer.multiplayer.host.HostDisconnectOutcome;
@@ -165,6 +166,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private CampaignSave lastCapturedCampaign;
     private Thread recoveryShutdownHook;
     private volatile MovementCollisionWorld movementWorld;
+    private volatile com.interrupt.dungeoneer.multiplayer.floor.PartyTransition travel =
+            com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.idle(1L, 1L);
+    private final Map<String, float[]> partyPortals = new LinkedHashMap<>();
+    private ParticipantId travelActivator;
     private String activeAreaKey;
     private String activeFloorId;
     private final Map<String, com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> dormantFloors = new LinkedHashMap<>();
@@ -241,6 +246,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private final Map<ParticipantId, DeathDrop> deathDrops =
             new LinkedHashMap<ParticipantId, DeathDrop>();
     /** Exhausted Participants' scattered items and the unpaused Host tick that removes them. */
+    private final Map<Long, Integer> scatterOwners = new LinkedHashMap<>();
     private final Map<Long, Long> expiringDrops = new LinkedHashMap<Long, Long>();
     private final Random deathDropRandom = new Random();
     private long exhaustedDropTicks = DeathDropRules.EXHAUSTED_DROP_TICKS;
@@ -315,6 +321,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         sharedFloorSeed = saved == null ? nextNonZeroLong(random) : saved.getFloorSeed();
         if(saved != null) {
             startingLives = saved.getStartingLives();
+            scatterOwners.putAll(saved.getScatterOwners());
             nativeWorldGeneration = saved.getNativeWorldGeneration();
             ownedFloorId = compatibility.usesOpenSourceTestContent()
                     ? null : saved.getFloorId();
@@ -359,6 +366,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor : saved.getDormantFloors())
                 dormantFloors.put(floor.getAreaKey(), floor);
             itemWorld.reserveEntityIds(nextCampaignItemId(saved.getPhysicalItems(), saved.getDormantFloors()));
+            if(saved.hasNativeFloor()) {
+                com.interrupt.dungeoneer.game.Level nativeLevel = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.restore(saved.getNativeFloor());
+                if(nativeLevel.multiplayerNativeRecipe != null) partyDestination = new com.interrupt.dungeoneer.multiplayer.floor.PartyDestination(
+                        nativeWorldGeneration, activeAreaKey, activeFloorId, sharedFloorSeed,
+                        nativeLevel.multiplayerNativeRecipe, nativeLevel.multiplayerArrival);
+            }
         }
         // Native resume collision must use played tiles, including terrain changed by triggers.
         this.movementWorld = saved != null && saved.hasNativeFloor()
@@ -1039,6 +1052,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                             advanceLives(session.getHostTick());
                             expireReconnectGrace(session.getHostTick());
                             advanceAdmissions(session.getHostTick());
+                            advancePartyTravel();
                         }
                     }
                 }
@@ -1210,7 +1224,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             MovementSnapshot baseline = (MovementSnapshot)movementSimulation.snapshot(
                     Math.max(1L, movementSession.getHostTick()));
             movementReplication.applyFloorSnapshot(baseline);
-            broadcast(new MovementSnapshotMessage(sessionId, baseline));
+            broadcast(new MovementSnapshotMessage(sessionId, baseline, nativeWorldGeneration));
         }
     }
 
@@ -1708,6 +1722,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     private synchronized void combatAction(ChannelHandlerContext context,
             CombatActionRequestMessage request) {
+        if(request.generation != nativeWorldGeneration) return;
         RemoteConnection connection = activeConnection(context, request.sessionId, "Combat action");
         if(connection == null || isSessionPaused()) return;
         AuthoritativeHostSession session = movementSession;
@@ -1944,7 +1959,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         if(decoded instanceof MovementInputs && sessionStarted) {
 			if(isSessionPaused()) return;
             MovementInputs inputs = (MovementInputs)decoded;
-            if(!sessionId.equals(inputs.sessionId)) return;
+            if(!sessionId.equals(inputs.sessionId) || inputs.generation != nativeWorldGeneration) return;
             RemoteConnection connection = findConnection(inputs.udpToken);
             if(connection == null || connection.movementDescriptor == null
                     || !packet.sender().equals(connection.udpAddress)) return;
@@ -2202,8 +2217,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             float[] at = scatterPosition(loss.x, loss.y, loss.z, radius);
             if(!itemWorld.forfeit(item.entityId, false, at[0], at[1], at[2], verdict.condition)) continue;
-            if(loss.exhausted) synchronized(this) {
-                expiringDrops.put(item.entityId, hostTick + exhaustedDropTicks);
+            synchronized(this) {
+                scatterOwners.put(item.entityId, Integer.parseInt(loss.participant.getValue().substring("campaign-slot-".length())));
+                if(loss.exhausted) expiringDrops.put(item.entityId, hostTick + exhaustedDropTicks);
             }
         }
         com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress =
@@ -2420,6 +2436,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     private synchronized void reviveIntent(ChannelHandlerContext context,
             DirectConnectWire.ReviveIntentMessage message) {
+        if(message.generation != nativeWorldGeneration) return;
         RemoteConnection connection = activeConnection(context, message.sessionId, "Revival intent");
         if(connection == null || connection.reconnectGrace != null) return;
         reviveIntent(connection.movementDescriptor.getParticipantId(),
@@ -2680,7 +2697,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     public synchronized void awaitNativeWorld() { nativeWorldStable = false; }
 
     public synchronized void completeNativeWorld(long generation) {
-        if(generation == nativeWorldGeneration) nativeWorldStable = true;
+        if(generation == nativeWorldGeneration
+                && travel.phase != com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.LOADING)
+            nativeWorldStable = true;
     }
 
 
@@ -2773,11 +2792,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private void sendCurrentSessionState(RemoteConnection connection,
             MovementEntityDescriptor descriptor, String reconnectMessage) {
         ParticipantId participant = participantId(connection.slot);
+        connection.channel.write(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
         for(MovementEntityDescriptor present : movementReplication.getEntities()) {
             connection.channel.write(new EntitySpawn(sessionId, present));
         }
         if(movementSimulation != null && currentHostTick() > 0L) connection.channel.write(new MovementSnapshotMessage(sessionId,
-                (MovementSnapshot)movementSimulation.snapshot(currentHostTick())));
+                (MovementSnapshot)movementSimulation.snapshot(currentHostTick()), nativeWorldGeneration));
         connection.channel.write(new PartyStatusMessage(sessionId,
                 connection.lateParticipant && !connection.spectatorReady
                         ? withLateSpectator(connection, partyStatus) : partyStatus));
@@ -2786,6 +2806,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             connection.channel.write(new CombatStateMessage(sessionId, publishedCombatSnapshot));
         }
         connection.channel.write(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
+        if(partyDestination != null) connection.channel.write(new DirectConnectWire.TravelDestination(sessionId, partyDestination));
         for(com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn spawn : nativeMonsterSpawns) {
             connection.channel.write(new DirectConnectWire.NativeMonsterSpawnMessage(sessionId,
                     ++nativeMonsterSpawnSequence, spawn, nativeWorldGeneration));
@@ -3040,8 +3061,85 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         return true;
     }
 
+    public synchronized void registerPartyPortal(String key, float x, float y, float z) {
+        if(key == null || key.isEmpty() || key.length() > 256 || !Float.isFinite(x)
+                || !Float.isFinite(y) || !Float.isFinite(z)) throw new IllegalArgumentException("Invalid Party portal.");
+        partyPortals.put(key, new float[] { x, y, z });
+    }
+
+    @Override public com.interrupt.dungeoneer.multiplayer.floor.PartyTransition getPartyTransition() { return travel; }
+    @Override public synchronized void requestPartyTransition(String portal) {
+        MovementEntityDescriptor source = hostMovementDescriptor();
+        if(source != null) travelIntent(source.getParticipantId(), nativeWorldGeneration, portal);
+    }
+    @Override public synchronized void cancelPartyTransition() { requestPartyTransition(""); }
+
+    /** Native Host trigger attribution already passed authenticated object-use boundary. */
+    public synchronized void requestNativePartyTransition(ParticipantId participant, String portal) {
+        if(livesDescriptor(participant) != null) travelIntent(participant, nativeWorldGeneration, portal);
+    }
+
+    private void travelIntent(ParticipantId participant, long generation, String portal) {
+        if(!sessionStarted || !nativeWorldStable || isSessionPaused() || partyWiped
+                || partyProgression.victory || generation != nativeWorldGeneration || !lives.isStanding(participant)) return;
+        if(portal.isEmpty()) {
+            if(travel.phase != com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.LOADING) clearPartyTravel();
+            return;
+        }
+        if(travel.phase != com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.IDLE) return;
+        float[] at = partyPortals.get(portal);
+        if(at == null || !nearPortal(movementSimulation.getState(participant), at, 1.1f)) return;
+        travelActivator = participant;
+        publishTravel(com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.GATHERING, portal,
+                com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.COUNTDOWN_TICKS);
+    }
+
+    private boolean nearPortal(MovementEntityState state, float[] at, float radius) {
+        if(state == null) return false;
+        float dx = state.getX() - at[0], dy = state.getY() - at[1];
+        return dx * dx + dy * dy <= radius * radius && Math.abs(state.getZ() - at[2]) <= 1.5f
+                && movementWorld.hasLineOfSight(state.getX(), state.getY(), at[0], at[1]);
+    }
+
+    private synchronized void advancePartyTravel() {
+        if(travel.phase == com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.IDLE
+                || travel.phase == com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.LOADING) return;
+        float[] at = partyPortals.get(travel.portal);
+        if(at == null || !lives.isStanding(travelActivator)) { clearPartyTravel(); return; }
+        boolean gathered = true;
+        for(PartyMemberStatus member : partyStatus.getMembers()) {
+            if(member.getState() != PartyMemberState.CONNECTED || member.getHealth() <= 0) continue;
+            ParticipantId participant = new ParticipantId("campaign-slot-" + member.getCampaignSlot());
+            if(!nearPortal(movementSimulation.getState(participant), at,
+                    com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.GATHER_RADIUS)) gathered = false;
+        }
+        if(!gathered) {
+            if(travel.phase == com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.COUNTDOWN)
+                clearPartyTravel();
+            return;
+        }
+        int remaining = travel.remainingTicks - 1;
+        if(remaining == 0) {
+            publishTravel(com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.LOADING, travel.portal, 0);
+            nativeWorldStable = false;
+            setSessionPaused(true);
+        }
+        else publishTravel(com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.COUNTDOWN, travel.portal, remaining);
+    }
+
+    private void publishTravel(com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase phase, String portal, int ticks) {
+        travel = new com.interrupt.dungeoneer.multiplayer.floor.PartyTransition(travel.sequence + 1L,
+                nativeWorldGeneration, phase, portal, ticks);
+        broadcast(new DirectConnectWire.TravelState(sessionId, travel));
+    }
+    private void clearPartyTravel() {
+        travelActivator = null;
+        publishTravel(com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.IDLE, "", 0);
+    }
+
     @Override
     public synchronized void setSessionPaused(boolean paused) {
+        if(!paused && travel.phase == com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.LOADING) return;
         if(!sessionStarted || closing.get() || isSessionPaused() == paused) return;
         PauseSessionState state = new PauseSessionState(++nextPauseSessionSequence, paused);
         partyCommunication = partyCommunication.withPauseSession(state);
@@ -3443,8 +3541,22 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 new ArrayList<String>(consumedMonsterSpawners), nativeFloor,
                 itemWorld.getPartyKeys(), itemWorld.getKeyRevision(), partyProgression, potionMapping)
                 .withFloorHistory(activeAreaKey, new ArrayList<>(dormantFloors.values()), remainingDropTimers());
+        saved = saved.withScatterOwners(currentScatterOwners(saved));
         lastCapturedCampaign = saved;
         return saved;
+    }
+
+    private Map<Long, Integer> currentScatterOwners(CampaignSave saved) {
+        Map<Long, PhysicalItemState> items = new java.util.HashMap<>();
+        for(PhysicalItemState item : saved.getPhysicalItems()) items.put(item.entityId, item);
+        for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor : saved.getDormantFloors())
+            for(PhysicalItemState item : floor.getWorldItems()) items.put(item.entityId, item);
+        Map<Long, Integer> owners = new LinkedHashMap<>();
+        for(Map.Entry<Long, Integer> entry : scatterOwners.entrySet()) {
+            PhysicalItemState item = items.get(entry.getKey());
+            if(item != null && item.owner == null && !item.consumed) owners.put(entry.getKey(), entry.getValue());
+        }
+        return owners;
     }
 
     private long nextRecoveryNanos;
@@ -3501,6 +3613,257 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         return saved;
     }
 
+    private volatile com.interrupt.dungeoneer.multiplayer.floor.PartyDestination partyDestination;
+    private final java.util.Set<Integer> destinationReadySlots = new java.util.HashSet<>();
+    @Override public com.interrupt.dungeoneer.multiplayer.floor.PartyDestination getPartyDestination() { return partyDestination; }
+    @Override public synchronized void acknowledgePartyDestination(long generation) {
+        destinationReady(1, generation);
+    }
+    private synchronized void destinationReady(int slot, long generation) {
+        if(travel.phase != com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.LOADING
+                || partyDestination == null || generation != nativeWorldGeneration) return;
+        destinationReadySlots.add(slot);
+        finishPartyDestinationIfReady();
+    }
+    private void finishPartyDestinationIfReady() {
+        if(!destinationReadySlots.contains(1)) return;
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.slot != null && connection.channel.isActive() && connection.reconnectGrace == null
+                    && (connection.movementDescriptor != null || connection.spectatorReady)
+                    && !destinationReadySlots.contains(connection.slot.getNumber())) return;
+        }
+        nativeWorldStable = true;
+        clearPartyTravel();
+        setSessionPaused(false);
+    }
+
+    /** Destination save includes all Fresh Returns before any native scene is replaced. */
+    public synchronized boolean activatePartyDestination(String areaKey, String floorId, long seed,
+            SharedFloorFingerprint fingerprint, java.util.function.Supplier<com.interrupt.dungeoneer.game.Level> build,
+            java.util.function.Consumer<com.interrupt.dungeoneer.game.Level> install,
+            java.util.function.IntFunction<com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter> starter) {
+        if(starter == null) throw new IllegalArgumentException("Native starter factory is required.");
+        return activateCampaignFloor(areaKey, floorId, seed, fingerprint, build, install,
+                source -> prepareFreshReturns(prepareAbandonedDowned(source), !dormantFloors.containsKey(areaKey), starter), level -> { });
+    }
+
+    /** Detached Life-loss plan: nothing live changes until destination replacement succeeds. */
+    public synchronized String getActiveAreaKey() { return activeAreaKey; }
+    public synchronized boolean activatePartyDestination(String areaKey, String floorId, long seed,
+            java.util.function.Supplier<com.interrupt.dungeoneer.game.Level> build,
+            java.util.function.Consumer<com.interrupt.dungeoneer.game.Level> arrive,
+            java.util.function.Consumer<com.interrupt.dungeoneer.game.Level> install,
+            java.util.function.IntFunction<com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter> starter) {
+        return activateCampaignFloor(areaKey, floorId, seed, null, build, install,
+                source -> prepareFreshReturns(prepareAbandonedDowned(source), !dormantFloors.containsKey(areaKey), starter), arrive);
+    }
+
+    private CampaignSave prepareAbandonedDowned(CampaignSave source) {
+        List<CampaignSave.ParticipantState> participants = new ArrayList<>();
+        List<PhysicalItemState> items = new ArrayList<>(source.getPhysicalItems());
+        List<CombatantSnapshot> actors = new ArrayList<>(source.getCombat().getCombatants());
+        List<ActorEffectsSnapshot> effects = new ArrayList<>(source.getActorEffects());
+        Map<Long, Long> timers = new LinkedHashMap<>(source.getDropTimers());
+        Map<Long, Integer> owners = new LinkedHashMap<>(source.getScatterOwners());
+        for(CampaignSave.ParticipantState old : source.getParticipants()) {
+            PartyMemberStatus member = old.getParty();
+            if(member.getEntityId() == null || member.getRemainingLives() == 0
+                    || member.getState() != PartyMemberState.DOWNED
+                    && lives.getCondition(new ParticipantId("campaign-slot-" + old.getCampaignSlot()))
+                            != AuthoritativeLives.Condition.DOWNED) { participants.add(old); continue; }
+            ParticipantId id = new ParticipantId("campaign-slot-" + old.getCampaignSlot());
+            int remaining = member.getRemainingLives() - 1;
+            int health = remaining == 0 ? 0 : Math.max(1, member.getMaximumHealth() / 2);
+            DeathDrop drop = deathDrops.get(id);
+            MovementEntityState at = old.getMovement();
+            if(drop == null) drop = new DeathDrop(at.getX(), at.getY(), at.getZ(), DeathCause.COMBAT);
+            List<PhysicalItemState> carried = new ArrayList<>();
+            List<ItemKind> kinds = new ArrayList<>();
+            List<Integer> conditions = new ArrayList<>();
+            long wielded = itemWorld.getWielded(id);
+            for(PhysicalItemState item : items) {
+                if(!id.equals(item.owner) || item.consumed || !item.equipmentSlot.isEmpty()
+                        || item.entityId == wielded) continue;
+                carried.add(item); kinds.add(itemWorld.getKind(item.entityId)); conditions.add(item.properties.condition);
+            }
+            List<DeathDropRules.Verdict> verdicts;
+            synchronized(deathDropRandom) { verdicts = DeathDropRules.judge(drop.cause, kinds, conditions, deathDropRandom); }
+            int destroyed = 0;
+            for(int index = 0; index < carried.size(); index++) {
+                PhysicalItemState item = carried.get(index);
+                DeathDropRules.Verdict verdict = verdicts.get(index);
+                boolean lost = verdict.fate == DeathDropRules.Fate.DESTROYED;
+                if(lost) destroyed++;
+                float[] position = scatterPosition(drop.x, drop.y, drop.z, DeathDropRules.scatterRadius(drop.cause));
+                ItemProperties properties = item.properties;
+                items.set(items.indexOf(item), new PhysicalItemState(item.entityId, item.revision + 1L,
+                        item.templateId, null, position[0], position[1], position[2],
+                        new ItemProperties(verdict.condition, properties.level, properties.suffix, properties.prefix,
+                                properties.quantity, properties.potionType), lost));
+                if(!lost) {
+                    owners.put(item.entityId, old.getCampaignSlot());
+                    if(remaining == 0) timers.put(item.entityId, exhaustedDropTicks);
+                }
+            }
+            // Broken worn/held gear follows the same forfeiture rule as ordinary bleedout.
+            for(int index = 0; index < items.size(); index++) {
+                PhysicalItemState item = items.get(index);
+                if(id.equals(item.owner) && item.properties.condition == 0)
+                    items.set(index, new PhysicalItemState(item.entityId, item.revision + 1L, item.templateId,
+                            null, drop.x, drop.y, drop.z, item.properties, true));
+            }
+            com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress p = old.getProgress();
+            if(p != null) p = new com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress(id, p.revision + 1L,
+                    p.gold - DeathDropRules.goldLoss(p.gold, lives.getLifeLosses(id), destroyed), p.experience, p.level,
+                    p.attack, p.defense, p.agility, p.speed, p.magic, p.endurance, p.pendingStatChoices,
+                    p.maximumHealth, p.inventorySize, p.hotbarSize);
+            participants.add(new CampaignSave.ParticipantState(old.getCampaignSlot(),
+                    new PartyMemberStatus(old.getCampaignSlot(), member.getEntityId(), member.getNickname(), member.getAvatarId(),
+                            health, member.getMaximumHealth(), remaining,
+                            isInReconnectGrace(old.getCampaignSlot()) ? PartyMemberState.RECONNECTING
+                                    : remaining == 0 ? PartyMemberState.SPECTATING : PartyMemberState.CONNECTED),
+                    at, p, false, old.getPersonalKnowledge()));
+            String actorId = "participant:" + id.getValue();
+            actors.removeIf(actor -> actorId.equals(actor.getId()));
+            actors.add(new CombatantSnapshot(actorId, CombatantKind.PARTICIPANT, health, member.getMaximumHealth()));
+            effects.removeIf(effect -> actorId.equals(effect.monsterId));
+        }
+        return travelCharacterSave(source, participants, items, actors, effects, timers).withScatterOwners(owners);
+    }
+
+    private CampaignSave travelCharacterSave(CampaignSave source, List<CampaignSave.ParticipantState> participants,
+            List<PhysicalItemState> items, List<CombatantSnapshot> actors, List<ActorEffectsSnapshot> effects,
+            Map<Long, Long> timers) {
+        return new CampaignSave(compatibility, source.getCampaignId(), source.getCapacity(), startingLives,
+                source.getOutcome(), source.getFloorId(), source.getFloorSeed(), source.getFloorFingerprint(),
+                source.getNativeWorldGeneration(), source.getSlots(), participants, items,
+                new CombatSnapshot(source.getCombat().getSequence() + 1L, currentHostTick(), source.getCombat().getMonsters(), actors),
+                source.getDoors(), source.getBreakables(), effects, source.getMonsterSpawns(),
+                source.getConsumedMonsterSpawners(), source.getNativeFloor(), source.getPartyKeys(), source.getKeyRevision(),
+                source.getPartyProgression(), source.getPotionMapping())
+                .withFloorHistory(source.getActiveAreaKey(), source.getDormantFloors(), timers);
+    }
+
+    private CampaignSave prepareFreshReturns(CampaignSave source, boolean firstArrival,
+            java.util.function.IntFunction<com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter> starter) {
+        if(!firstArrival) return source;
+        List<CampaignSave.ParticipantState> participants = new ArrayList<>();
+        List<PhysicalItemState> items = new ArrayList<>(source.getPhysicalItems());
+        List<CombatantSnapshot> actors = new ArrayList<>(source.getCombat().getCombatants());
+        List<ActorEffectsSnapshot> effects = new ArrayList<>(source.getActorEffects());
+        long nextId = nextCampaignItemId(items, source.getDormantFloors());
+        for(CampaignSave.ParticipantState old : source.getParticipants()) {
+            if(old.getParty().getRemainingLives() > 0) { participants.add(old); continue; }
+            int slot = old.getCampaignSlot();
+            ParticipantId id = new ParticipantId("campaign-slot-" + slot);
+            com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter fresh = starter.apply(slot);
+            if(fresh == null || !id.equals(fresh.progress.participantId))
+                throw new IllegalArgumentException("Fresh Return starter belongs to another Slot.");
+            com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress p = fresh.progress;
+            long revision = old.getProgress() == null ? 1L : old.getProgress().revision + 1L;
+            p = new com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress(id, revision,
+                    0, 0, 1, p.attack, p.defense, p.agility, p.speed, p.magic, p.endurance, 0,
+                    p.maximumHealth, p.inventorySize, p.hotbarSize);
+            PartyMemberStatus member = old.getParty();
+            boolean connected = member.getState() != PartyMemberState.DISCONNECTED;
+            MovementEntityState movement = old.getMovement();
+            if(connected && movement == null) movement = new MovementEntityState(new NetworkEntityId(slot),
+                    nextLifecycleSequence + slot, 0L, 0.5f, 0.5f, 0f, 0f, 0f, 0f, 0f,
+                    com.interrupt.dungeoneer.multiplayer.movement.MovementState.IDLE);
+            participants.add(new CampaignSave.ParticipantState(slot,
+                    new PartyMemberStatus(slot, connected ? new NetworkEntityId(slot) : null, member.getNickname(),
+                            member.getAvatarId(), p.maximumHealth, p.maximumHealth, startingLives,
+                            connected ? (isInReconnectGrace(slot)
+                                    ? PartyMemberState.RECONNECTING : PartyMemberState.CONNECTED)
+                                    : PartyMemberState.DISCONNECTED),
+                    movement, p, false, old.getPersonalKnowledge()));
+            items.removeIf(item -> id.equals(item.owner));
+            for(com.interrupt.dungeoneer.multiplayer.floor.FreshCharacter.Starter item : fresh.kit) {
+                if(nextId >= Long.MAX_VALUE - 1L) throw new IllegalArgumentException("Campaign item identity space exhausted.");
+                items.add(new PhysicalItemState(nextId++, revision, item.templateId, id, 0f, 0f, 0f,
+                        item.properties, false, item.equipmentSlot));
+            }
+            String actorId = "participant:" + id.getValue();
+            actors.removeIf(actor -> actorId.equals(actor.getId()));
+            actors.add(new CombatantSnapshot(actorId, CombatantKind.PARTICIPANT, p.maximumHealth, p.maximumHealth));
+            effects.removeIf(effect -> actorId.equals(effect.monsterId));
+        }
+        CampaignSave freshSave = travelCharacterSave(source, participants, items, actors, effects, source.getDropTimers());
+        java.util.Set<Long> lost = new java.util.HashSet<>();
+        Map<Long, Integer> owners = new LinkedHashMap<>(source.getScatterOwners());
+        for(Map.Entry<Long, Integer> entry : source.getScatterOwners().entrySet())
+            if(source.getParticipant(entry.getValue()).getParty().getRemainingLives() == 0) {
+                lost.add(entry.getKey()); owners.remove(entry.getKey());
+            }
+        List<PhysicalItemState> kept = new ArrayList<>(freshSave.getPhysicalItems());
+        kept.removeIf(item -> lost.contains(item.entityId));
+        Map<Long, Long> timers = new LinkedHashMap<>(source.getDropTimers());
+        for(Long id : lost) timers.remove(id);
+        List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> history = new ArrayList<>();
+        for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor : source.getDormantFloors()) {
+            List<PhysicalItemState> world = new ArrayList<>(floor.getWorldItems());
+            world.removeIf(item -> lost.contains(item.entityId));
+            Map<Long, Long> oldTimers = new LinkedHashMap<>(floor.getDropTimers());
+            for(Long id : lost) oldTimers.remove(id);
+            history.add(new com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState(floor.getAreaKey(),
+                    floor.getFloorId(), floor.getSeed(), floor.getFingerprint(),
+                    com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.withoutItems(floor.getNativeFloor(), lost),
+                    world, floor.getCombat(), floor.getDoors(), floor.getBreakables(), floor.getActorEffects(),
+                    floor.getMonsterSpawns(), floor.getConsumedMonsterSpawners(), oldTimers));
+        }
+        return new CampaignSave(compatibility, source.getCampaignId(), source.getCapacity(), startingLives,
+                source.getOutcome(), source.getFloorId(), source.getFloorSeed(), source.getFloorFingerprint(),
+                source.getNativeWorldGeneration(), source.getSlots(), participants, kept, freshSave.getCombat(),
+                source.getDoors(), source.getBreakables(), effects, source.getMonsterSpawns(), source.getConsumedMonsterSpawners(),
+                com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.withoutItems(source.getNativeFloor(), lost),
+                source.getPartyKeys(), source.getKeyRevision(), source.getPartyProgression(), source.getPotionMapping())
+                .withFloorHistory(source.getActiveAreaKey(), history, timers).withScatterOwners(owners);
+    }
+
+    private void installTravelParticipants(CampaignSave source, CampaignSave candidate) {
+        List<MovementEntityDescriptor> descriptors = new ArrayList<>(livesDescriptors);
+        List<PartyMemberStatus> members = new ArrayList<>();
+        for(CampaignSave.ParticipantState saved : candidate.getParticipants()) {
+            ParticipantId id = new ParticipantId("campaign-slot-" + saved.getCampaignSlot());
+            if(saved.getProgress() != null) economy.restoreParticipant(saved.getProgress());
+            PartyMemberStatus member = saved.getParty();
+            members.add(member);
+            CampaignSave.ParticipantState previous = source.getParticipant(saved.getCampaignSlot());
+            if(previous != null && (previous.getParty().getRemainingLives() != member.getRemainingLives()
+                    || previous.getParty().getHealth() == 0 && member.getHealth() > 0)) {
+                CampaignSlot slot = roster.getSlot(saved.getCampaignSlot());
+                lateParticipants.remove(slot.getLauncherIdentity()); lateEntryGenerations.remove(slot.getLauncherIdentity());
+                lives.addParticipant(id, startingLives);
+                lives.restore(id, member.getRemainingLives(), member.getRemainingLives() == 0
+                        ? AuthoritativeLives.Condition.EXHAUSTED : AuthoritativeLives.Condition.STANDING,
+                        0, 0, null, Math.max(0, startingLives - member.getRemainingLives()));
+                deathDrops.remove(id); revivalAnchors.remove(id);
+                if(member.getEntityId() != null) {
+                    MovementEntityDescriptor descriptor = descriptorForSlot(saved.getCampaignSlot());
+                    if(descriptor == null) {
+                        descriptor = new MovementEntityDescriptor(saved.getMovement().getLifecycleSequence(),
+                                member.getEntityId(), id, saved.getCampaignSlot(), member.getNickname(), member.getAvatarId());
+                        nextLifecycleSequence = Math.max(nextLifecycleSequence, descriptor.getLifecycleSequence());
+                        movementSimulation.addParticipant(descriptor); descriptors.add(descriptor);
+                        movementReplication.applySpawn(descriptor);
+                        broadcast(new EntitySpawn(sessionId, descriptor));
+                    }
+                    if(member.getRemainingLives() > 0 && member.getState() != PartyMemberState.RECONNECTING)
+                        movementSimulation.resumeParticipant(id);
+                    else movementSimulation.freezeParticipant(id);
+                    for(RemoteConnection connection : connections.values()) {
+                        if(connection.slot == null || connection.slot.getNumber() != saved.getCampaignSlot()) continue;
+                        connection.movementDescriptor = descriptor; connection.lateParticipant = false;
+                        connection.spectatorReady = false;
+                    }
+                }
+            }
+        }
+        livesDescriptors = descriptors;
+        partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, members);
+        broadcastPartyStatus(); publishEconomy();
+    }
+
     /**
      * Render-thread floor-preservation boundary for #27. Caller holds Party pause and installs
      * destination native bridges through install; pause stays held for observer readiness.
@@ -3510,6 +3873,15 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             SharedFloorFingerprint fingerprint,
             java.util.function.Supplier<com.interrupt.dungeoneer.game.Level> build,
             java.util.function.Consumer<com.interrupt.dungeoneer.game.Level> install) {
+        return activateCampaignFloor(areaKey, floorId, seed, fingerprint, build, install, source -> source, level -> { });
+    }
+
+    private boolean activateCampaignFloor(String areaKey, String floorId, long seed,
+            SharedFloorFingerprint fingerprint,
+            java.util.function.Supplier<com.interrupt.dungeoneer.game.Level> build,
+            java.util.function.Consumer<com.interrupt.dungeoneer.game.Level> install,
+            java.util.function.UnaryOperator<CampaignSave> prepare,
+            java.util.function.Consumer<com.interrupt.dungeoneer.game.Level> arrive) {
         com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.requireAreaKey(areaKey);
         com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.requireAreaKey(floorId);
         if(!sessionStarted || !isSessionPaused() || closing.get() || partyWiped || partyProgression.victory)
@@ -3518,15 +3890,20 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             throw new IllegalArgumentException("Destination area/build/install is invalid.");
         floorActivationTickFence = movementSession.discardPendingCommands();
         authoritativeHostTick = floorActivationTickFence;
-        CampaignSave source = captureCampaign();
+        CampaignSave originalSource = captureCampaign();
+        CampaignSave source = prepare.apply(originalSource);
         com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState dormant =
                 com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.fromCampaign(activeAreaKey, source);
-        com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState destination = dormantFloors.get(areaKey);
+        com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState destination = null;
+        for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState saved : source.getDormantFloors())
+            if(saved.getAreaKey().equals(areaKey)) destination = saved;
         boolean firstArrival = destination == null;
         if(destination != null && !floorId.equals(destination.getFloorId()))
             throw new IllegalArgumentException("Visited area cannot change its native content definition.");
         com.interrupt.dungeoneer.game.Level level = destination == null ? build.get()
                 : com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.restore(destination.getNativeFloor());
+        arrive.accept(level);
+        if(fingerprint == null && destination == null) fingerprint = level.multiplayerBuiltFingerprint;
         if(destination == null) destination = new com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState(
                 areaKey, floorId, seed, fingerprint,
                 com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(level),
@@ -3564,23 +3941,38 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         List<ActorEffectsSnapshot> effects = new ArrayList<>(destination.getActorEffects());
         for(ActorEffectsSnapshot effect : source.getActorEffects())
             if(effect.monsterId.startsWith("participant:")) effects.add(effect);
-        Map<String, com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> history = new LinkedHashMap<>(dormantFloors);
+        Map<String, com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> history = new LinkedHashMap<>();
+        for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState saved : source.getDormantFloors()) history.put(saved.getAreaKey(), saved);
         history.put(activeAreaKey, dormant); history.remove(areaKey);
+        com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot destinationProgression = source.getPartyProgression();
+        if(firstArrival && level.multiplayerBuiltProgression != null) {
+            com.interrupt.dungeoneer.game.Progression built = new com.interrupt.dungeoneer.game.Progression();
+            level.multiplayerBuiltProgression.applyTo(built);
+            destinationProgression = com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot.capture(
+                    built, destinationProgression.revision + 1L);
+        }
         CampaignSave candidate = new CampaignSave(compatibility, roster.getCampaignId(), roster.getCapacity(),
                 startingLives, CampaignSave.Outcome.ACTIVE, floorId, destination.getSeed(), destination.getFingerprint(),
                 nativeWorldGeneration + 1L, roster.getSlots(), participants, items, combat,
                 destination.getDoors(), destination.getBreakables(), effects, destination.getMonsterSpawns(),
-                destination.getConsumedMonsterSpawners(), destination.getNativeFloor(), source.getPartyKeys(),
-                source.getKeyRevision(), source.getPartyProgression(), source.getPotionMapping())
-                .withFloorHistory(areaKey, new ArrayList<>(history.values()), destination.getDropTimers());
+                destination.getConsumedMonsterSpawners(), com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(level), source.getPartyKeys(),
+                source.getKeyRevision(), destinationProgression, source.getPotionMapping())
+                .withFloorHistory(areaKey, new ArrayList<>(history.values()), destination.getDropTimers())
+                .withScatterOwners(source.getScatterOwners());
         long nextItemId = nextCampaignItemId(items, candidate.getDormantFloors());
         // Atomic disk replacement precedes live mutation: refused writes leave source running intact.
         campaignSaveStore.save(candidate);
+        scatterOwners.clear(); scatterOwners.putAll(candidate.getScatterOwners());
+        partyProgression = candidate.getPartyProgression();
+        broadcast(new DirectConnectWire.PartyProgressionMessage(sessionId, partyProgression));
         activeAreaKey = areaKey; activeFloorId = floorId;
         sharedFloorSeed = destination.getSeed(); hostFloorFingerprint = destination.getFingerprint();
         savedFloorFingerprint = destination.getFingerprint();
         dormantFloors.clear(); dormantFloors.putAll(history);
         movementWorld = collision;
+        partyPortals.clear();
+        installTravelParticipants(originalSource, candidate);
+        itemWorld.installCampaignItems(source.getPhysicalItems(), nextItemId);
         movementSimulation.activateFloor(collision);
         resumeNativeWorldPending = false;
         beginNativeWorld();
@@ -3618,6 +4010,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         for(BreakableSnapshot object : breakableSnapshots.values())
             broadcast(new DirectConnectWire.BreakableStateMessage(sessionId, object));
         for(ActorEffectsSnapshot effect : monsterEffects.values()) publishMonsterEffects(effect, currentHostTick());
+        if(travel.phase == com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.LOADING) {
+            destinationReadySlots.clear();
+            partyDestination = new com.interrupt.dungeoneer.multiplayer.floor.PartyDestination(nativeWorldGeneration,
+                    areaKey, floorId, sharedFloorSeed, level.multiplayerNativeRecipe == null ? "" : level.multiplayerNativeRecipe, level.multiplayerArrival);
+            broadcast(new DirectConnectWire.TravelDestination(sessionId, partyDestination));
+        }
         return firstArrival;
     }
 
@@ -3819,7 +4217,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 List<RemoteConnection> snapshotConnections = new ArrayList<>(connections.values());
                 for(RemoteConnection connection : snapshotConnections) {
                     if(connection.lateParticipant && !connection.spectatorReady) {
-                        deliverCurrentState(connection, new MovementSnapshotMessage(sessionId, movementSnapshot));
+                        deliverCurrentState(connection, new MovementSnapshotMessage(sessionId, movementSnapshot, nativeWorldGeneration));
                     }
                 }
                 for(RemoteConnection connection : snapshotConnections) {
@@ -3827,7 +4225,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                             || connection.movementDescriptor == null && !connection.spectatorReady) continue;
                     try {
                         ByteBuf encoded = DirectConnectWire.encodeDatagram(udpListener.alloc(),
-                                new MovementSnapshotMessage(sessionId, movementSnapshot));
+                                new MovementSnapshotMessage(sessionId, movementSnapshot, nativeWorldGeneration));
                         udpListener.writeAndFlush(new DatagramPacket(encoded,
                                 connection.udpAddress));
                     }
@@ -3998,6 +4396,22 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             else if(message instanceof SlotClaim && helloAccepted) {
                 claimSlot(context, (SlotClaim)message);
+            }
+            else if(message instanceof DirectConnectWire.TravelReady && helloAccepted) {
+                RemoteConnection connection = connections.get(context.channel());
+                DirectConnectWire.TravelReady ready = (DirectConnectWire.TravelReady)message;
+                if(connection != null && connection.slot != null && connection.udpAddress != null
+                        && connection.reconnectGrace == null && sessionId.equals(ready.sessionId))
+                    destinationReady(connection.slot.getNumber(), ready.generation);
+            }
+            else if(message instanceof DirectConnectWire.TravelIntent && helloAccepted) {
+                synchronized(DirectConnectHost.this) {
+                    RemoteConnection connection = connections.get(context.channel());
+                    DirectConnectWire.TravelIntent intent = (DirectConnectWire.TravelIntent)message;
+                    if(connection != null && connection.movementDescriptor != null && connection.udpAddress != null
+                            && connection.reconnectGrace == null && sessionId.equals(intent.sessionId))
+                        travelIntent(connection.movementDescriptor.getParticipantId(), intent.generation, intent.portal);
+                }
             }
             else if(message instanceof DirectConnectWire.AdmissionSync && helloAccepted) {
                 admissionAcknowledged(context, (DirectConnectWire.AdmissionSync)message);

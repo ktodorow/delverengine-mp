@@ -75,7 +75,7 @@ public final class DirectConnectLivesController {
         PartyMemberStatus local = status.getMember(peer.getLocalCampaignSlot());
         for(PartyMemberStatus member : status.getMembers()) {
             Integer previous = observedLives.put(member.getCampaignSlot(), member.getRemainingLives());
-            if(previous != null && member.getRemainingLives() < previous) {
+            if(previous != null && member.getRemainingLives() != previous) {
                 beginNewLife(game, member, member == local);
             }
             presentRemote(member, member == local);

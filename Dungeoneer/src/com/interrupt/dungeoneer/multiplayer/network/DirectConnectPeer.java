@@ -33,6 +33,13 @@ import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
 import java.util.List;
 
 public interface DirectConnectPeer extends AutoCloseable {
+    default com.interrupt.dungeoneer.multiplayer.floor.PartyDestination getPartyDestination() { return null; }
+    default void acknowledgePartyDestination(long generation) { }
+    default com.interrupt.dungeoneer.multiplayer.floor.PartyTransition getPartyTransition() {
+        return com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.idle(1L, getNativeWorldGeneration());
+    }
+    default void requestPartyTransition(String portal) { }
+    default void cancelPartyTransition() { }
     default com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge getPersonalKnowledge() { return com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.empty(); }
     default com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping getPotionMapping() { return com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.empty(); }
     default void publishPotionMapping(com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping mapping) { }

@@ -244,22 +244,26 @@ public class GameApplication extends Game {
 
     private void startDirectConnectHost(DirectConnectCompatibility compatibility) {
         String floorId = directConnectFloor;
+        CampaignSave resumed = null;
         if(directConnectRosterStore.campaignSaves().exists(
                 directConnectRoster.getCampaignId())) {
             CampaignSave saved = directConnectRosterStore.campaignSaves().load(
                     directConnectRoster.getCampaignId(), compatibility);
+            resumed = saved;
             floorId = compatibility.usesOpenSourceTestContent() ? null : saved.getFloorId();
         }
         if(floorId != null && !OwnedGameCopyMount.isMounted()) {
             throw new IllegalStateException(
                     "Owned Direct Connect floor requires a validated Owned Game Copy.");
         }
-        Level authoritativeLevel = loadDirectConnectLevel(floorId);
+        // Initialize owned managers/localized defaults before checkpoint deserialization.
+        Level authoritativeLevel = loadDirectConnectLevel(resumed == null ? floorId : directConnectFloor);
+        if(resumed != null && resumed.hasNativeFloor()) authoritativeLevel = NativeFloorSave.restore(resumed.getNativeFloor());
         DirectConnectHost host = DirectConnectHost.start(directConnectPort, compatibility,
                 directConnectRoster, directConnectRosterStore,
                 new LevelMovementCollisionWorld(authoritativeLevel));
         try {
-            if(floorId != null) host.useOwnedFloor(floorId);
+            if(floorId != null && resumed == null) host.useOwnedFloor(floorId);
             host.awaitNativeWorld();
             directConnectPeer = host;
             showDirectConnectSession();
@@ -360,6 +364,9 @@ public class GameApplication extends Game {
                 throw new IllegalStateException("Could not load owned Direct Connect floor: " + floorId);
             }
             if(owned.theme == null) owned.theme = ownedFloorTheme(floorId);
+            owned.levelFileName = floorId;
+            owned.generated = false;
+            owned.multiplayerNativeRecipe = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe.fromDefinition(owned, 1).encode();
             return owned;
         }
         Level tutorial = com.interrupt.dungeoneer.game.Game.gameData == null
@@ -374,6 +381,10 @@ public class GameApplication extends Game {
             throw new IllegalStateException("Could not load owned Direct Connect Level: "
                     + tutorial.levelFileName);
         }
+        level.levelFileName = tutorial.levelFileName;
+        level.generated = false;
+        if(level.theme == null) level.theme = tutorial.theme;
+        level.multiplayerNativeRecipe = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe.fromDefinition(level, 1).encode();
         return level;
     }
 
@@ -405,7 +416,15 @@ public class GameApplication extends Game {
         enteredDirectConnectFloor = true;
 
         // Clients load the floor announced by Host from their own certified Owned Game Copy.
-        Level startupLevel = loadDirectConnectLevel(directConnectPeer.getStatus().getFloorId());
+        com.interrupt.dungeoneer.multiplayer.floor.PartyDestination destination = directConnectPeer.getPartyDestination();
+        Level startupLevel;
+        if(destination != null && !destination.recipe.isEmpty()) {
+            loadDirectConnectLevel(directConnectFloor); // Owned managers and localization.
+            startupLevel = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe.decode(destination.recipe).definition();
+            startupLevel.multiplayerNativeRecipe = destination.recipe;
+            startupLevel.multiplayerArrival = destination.arrival == null ? null : destination.arrival.clone();
+        }
+        else startupLevel = loadDirectConnectLevel(directConnectPeer.getStatus().getFloorId());
         DirectConnectItemController items = new DirectConnectItemController(directConnectPeer);
         directConnectItemController = items;
         items.rememberLevelTemplates(startupLevel);
@@ -421,7 +440,9 @@ public class GameApplication extends Game {
         byte[] savedFloor = host == null ? null : host.takeRestoredNativeFloor();
         if(savedFloor != null) {
             try {
+                String initialRecipe = startupLevel.multiplayerNativeRecipe;
                 startupLevel = NativeFloorSave.restore(savedFloor);
+                if(startupLevel.multiplayerNativeRecipe == null) startupLevel.multiplayerNativeRecipe = initialRecipe;
             }
             catch(RuntimeException unreadable) {
                 throw new IllegalStateException("Saved native Active Floor is incompatible or corrupt; "
@@ -474,7 +495,37 @@ public class GameApplication extends Game {
                 new com.interrupt.dungeoneer.multiplayer.lives.DirectConnectLivesController(
                         directConnectPeer, directConnectMovementController);
         mainScreen.setNetworkLivesController(directConnectLivesController);
+        directConnectPartyTravel = new com.interrupt.dungeoneer.multiplayer.floor.NativePartyTravel(
+                directConnectPeer, items::rollFreshCharacter, this::installDirectConnectPartyFloor);
         completedScreen.dispose();
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.floor.NativePartyTravel directConnectPartyTravel;
+
+    /** Render-thread destination swap before bridge attachment/readiness. */
+    public void updateDirectConnectPartyTravel() {
+        if(directConnectPartyTravel != null) directConnectPartyTravel.update(GameManager.getGame());
+    }
+
+    private void installDirectConnectPartyFloor(Level level) {
+        com.interrupt.dungeoneer.game.Game game = GameManager.getGame();
+        level.nativeTriggerReplica = !(directConnectPeer instanceof DirectConnectHost);
+        game.installPartyFloor(level);
+        directConnectMovementController.applyInitialAuthoritativeState(game.player);
+        com.interrupt.dungeoneer.overlays.OverlayManager.instance.clear();
+        com.interrupt.dungeoneer.Audio.stopLoopingSounds();
+        if(com.interrupt.dungeoneer.game.Options.instance.enableMusic) com.interrupt.dungeoneer.Audio.playMusic(
+                game.player.isHoldingOrb ? level.actionMusic : level.music, level.loopMusic);
+        if(level.ambientSound != null && !com.interrupt.dungeoneer.game.Game.isMobile)
+            com.interrupt.dungeoneer.Audio.playAmbientSound(level.ambientSound, level.ambientSoundVolume, 0.1f);
+        if(directConnectPeer instanceof DirectConnectHost) {
+            DirectConnectHost host = (DirectConnectHost)directConnectPeer;
+            host.setNativeFloorCapture(() -> {
+                host.publishPartyProgression(game.progression);
+                return NativeFloorSave.capture(game.level);
+            });
+            host.adoptNativeTileRules(level);
+        }
     }
 
     /** Spectator viewpoint replacing the local camera, or null. */
@@ -485,8 +536,16 @@ public class GameApplication extends Game {
 
     /** Centered Downed, bleedout or Revival line for local Participant, or null. */
     public String getDirectConnectLivesPrompt() {
-        return directConnectLivesController == null ? null
-                : directConnectLivesController.getPrompt();
+        if(directConnectPeer != null) {
+            com.interrupt.dungeoneer.multiplayer.floor.PartyTransition travel = directConnectPeer.getPartyTransition();
+            switch(travel.phase) {
+                case GATHERING: return "Gather living Party at exit — C cancels travel";
+                case COUNTDOWN: return "Party travels in " + ((travel.remainingTicks + 59) / 60) + " — C cancels";
+                case LOADING: return "Party loading next area…";
+                default: break;
+            }
+        }
+        return directConnectLivesController == null ? null : directConnectLivesController.getPrompt();
     }
 
     public DirectConnectPeer getDirectConnectPeer() {
@@ -505,6 +564,26 @@ public class GameApplication extends Game {
 
     public DirectConnectMovementController getDirectConnectMovementController() {
         return directConnectMovementController;
+    }
+
+    /** Native use/trigger boundary; the Host authenticates which living body initiated it. */
+    public static void requestPartyTravel(com.interrupt.dungeoneer.entities.Entity portal,
+            com.interrupt.dungeoneer.multiplayer.participant.ParticipantContext participant) {
+        if(!isDirectConnectSession() || portal == null) return;
+        String key = com.interrupt.dungeoneer.multiplayer.floor.PartyPortals.key(portal);
+        DirectConnectPeer peer = instance.directConnectPeer;
+        if(peer instanceof DirectConnectHost) {
+            DirectConnectHost host = (DirectConnectHost)peer;
+            float portalZ = portal instanceof com.interrupt.dungeoneer.entities.Stairs
+                    ? GameManager.getGame().level.getTile((int)portal.x, (int)portal.y).floorHeight + 0.5f : portal.z;
+            host.registerPartyPortal(key, portal.x, portal.y, portalZ);
+            com.interrupt.dungeoneer.multiplayer.participant.ParticipantId id = participant == null
+                    ? null : participant.getParticipantId();
+            if(id == null || com.interrupt.dungeoneer.multiplayer.participant.LocalPlayerCompatibilityAdapter.LOCAL_PARTICIPANT_ID.equals(id))
+                host.requestPartyTransition(key);
+            else host.requestNativePartyTransition(id, key);
+        }
+        else peer.requestPartyTransition(key);
     }
 
     /** True while this process owns a live Direct Connect Campaign session. */

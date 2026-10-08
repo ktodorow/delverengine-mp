@@ -647,7 +647,10 @@ public class Game {
 
 	public void changeLevel(Stairs stair)
 	{
-		if(GameApplication.isDirectConnectSession()) return;
+        if(GameApplication.isDirectConnectSession()) {
+            GameApplication.requestPartyTravel(stair, null);
+            return;
+        }
 
 		if(stair.direction == StairDirection.up && player.getCurrentTravelKey() != null) {
 			doLevelExit(null);
@@ -854,6 +857,24 @@ public class Game {
 
 		Gdx.app.log("DelverLifeCycle", "Level Changed");
 	}
+
+    /** Install a Host-approved native floor while preserving this Participant's Player. */
+    public void installPartyFloor(Level destination) {
+        if(destination == null || player == null) throw new IllegalArgumentException("Party scene needs floor and Player.");
+        if(GameManager.renderer != null) GameManager.renderer.freeLoadedLevel();
+        level = destination;
+        if(destination.multiplayerBuiltProgression != null && progression != null)
+            destination.multiplayerBuiltProgression.applyTo(progression);
+        level.setPlayer(player);
+        if(level.multiplayerNativeRecipe != null) {
+            int index = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe.decode(level.multiplayerNativeRecipe).campaignIndex;
+            if(index >= 0) { levelNum = index; player.levelNum = index; }
+        }
+        player.xa = 0f; player.ya = 0f; player.za = 0f;
+        player.ignoreStairs = true;
+        level.rendererDirty = true;
+        GameScreen.resetDelta = true;
+    }
 
 	public void doLevelChange(Stairs stair) {
 		// Party floor activation owns multiplayer travel; native local travel splits worlds.

@@ -415,6 +415,21 @@ public final class AuthoritativeItemWorld {
         nextEntityId = Math.max(nextEntityId, nextId);
     }
 
+    /** Atomic travel replaces contents while retaining request fences and valid wield selection. */
+    public synchronized void installCampaignItems(List<PhysicalItemState> saved, long nextId) {
+        Map<Long, PhysicalItemState> replacement = new LinkedHashMap<>();
+        for(PhysicalItemState item : saved) {
+            if(replacement.put(item.entityId, item) != null) throw new IllegalArgumentException("Duplicate physical item.");
+            revision = Math.max(revision, item.revision);
+        }
+        items.clear(); items.putAll(replacement);
+        wielded.entrySet().removeIf(entry -> {
+            PhysicalItemState item = items.get(entry.getValue());
+            return item == null || item.consumed || !entry.getKey().equals(item.owner);
+        });
+        reserveEntityIds(nextId);
+    }
+
     /** Replaces current item registry with a validated save without replaying item actions. */
     public synchronized void restore(List<PhysicalItemState> saved) {
         if(saved == null || saved.size() > MAX_ITEMS) {

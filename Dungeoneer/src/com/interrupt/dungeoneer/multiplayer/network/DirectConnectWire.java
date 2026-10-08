@@ -126,6 +126,10 @@ final class DirectConnectWire {
     private static final int POTION_MAPPING = 60;
     static final int POTION_MAPPING_PART = 61;
     private static final int ADMISSION_SYNC = 62;
+    private static final int TRAVEL_DESTINATION = 65;
+    private static final int TRAVEL_READY = 66;
+    private static final int TRAVEL_INTENT = 63;
+    private static final int TRAVEL_STATE = 64;
     private static final int MAX_MAPPING_MESSAGE_BYTES = com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.MAX_BYTES + 128;
     private static final int MAX_KNOWLEDGE_MESSAGE_BYTES =
             com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.MAX_BYTES + 256;
@@ -178,7 +182,40 @@ final class DirectConnectWire {
         if(message == null) throw new ProtocolException("Wire message cannot be null.");
         output.writeInt(DirectConnectProtocol.MAGIC);
 
-        if(message instanceof AdmissionSync) {
+        if(message instanceof TravelDestination) {
+            TravelDestination report = (TravelDestination)message;
+            output.writeByte(TRAVEL_DESTINATION);
+            writeString(output, report.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(report.destination.generation); output.writeLong(report.destination.seed);
+            writeString(output, report.destination.areaKey, 256, "destination area");
+            writeString(output, report.destination.floorId, 256, "destination content");
+            writeString(output, report.destination.recipe, com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe.MAX_BYTES, "native recipe");
+            output.writeBoolean(report.destination.arrival != null);
+            if(report.destination.arrival != null) for(float value : report.destination.arrival) output.writeFloat(value);
+        }
+        else if(message instanceof TravelReady) {
+            TravelReady report = (TravelReady)message;
+            output.writeByte(TRAVEL_READY);
+            writeString(output, report.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(report.generation);
+        }
+        else if(message instanceof TravelIntent) {
+            TravelIntent intent = (TravelIntent)message;
+            output.writeByte(TRAVEL_INTENT);
+            writeString(output, intent.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(intent.generation);
+            writeString(output, intent.portal, 256, "travel portal");
+        }
+        else if(message instanceof TravelState) {
+            TravelState report = (TravelState)message;
+            output.writeByte(TRAVEL_STATE);
+            writeString(output, report.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            com.interrupt.dungeoneer.multiplayer.floor.PartyTransition state = report.state;
+            output.writeLong(state.sequence); output.writeLong(state.generation);
+            output.writeByte(state.phase.ordinal()); output.writeInt(state.remainingTicks);
+            writeString(output, state.portal, 256, "travel portal");
+        }
+        else if(message instanceof AdmissionSync) {
             AdmissionSync sync = (AdmissionSync)message;
             output.writeByte(ADMISSION_SYNC);
             writeString(output, sync.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
@@ -370,6 +407,7 @@ final class DirectConnectWire {
             output.writeByte(MOVEMENT_INPUTS);
             writeString(output, inputs.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                     "session identity");
+            output.writeLong(inputs.generation);
             output.writeLong(inputs.udpToken);
             output.writeByte(inputs.inputs.size());
             for(MovementInputFrame input : inputs.inputs) {
@@ -391,6 +429,7 @@ final class DirectConnectWire {
             output.writeByte(MOVEMENT_SNAPSHOT);
             writeString(output, snapshotMessage.sessionId,
                     DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(snapshotMessage.generation);
             output.writeLong(snapshot.getSequence());
             output.writeLong(snapshot.getHostTick());
             output.writeByte(entities.size());
@@ -739,6 +778,7 @@ final class DirectConnectWire {
             output.writeByte(REVIVE_INTENT);
             writeString(output, intent.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                     "session identity");
+            output.writeLong(intent.generation);
             output.writeByte(intent.targetSlot);
             output.writeBoolean(intent.active);
         }
@@ -781,6 +821,7 @@ final class DirectConnectWire {
             output.writeByte(COMBAT_ACTION_REQUEST);
             writeString(output, request.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                     "session identity");
+            output.writeLong(request.generation);
             output.writeLong(request.requestId);
             output.writeByte(request.action.getWireId());
             output.writeBoolean(request.directed);
@@ -958,6 +999,15 @@ final class DirectConnectWire {
     }
 
     private static Message decode(ByteBuf input) throws ProtocolException {
+        try { return decodeBounded(input); }
+        catch(IllegalArgumentException | IndexOutOfBoundsException invalid) {
+            throw new ProtocolException("Malformed bounded wire message.", invalid);
+        }
+    }
+    private static void requireGeneration(long generation) {
+        if(generation < 1L) throw new IllegalArgumentException("World generation must be positive.");
+    }
+    private static Message decodeBounded(ByteBuf input) throws ProtocolException {
         requireReadable(input, 5, "message header");
         int magic = input.readInt();
         if(magic != DirectConnectProtocol.MAGIC) {
@@ -967,6 +1017,42 @@ final class DirectConnectWire {
         int type = input.readUnsignedByte();
         Message message;
         switch(type) {
+            case TRAVEL_DESTINATION:
+                String destinationSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 16, "destination generation/seed");
+                long destinationGeneration = input.readLong(), destinationSeed = input.readLong();
+                String destinationArea = readString(input, 256, "destination area");
+                String destinationContent = readString(input, 256, "destination content");
+                String destinationRecipe = readString(input, com.interrupt.dungeoneer.multiplayer.floor.NativeFloorRecipe.MAX_BYTES, "native recipe");
+                requireReadable(input, 1, "arrival presence");
+                float[] destinationArrival = null;
+                if(input.readBoolean()) {
+                    requireReadable(input, 16, "arrival"); destinationArrival = new float[4];
+                    for(int index = 0; index < 4; index++) destinationArrival[index] = input.readFloat();
+                }
+                message = new TravelDestination(destinationSession, new com.interrupt.dungeoneer.multiplayer.floor.PartyDestination(
+                        destinationGeneration, destinationArea, destinationContent, destinationSeed, destinationRecipe, destinationArrival));
+                break;
+            case TRAVEL_READY:
+                String travelReadySession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 8, "destination readiness");
+                message = new TravelReady(travelReadySession, input.readLong());
+                break;
+            case TRAVEL_INTENT:
+                message = new TravelIntent(readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity"),
+                        input.readLong(), readString(input, 256, "travel portal"));
+                break;
+            case TRAVEL_STATE:
+                String travelSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                long travelSequence = input.readLong(), travelGeneration = input.readLong();
+                int travelPhase = input.readUnsignedByte(), travelTicks = input.readInt();
+                if(travelPhase >= com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.values().length)
+                    throw new ProtocolException("Invalid travel phase.");
+                message = new TravelState(travelSession, new com.interrupt.dungeoneer.multiplayer.floor.PartyTransition(
+                        travelSequence, travelGeneration,
+                        com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.Phase.values()[travelPhase],
+                        readString(input, 256, "travel portal"), travelTicks));
+                break;
             case ADMISSION_SYNC:
                 String admissionSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
@@ -1442,11 +1528,12 @@ final class DirectConnectWire {
             case REVIVE_INTENT:
                 String reviveSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                         "session identity");
-                requireReadable(input, 2, "Revival intent");
+                requireReadable(input, 10, "Revival intent");
+                long reviveGeneration = input.readLong();
                 int reviveSlot = input.readUnsignedByte();
                 boolean reviveActive = input.readBoolean();
                 try {
-                    message = new ReviveIntentMessage(reviveSession, reviveSlot, reviveActive);
+                    message = new ReviveIntentMessage(reviveSession, reviveSlot, reviveActive, reviveGeneration);
                 }
                 catch(IllegalArgumentException invalid) {
                     throw new ProtocolException("Invalid Revival intent.", invalid);
@@ -1701,7 +1788,8 @@ final class DirectConnectWire {
             case MOVEMENT_INPUTS:
                 String inputSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
-                requireReadable(input, 9, "Movement input bundle header");
+                requireReadable(input, 17, "Movement input bundle header");
+                long inputGeneration = input.readLong();
                 long inputToken = input.readLong();
                 int inputCount = input.readUnsignedByte();
                 if(inputCount < 1 || inputCount > DirectConnectProtocol.MAX_INPUT_FRAMES) {
@@ -1725,12 +1813,13 @@ final class DirectConnectWire {
                                 + ex.getMessage(), ex);
                     }
                 }
-                message = new MovementInputs(inputSession, inputToken, inputFrames);
+                message = new MovementInputs(inputSession, inputToken, inputFrames, inputGeneration);
                 break;
             case MOVEMENT_SNAPSHOT:
                 String snapshotSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
-                requireReadable(input, 17, "Movement snapshot header");
+                requireReadable(input, 25, "Movement snapshot header");
+                long snapshotGeneration = input.readLong();
                 long snapshotSequence = input.readLong();
                 long snapshotHostTick = input.readLong();
                 int entityCount = input.readUnsignedByte();
@@ -1767,7 +1856,7 @@ final class DirectConnectWire {
                 try {
                     message = new MovementSnapshotMessage(snapshotSession,
                             new MovementSnapshot(snapshotSequence, snapshotHostTick,
-                                    movementEntities));
+                                    movementEntities), snapshotGeneration);
                 }
                 catch(IllegalArgumentException ex) {
                     throw new ProtocolException("Malformed movement snapshot: "
@@ -1777,7 +1866,8 @@ final class DirectConnectWire {
             case COMBAT_ACTION_REQUEST:
                 String combatRequestSession = readString(input,
                         DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
-                requireReadable(input, 10, "combat action request");
+                requireReadable(input, 18, "combat action request");
+                long combatGeneration = input.readLong();
                 long combatRequestId = input.readLong();
                 int combatAction = input.readUnsignedByte();
                 boolean directedCombat = input.readBoolean();
@@ -1787,7 +1877,7 @@ final class DirectConnectWire {
                         message = new CombatActionRequestMessage(combatRequestSession,
                                 combatRequestId, CombatAction.fromWireId(combatAction),
                                 input.readFloat(), input.readFloat(), input.readFloat(),
-                                input.readFloat(), input.readLong());
+                                input.readFloat(), input.readLong()).atGeneration(combatGeneration);
                     }
                     else {
                         String combatTarget = readString(input,
@@ -1795,7 +1885,7 @@ final class DirectConnectWire {
                                 "combat target identity");
                         message = new CombatActionRequestMessage(combatRequestSession,
                                 combatRequestId, CombatAction.fromWireId(combatAction),
-                                combatTarget);
+                                combatTarget).atGeneration(combatGeneration);
                     }
                 }
                 catch(IllegalArgumentException ex) {
@@ -2209,6 +2299,37 @@ final class DirectConnectWire {
     }
 
     /** Ordered TCP fences. Acknowledgements echo the exact admission, generation and tick. */
+    static final class TravelDestination implements Message {
+        final String sessionId;
+        final com.interrupt.dungeoneer.multiplayer.floor.PartyDestination destination;
+        TravelDestination(String sessionId, com.interrupt.dungeoneer.multiplayer.floor.PartyDestination destination) {
+            if(destination == null) throw new IllegalArgumentException("Destination required.");
+            this.sessionId = sessionId; this.destination = destination;
+        }
+    }
+    static final class TravelReady implements Message {
+        final String sessionId; final long generation;
+        TravelReady(String sessionId, long generation) {
+            if(generation < 1L) throw new IllegalArgumentException("Invalid readiness generation.");
+            this.sessionId = sessionId; this.generation = generation;
+        }
+    }
+    static final class TravelIntent implements Message {
+        final String sessionId, portal; final long generation;
+        TravelIntent(String sessionId, long generation, String portal) {
+            if(generation < 1L || portal == null || portal.length() > 256)
+                throw new IllegalArgumentException("Invalid travel intent.");
+            this.sessionId = sessionId; this.generation = generation; this.portal = portal;
+        }
+    }
+    static final class TravelState implements Message {
+        final String sessionId;
+        final com.interrupt.dungeoneer.multiplayer.floor.PartyTransition state;
+        TravelState(String sessionId, com.interrupt.dungeoneer.multiplayer.floor.PartyTransition state) {
+            this.sessionId = sessionId; this.state = state;
+        }
+    }
+
     static final class AdmissionSync implements Message {
         static final int BEGIN = 1, BASELINE_END = 2, CATCH_UP_END = 3,
                 ACK_BASELINE = 4, ACK_CATCH_UP = 5, ACTIVATED = 6;
@@ -2366,8 +2487,13 @@ final class DirectConnectWire {
         final String sessionId;
         final long udpToken;
         final List<MovementInputFrame> inputs;
+        final long generation;
 
         MovementInputs(String sessionId, long udpToken, List<MovementInputFrame> inputs) {
+            this(sessionId, udpToken, inputs, 1L);
+        }
+        MovementInputs(String sessionId, long udpToken, List<MovementInputFrame> inputs, long generation) {
+            requireGeneration(generation); this.generation = generation;
             if(inputs == null) throw new IllegalArgumentException("Movement inputs cannot be null.");
             this.sessionId = sessionId;
             this.udpToken = udpToken;
@@ -2379,8 +2505,11 @@ final class DirectConnectWire {
     static final class MovementSnapshotMessage implements Message {
         final String sessionId;
         final MovementSnapshot snapshot;
+        final long generation;
 
-        MovementSnapshotMessage(String sessionId, MovementSnapshot snapshot) {
+        MovementSnapshotMessage(String sessionId, MovementSnapshot snapshot) { this(sessionId, snapshot, 1L); }
+        MovementSnapshotMessage(String sessionId, MovementSnapshot snapshot, long generation) {
+            requireGeneration(generation); this.generation = generation;
             if(snapshot == null) throw new IllegalArgumentException("Movement snapshot cannot be null.");
             this.sessionId = sessionId;
             this.snapshot = snapshot;
@@ -2398,9 +2527,11 @@ final class DirectConnectWire {
         final float aimZ;
         final float attackPower;
         final long weaponEntityId;
+        final long generation;
 
         CombatActionRequestMessage(String sessionId, long requestId,
                 CombatAction action, String targetId) {
+            generation = 1L;
             if(!CombatRequest.isValidRequestId(requestId) || action == null
                     || !action.allowsTargetedRequest()
                     || targetId == null || targetId.trim().isEmpty()) {
@@ -2432,6 +2563,7 @@ final class DirectConnectWire {
         CombatActionRequestMessage(String sessionId, long requestId,
                 CombatAction action, float aimX, float aimY, float aimZ,
                 float attackPower, long weaponEntityId) {
+            generation = 1L;
             if(weaponEntityId < 0L) throw new IllegalArgumentException("Invalid weapon identity.");
             this.weaponEntityId = weaponEntityId;
             float aimLengthSquared = aimX * aimX + aimY * aimY + aimZ * aimZ;
@@ -2454,6 +2586,14 @@ final class DirectConnectWire {
             this.attackPower = attackPower;
         }
 
+        CombatActionRequestMessage atGeneration(long generation) { return new CombatActionRequestMessage(this, generation); }
+        private CombatActionRequestMessage(CombatActionRequestMessage source, long generation) {
+            requireGeneration(generation); this.generation = generation;
+            sessionId = source.sessionId; requestId = source.requestId; action = source.action;
+            targetId = source.targetId; directed = source.directed;
+            aimX = source.aimX; aimY = source.aimY; aimZ = source.aimZ;
+            attackPower = source.attackPower; weaponEntityId = source.weaponEntityId;
+        }
         private static boolean isFinite(float value) {
             return !Float.isNaN(value) && !Float.isInfinite(value);
         }
@@ -2776,7 +2916,10 @@ final class DirectConnectWire {
         final String sessionId;
         final int targetSlot;
         final boolean active;
-        ReviveIntentMessage(String sessionId, int targetSlot, boolean active) {
+        final long generation;
+        ReviveIntentMessage(String sessionId, int targetSlot, boolean active) { this(sessionId, targetSlot, active, 1L); }
+        ReviveIntentMessage(String sessionId, int targetSlot, boolean active, long generation) {
+            requireGeneration(generation); this.generation = generation;
             if(sessionId == null || targetSlot < 1 || targetSlot > 4) {
                 throw new IllegalArgumentException("Revival intent needs session and Campaign Slot 1-4.");
             }

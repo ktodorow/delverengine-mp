@@ -472,7 +472,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         }
         if(message instanceof MovementSnapshotMessage) {
             MovementSnapshotMessage movement = (MovementSnapshotMessage)message;
-            if(!sessionId.equals(movement.sessionId)) return;
+            if(!sessionId.equals(movement.sessionId) || movement.generation != nativeWorldGeneration) return;
             if(floorMovementBaselinePending) return;
             if(movementReplication.applySnapshot(movement.snapshot)) {
                 acknowledgeMovementInputs(movement.snapshot);
@@ -694,6 +694,20 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private long admissionId, admissionGeneration;
     private boolean nativeAdmission;
     private long nextAdmissionCheckpoint, pendingAdmissionCheckpoint;
+    private volatile com.interrupt.dungeoneer.multiplayer.floor.PartyTransition travel =
+            com.interrupt.dungeoneer.multiplayer.floor.PartyTransition.idle(1L, 1L);
+    private volatile com.interrupt.dungeoneer.multiplayer.floor.PartyDestination partyDestination;
+    @Override public com.interrupt.dungeoneer.multiplayer.floor.PartyDestination getPartyDestination() { return partyDestination; }
+    @Override public void acknowledgePartyDestination(long generation) {
+        if(canSendReliableSessionEvent()) tcpChannel.writeAndFlush(new DirectConnectWire.TravelReady(sessionId, generation));
+    }
+    @Override public com.interrupt.dungeoneer.multiplayer.floor.PartyTransition getPartyTransition() { return travel; }
+    @Override public synchronized void requestPartyTransition(String portal) {
+        if(canSendReliableSessionEvent()) tcpChannel.writeAndFlush(
+                new DirectConnectWire.TravelIntent(sessionId, getNativeWorldGeneration(), portal));
+    }
+    @Override public void cancelPartyTransition() { requestPartyTransition(""); }
+
     private DirectConnectWire.AdmissionSync pendingAdmissionFence;
 
     @Override public synchronized long getPendingAdmissionCheckpoint() {
@@ -873,7 +887,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     @Override
     public synchronized void submitReviveIntent(int targetSlot, boolean active) {
         if(!canSendReliableSessionEvent() || targetSlot < 1 || targetSlot > 4) return;
-        tcpChannel.writeAndFlush(new DirectConnectWire.ReviveIntentMessage(sessionId, targetSlot, active));
+        tcpChannel.writeAndFlush(new DirectConnectWire.ReviveIntentMessage(sessionId, targetSlot, active, nativeWorldGeneration));
     }
 
     @Override
@@ -894,7 +908,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     @Override
     public synchronized void submitCombatAction(long requestId, CombatAction action, String targetId) {
         CombatActionRequestMessage request = new CombatActionRequestMessage(sessionId, requestId,
-                action, targetId);
+                action, targetId).atGeneration(nativeWorldGeneration);
         if(!canSendReliableSessionEvent()) return;
         tcpChannel.writeAndFlush(request);
     }
@@ -915,7 +929,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     public synchronized void submitCombatAction(long requestId, CombatAction action,
             float aimX, float aimY, float aimZ, float attackPower, long weaponEntityId) {
         CombatActionRequestMessage request = new CombatActionRequestMessage(sessionId, requestId,
-                action, aimX, aimY, aimZ, attackPower, weaponEntityId);
+                action, aimX, aimY, aimZ, attackPower, weaponEntityId).atGeneration(nativeWorldGeneration);
         if(!canSendReliableSessionEvent()) return;
         tcpChannel.writeAndFlush(request);
     }
@@ -1037,7 +1051,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     @Override public synchronized long getNativeWorldGeneration() { return nativeWorldGeneration; }
 
     @Override public synchronized long getSharedFloorSeed() {
-        return readyMessage == null ? 0L : readyMessage.floorSeed;
+        return partyDestination != null ? partyDestination.seed : readyMessage == null ? 0L : readyMessage.floorSeed;
     }
 
     /** Host compares this build with its own and removes a client whose floor differs. */
@@ -1419,7 +1433,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
             }
             for(int copy = 0; copy < copies; copy++) {
                 ByteBuf encoded = DirectConnectWire.encodeDatagram(udpChannel.alloc(),
-                        new MovementInputs(sessionId, udpToken, bundle));
+                        new MovementInputs(sessionId, udpToken, bundle, nativeWorldGeneration));
                 udpChannel.writeAndFlush(new DatagramPacket(encoded,
                         new InetSocketAddress(remote.getAddress(), port)));
             }
@@ -1503,6 +1517,20 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof ServerRejected) {
                 rejected((ServerRejected)message);
             }
+            else if(message instanceof DirectConnectWire.TravelDestination && sessionId != null) {
+                DirectConnectWire.TravelDestination report = (DirectConnectWire.TravelDestination)message;
+                if(sessionId.equals(report.sessionId) && report.destination.generation == getNativeWorldGeneration()
+                        && (partyDestination == null || report.destination.generation > partyDestination.generation)) {
+                    partyDestination = report.destination;
+                    status = new DirectConnectStatus(DirectConnectPhase.READY, "Reconstructing Party destination.",
+                            sessionId, "host", report.destination.floorId);
+                }
+            }
+            else if(message instanceof DirectConnectWire.TravelState && sessionId != null) {
+                DirectConnectWire.TravelState report = (DirectConnectWire.TravelState)message;
+                if(sessionId.equals(report.sessionId) && report.state.sequence > travel.sequence)
+                    travel = report.state;
+            }
             else if(message instanceof DirectConnectWire.AdmissionSync && sessionId != null
                     && campaignSlot != 0) {
                 admissionSync((DirectConnectWire.AdmissionSync)message);
@@ -1510,6 +1538,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof MovementSnapshotMessage && sessionId != null && campaignSlot != 0) {
                 MovementSnapshotMessage movement = (MovementSnapshotMessage)message;
                 if(!sessionId.equals(movement.sessionId)) { fail("Movement belongs to another session."); return; }
+                if(movement.generation != nativeWorldGeneration) return;
                 boolean applied = floorMovementBaselinePending
                         ? movementReplication.applyFloorSnapshot(movement.snapshot)
                         : movementReplication.applySnapshot(movement.snapshot);

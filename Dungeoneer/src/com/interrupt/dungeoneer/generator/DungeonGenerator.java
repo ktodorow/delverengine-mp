@@ -32,6 +32,7 @@ public class DungeonGenerator {
 	private Boolean[] visited = null;
 	
 	private Random r;
+    private boolean sharedBuild;
 	private int maxComplexity = 1;
 	private int curComplexity = 0;
 	
@@ -39,6 +40,11 @@ public class DungeonGenerator {
 	
 	private HashMap<String, Level> tileCache = new HashMap<String, Level>();
 	
+    public DungeonGenerator(Random r, int dungeonLevel, boolean sharedBuild) {
+        this(r, dungeonLevel);
+        this.sharedBuild = sharedBuild;
+    }
+
 	public DungeonGenerator(Random r, int dungeonLevel) {
 		this.dungeonLevel = dungeonLevel;
 		this.r = r;
@@ -133,6 +139,7 @@ public class DungeonGenerator {
                         // try a few times to make a good room
                         for(int i = 0; i < 10 && !madeGoodRoom; i++) {
 							RoomGenerator g = new RoomGenerator(level_tile, roomGeneratorType);
+                            if(sharedBuild) g.random.setSeed(r.nextLong());
 							madeGoodRoom = g.generate(tile.exitTop, tile.exitBottom, tile.exitRight, tile.exitLeft);
 						}
 

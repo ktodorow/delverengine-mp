@@ -429,6 +429,12 @@ public final class CampaignSaveStore {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }
+        if(format <= 6 && protocol <= 49 && expected.getBuildId().equals("mp-v108-prototype-party-travel-55")
+                && (compatibility.getBuildId().equals("mp-v108-prototype-dormant-floors-54")
+                    || format <= 5 && compatibility.getBuildId().equals("mp-v108-prototype-late-admission-53"))) {
+            compatibility = new DirectConnectCompatibility(expected.getBuildId(),
+                    compatibility.getContentFormat(), compatibility.getContentSha256());
+        }
         String campaignId = input.readUTF();
         int capacity = input.readInt();
         int startingLives = input.readInt();
@@ -531,7 +537,15 @@ public final class CampaignSaveStore {
                 "Dormant Floor");
         List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> dormant = new ArrayList<>();
         for(int index = 0; index < floorCount; index++) dormant.add(readFloor(input));
-        return saved.withFloorHistory(activeArea, dormant, timers);
+        saved = saved.withFloorHistory(activeArea, dormant, timers);
+        if(format < 7) return saved;
+        int scatterCount = boundedCount(input.readInt(), 0, (floorCount + 1) * MAX_ITEMS, "scatter provenance");
+        java.util.Map<Long, Integer> owners = new java.util.LinkedHashMap<>();
+        for(int index = 0; index < scatterCount; index++) {
+            long item = input.readLong(); int slot = input.readInt();
+            if(owners.put(item, slot) != null) throw new IllegalArgumentException("Duplicate scatter identity.");
+        }
+        return saved.withScatterOwners(owners);
     }
 
     private void write(DataOutputStream output, CampaignSave campaign) throws IOException {
@@ -612,6 +626,10 @@ public final class CampaignSaveStore {
         output.writeInt(campaign.getDormantFloors().size());
         for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor : campaign.getDormantFloors())
             writeFloor(output, floor);
+        output.writeInt(campaign.getScatterOwners().size());
+        for(java.util.Map.Entry<Long, Integer> entry : campaign.getScatterOwners().entrySet()) {
+            output.writeLong(entry.getKey()); output.writeInt(entry.getValue());
+        }
     }
 
     private static java.util.Map<Long, Long> readDropTimers(DataInputStream in) throws IOException {
