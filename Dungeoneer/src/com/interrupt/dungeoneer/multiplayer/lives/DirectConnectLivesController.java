@@ -65,14 +65,14 @@ public final class DirectConnectLivesController {
         if(game == null || game.player == null || input == null) return;
         prompt = null;
         PartyStatusSnapshot status = peer.getPartyStatus();
-        if(status == null || peer.getLocalMovementEntityId() == null) return;
+        if(status == null || peer.getLocalCampaignSlot() == 0) return;
         if(status.getSequence() != observedStatusSequence) {
             observedStatusSequence = status.getSequence();
             secondsSinceStatus = 0f;
         }
         else if(!peer.isSessionPaused()) secondsSinceStatus += Math.max(0f, deltaSeconds);
 
-        PartyMemberStatus local = status.getMember(peer.getLocalMovementEntityId());
+        PartyMemberStatus local = status.getMember(peer.getLocalCampaignSlot());
         for(PartyMemberStatus member : status.getMembers()) {
             Integer previous = observedLives.put(member.getCampaignSlot(), member.getRemainingLives());
             if(previous != null && member.getRemainingLives() < previous) {

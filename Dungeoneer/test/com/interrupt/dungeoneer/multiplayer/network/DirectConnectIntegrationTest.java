@@ -26,6 +26,7 @@ import com.interrupt.dungeoneer.multiplayer.combat.CombatAction;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatPresentationEvent;
 import com.interrupt.dungeoneer.multiplayer.combat.CombatSnapshot;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignSave;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.ReconnectTokenStore;
@@ -77,6 +78,688 @@ public class DirectConnectIntegrationTest {
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     private int campaignStoreCounter;
+
+    @Test public void recoveryBeforeLateSlotCheckpointPreservesBodylessReservation() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-reservation-recovery");
+        File root = temporaryFolder.newFolder("late-reservation-recovery-store");
+        HostFixture fixture = host(compatibility, 3, "late-reservation-recovery", root);
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient late = null;
+        HostFixture resumed = null;
+        try {
+            fixture.host.startSession(); awaitPhase(existing, DirectConnectPhase.READY);
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, tokens, compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            fixture.host.abortCampaignRecovery("Interrupted before next Campaign world checkpoint.");
+            awaitPhase(late, DirectConnectPhase.DISCONNECTED);
+            late.close();
+            CampaignSave recovered = fixture.store.campaignSaves().recover("late-reservation-recovery", compatibility);
+            assertNull("Recovery fixture must predate live reservation", recovered.getParticipant(3));
+            resumed = host(compatibility, 3, "late-reservation-recovery", root);
+            late = client(resumed.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, tokens, compatibility);
+            awaitPhase(late, DirectConnectPhase.LOBBY);
+            resumed.host.startSession();
+            awaitPhase(late, DirectConnectPhase.READY);
+            assertEquals(3, late.getCampaignSlot());
+            assertNull(late.getLocalMovementEntityId());
+            assertEquals(0, resumed.host.getPartyStatus().getMember(3).getRemainingLives());
+            assertNull(resumed.host.persistCampaign().getParticipant(3).getProgress());
+        }
+        finally {
+            if(late != null) late.close(); existing.close();
+            if(resumed != null) {
+                resumed.host.abortCampaignRecovery("Recovery test cleanup.");
+                resumed.close();
+            }
+            fixture.close();
+        }
+    }
+
+    @Test public void lateSpectatorWorldRequestsCannotCreateOwnershipOrProgress() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("spectator-world-actions");
+        HostFixture fixture = host(compatibility, 3, "spectator-world-actions");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        try {
+            fixture.host.startSession(); awaitPhase(existing, DirectConnectPhase.READY);
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            PhysicalItemState item = fixture.host.getItemWorld().spawn("test-item", null, 16.5f, 16.5f, 0.5f);
+            late.submitItemAction(1L, ItemAction.PICKUP, item.entityId);
+            late.requestPauseSession();
+            late.submitPartyChat("After ignored world requests");
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(existing.getPartyCommunicationState().getChatHistory().stream()
+                    .noneMatch(m -> m.getText().equals("After ignored world requests"))
+                    && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            assertTrue(existing.getPartyCommunicationState().getChatHistory().stream()
+                    .anyMatch(m -> m.getText().equals("After ignored world requests")));
+            assertTrue(fixture.host.drainItemRequests().isEmpty());
+            assertNull(fixture.host.getItemWorld().get(item.entityId).owner);
+            assertNull(fixture.host.getEconomy().get(new ParticipantId("campaign-slot-3")));
+            assertEquals(0, fixture.host.getPartyStatus().getMember(3).getRemainingLives());
+            assertEquals(2, fixture.host.getMovementEntities().size());
+            assertFalse(fixture.host.isSessionPaused());
+            assertEquals(DirectConnectPhase.READY, late.getStatus().getPhase());
+        }
+        finally { if(late != null) late.close(); existing.close(); fixture.close(); }
+    }
+
+    @Test public void lateNativeMovementReconstructsLivingAvatarsBeforeCheckpointAck() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-native-avatars");
+        HostFixture fixture = host(compatibility, 3, "late-native-avatars");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        try {
+            fixture.host.startSession(); awaitPhase(existing, DirectConnectPhase.READY);
+            late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
+                    identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
+                    new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(late);
+            // Headless fixture has no window whose UI scale could be recalculated.
+            com.interrupt.dungeoneer.game.Game.instance = null;
+            assertTrue(movement.applyInitialAuthoritativeState(game.player));
+            movement.prepare(game);
+            assertEquals(2, movement.getRemoteAvatarCount());
+            assertEquals(2, game.level.non_collidable_entities.size);
+            assertNotNull(movement.getRemoteAvatar(new ParticipantId("campaign-slot-1")));
+            assertNotNull(movement.getRemoteAvatar(new ParticipantId("campaign-slot-2")));
+            assertNull(movement.getRemoteAvatar(new ParticipantId("campaign-slot-3")));
+            assertNull(fixture.host.getPartyStatus().getMember(3));
+            assertTrue(late.getPendingAdmissionCheckpoint() > 0);
+        }
+        finally {
+            if(late != null) late.close(); existing.close(); fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+        }
+    }
+
+    @Test public void malformedLateConnectionDoesNotStopHostGameplay() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("malformed-late");
+        HostFixture fixture = host(compatibility, 3, "malformed-late");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        try(Socket raw = new Socket("127.0.0.1", fixture.host.getBoundPort())) {
+            raw.setSoTimeout((int)TIMEOUT_MILLIS);
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            writeTcp(raw, new DirectConnectWire.ClientHello(DirectConnectProtocol.VERSION,
+                    compatibility.getBuildId(), compatibility.getContentFormat(),
+                    compatibility.getContentSha256(), identity('3').getValue()));
+            DirectConnectWire.CampaignChallenge challenge = (DirectConnectWire.CampaignChallenge)readTcp(raw);
+            ByteBuf bytes = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                    new DirectConnectWire.AdmissionSync(challenge.sessionId, 1L, 1L, 0L,
+                            DirectConnectWire.AdmissionSync.ACK_BASELINE));
+            try {
+                bytes.setByte(bytes.writerIndex() - 1, 99);
+                byte[] payload = new byte[bytes.readableBytes()]; bytes.readBytes(payload);
+                java.io.DataOutputStream output = new java.io.DataOutputStream(raw.getOutputStream());
+                output.writeInt(payload.length); output.write(payload); output.flush();
+            }
+            finally { bytes.release(); }
+            assertTrue(readTcp(raw) instanceof DirectConnectWire.ServerRejected);
+            assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
+            assertEquals(DirectConnectPhase.READY, existing.getStatus().getPhase());
+            assertEquals(2, fixture.host.getRoster().getSlots().size());
+        }
+        finally { existing.close(); fixture.close(); }
+    }
+
+    @Test public void lateSpectatorSeesBodyDespawnAndAuthenticatedReturn() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("spectator-body-lifecycle");
+        HostFixture fixture = host(compatibility, 3, "spectator-body-lifecycle",
+                temporaryFolder.newFolder("short-grace"), 10L);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient friend = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
+                2, tokens, compatibility);
+        DirectConnectClient late = null;
+        try {
+            awaitPhase(friend, DirectConnectPhase.AWAITING_APPROVAL);
+            assertTrue(fixture.host.approve(identity('2').getValue()));
+            awaitPhase(friend, DirectConnectPhase.LOBBY);
+            fixture.host.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            friend.close();
+            awaitPartyState(late, 2, PartyMemberState.DISCONNECTED);
+            assertFalse("Spectator must discard returned body", late.getMovementEntities().stream()
+                    .anyMatch(d -> d.getCampaignSlot() == 2));
+            friend = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
+                    2, tokens, compatibility);
+            awaitPhase(friend, DirectConnectPhase.READY);
+            awaitPartyState(late, 2, PartyMemberState.CONNECTED);
+            assertEquals(1, late.getMovementEntities().stream().filter(d -> d.getCampaignSlot() == 2).count());
+            assertNull(late.getLocalMovementEntityId());
+        }
+        finally { if(late != null) late.close(); friend.close(); fixture.close(); }
+    }
+
+    @Test public void repeatedLiveClaimReturnsSameAdmissionCredentials() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("duplicate-late-claim");
+        HostFixture fixture = host(compatibility, 3, "duplicate-late-claim");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        try(Socket raw = new Socket("127.0.0.1", fixture.host.getBoundPort())) {
+            raw.setSoTimeout((int)TIMEOUT_MILLIS);
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            writeTcp(raw, new DirectConnectWire.ClientHello(DirectConnectProtocol.VERSION,
+                    compatibility.getBuildId(), compatibility.getContentFormat(),
+                    compatibility.getContentSha256(), identity('3').getValue()));
+            DirectConnectWire.CampaignChallenge challenge = (DirectConnectWire.CampaignChallenge)readTcp(raw);
+            assertEquals("Live handshake must keep Host gameplay running", DirectConnectPhase.READY,
+                    fixture.host.getStatus().getPhase());
+            DirectConnectWire.SlotClaim claim = new DirectConnectWire.SlotClaim(challenge.sessionId,
+                    "Late", AvatarCatalog.HUMANOID_3, 3, null);
+            writeTcp(raw, claim);
+            DirectConnectWire.ServerAccepted first = (DirectConnectWire.ServerAccepted)readTcp(raw);
+            writeTcp(raw, claim);
+            Message repeated = readTcp(raw);
+            assertTrue("Duplicate claim must preserve active admission", repeated instanceof DirectConnectWire.ServerAccepted);
+            DirectConnectWire.ServerAccepted same = (DirectConnectWire.ServerAccepted)repeated;
+            assertEquals(first.udpToken, same.udpToken);
+            assertEquals(first.reconnectToken, same.reconnectToken);
+            assertEquals(first.slotNumber, same.slotNumber);
+            assertEquals(3, fixture.host.getRoster().getSlots().size());
+            assertNull(fixture.host.getPartyStatus().getMember(3));
+            assertEquals(DirectConnectPhase.READY, existing.getStatus().getPhase());
+        }
+        finally { existing.close(); fixture.close(); }
+    }
+
+    @Test public void fourSlotsJoinDuringCombatProtectOccupantsAndRejectFullCapacity() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("four-slots-live-combat");
+        HostFixture fixture = host(compatibility, 4, "four-slots-live-combat");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient third = null, fourth = null, extra = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            ParticipantId friend = new ParticipantId("campaign-slot-2");
+            fixture.host.applyNativeParticipantDamage("native-world", friend, 1, 16.5f, 16.5f, 0.5f);
+            third = client(fixture.host.getBoundPort(), '3', "Third", AvatarCatalog.HUMANOID_3,
+                    2, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(third, DirectConnectPhase.READY);
+            assertEquals(3, third.getCampaignSlot());
+            fourth = client(fixture.host.getBoundPort(), '4', "Fourth", AvatarCatalog.HUMANOID_4,
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(fourth, DirectConnectPhase.READY);
+            assertEquals(4, fourth.getCampaignSlot());
+            assertEquals(7, fourth.getCombatSnapshot().getCombatant(
+                    AuthoritativeCombatEncounter.participantTargetId(friend)).getHealth());
+            extra = client(fixture.host.getBoundPort(), '5', "Full", AvatarCatalog.HUMANOID_1,
+                    0, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(extra, DirectConnectPhase.REJECTED);
+            assertTrue(extra.getStatus().getMessage().contains("CAMPAIGN_FULL"));
+            assertEquals(identity('2'), fixture.host.getRoster().getSlot(2).getLauncherIdentity());
+            assertEquals(4, fixture.host.getRoster().getSlots().size());
+            assertEquals(2, fixture.host.getMovementEntities().size());
+            assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
+            assertFalse(fixture.host.isSessionPaused());
+        }
+        finally {
+            if(extra != null) extra.close();
+            if(fourth != null) fourth.close();
+            if(third != null) third.close();
+            existing.close(); fixture.close();
+        }
+    }
+
+    @Test public void lateBaselineRestoresOngoingEffectPhaseWithoutStartCue() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-current-effects");
+        HostFixture fixture = host(compatibility, 3, "late-current-effects");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<String, LocalizedString>();
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            String actorId = AuthoritativeCombatEncounter.participantTargetId(new ParticipantId("campaign-slot-1"));
+            NativeStatusEffectState poison = new NativeStatusEffectState(81L,
+                    NativeStatusEffectState.Kind.POISON, 180f, 1f, "", false, 45f, 1f, 2L);
+            fixture.host.synchronizeNativeActorEffects(new ActorEffectsSnapshot(actorId, 1L, false,
+                    java.util.Collections.singletonList(poison)));
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            ActorEffectsSnapshot received = awaitEffects(late, actorId, 180f);
+            assertEquals(45f, received.effects.get(0).elapsed, 0f);
+            assertEquals(2L, received.effects.get(0).pulses);
+            assertTrue(late.drainNativeStatusCues().isEmpty());
+            com.interrupt.dungeoneer.entities.Actor actor = new com.interrupt.dungeoneer.entities.Actor();
+            actor.hp = actor.maxHp = 20;
+            received.restoreAuthoritative(actor);
+            assertEquals(180f, actor.statusEffects.first().timer, 0f);
+            assertEquals(45f, actor.statusEffects.first().multiplayerElapsed, 0f);
+            assertEquals(2L, actor.statusEffects.first().getMultiplayerPulseCount());
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close(); fixture.close();
+            StringManager.localizedStrings = strings;
+        }
+    }
+
+    @Test public void freshReturnCreatesLateCharacterOnceWithNativeStarterRules() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-fresh-return");
+        HostFixture fixture = host(compatibility, 3, "late-fresh-return");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
+        HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
+        StringManager.localizedStrings = new HashMap<String, LocalizedString>();
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.game.Game game = nativePartyGame();
+            game.player.inventory.add(new com.interrupt.dungeoneer.entities.Item());
+            com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController items =
+                    new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
+            items.prepare(game);
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            ParticipantId participant = new ParticipantId("campaign-slot-3");
+            assertNull(fixture.host.getEconomy().get(participant));
+            long generation = fixture.host.getNativeWorldGeneration();
+            assertEquals(0, items.freshReturnLateParticipants(generation, false));
+            assertEquals("Joining current floor cannot grant Fresh Return", 0,
+                    items.freshReturnLateParticipants(generation, true));
+            fixture.host.beginNativeWorld();
+            generation = fixture.host.getNativeWorldGeneration();
+            fixture.host.completeNativeWorld(generation);
+            assertEquals(1, items.freshReturnLateParticipants(generation, true));
+            awaitPartyState(late, 3, PartyMemberState.CONNECTED);
+            assertNotNull(late.getLocalMovementEntityId());
+            com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress =
+                    fixture.host.getEconomy().get(participant);
+            assertEquals(0, progress.gold);
+            assertEquals(0, progress.experience);
+            assertEquals(1, progress.level);
+            assertEquals(0, progress.pendingStatChoices);
+            assertEquals(new com.interrupt.dungeoneer.entities.Player().stats.ATK, progress.attack);
+            PartyMemberStatus member = fixture.host.getPartyStatus().getMember(3);
+            assertEquals(fixture.host.getStartingLives(), member.getRemainingLives());
+            assertEquals(member.getMaximumHealth(), member.getHealth());
+            assertTrue(fixture.host.getPhysicalItems().stream().anyMatch(i -> participant.equals(i.owner)));
+            int itemCount = fixture.host.getPhysicalItems().size();
+            assertEquals(0, items.freshReturnLateParticipants(generation, true));
+            assertEquals(itemCount, fixture.host.getPhysicalItems().size());
+            assertEquals(0L, late.getPersonalKnowledge().potionMask);
+            assertTrue(late.getPersonalKnowledge().maps.isEmpty());
+            final NetworkEntityId localEntity = late.getLocalMovementEntityId();
+            MovementEntityState spawn = fixture.host.getCurrentMovementStates().stream()
+                    .filter(s -> s.getEntityId().equals(localEntity)).findFirst().get();
+            assertTrue(spawn.getX() > 0 && spawn.getX() < 32 && spawn.getY() > 0 && spawn.getY() < 32);
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            fixture.close();
+            com.interrupt.dungeoneer.game.Game.instance = previous;
+            StringManager.localizedStrings = strings;
+        }
+    }
+
+    @Test public void timedOutNativeAdmissionCanRetrySameSlotWithoutHalfCharacter() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-timeout-retry");
+        HostFixture fixture = host(compatibility, 3, "late-timeout-retry");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient late = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
+                    identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3), 3, tokens, compatibility);
+            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            fixture.host.updatePendingAdmissions(System.nanoTime() + java.util.concurrent.TimeUnit.MINUTES.toNanos(2));
+            awaitPhase(late, DirectConnectPhase.REJECTED);
+            assertTrue(late.getStatus().getMessage().contains("retry"));
+            assertNull(fixture.host.getPartyStatus().getMember(3));
+            com.interrupt.dungeoneer.multiplayer.lobby.CampaignSave saved = fixture.host.persistCampaign();
+            assertNull(saved.getParticipant(3).getMovement());
+            assertNull(saved.getParticipant(3).getProgress());
+            assertEquals(0, saved.getParticipant(3).getParty().getRemainingLives());
+            late.close();
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, tokens, compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            assertEquals(3, fixture.host.getRoster().getSlots().size());
+            assertEquals(2, fixture.host.getMovementEntities().size());
+            assertEquals(DirectConnectPhase.READY, existing.getStatus().getPhase());
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void coldResumeKeepsLateSlotBodylessUntilFreshReturn() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-cold-resume");
+        File root = temporaryFolder.newFolder("late-resume-store");
+        HostFixture fixture = host(compatibility, 3, "late-cold-resume", root);
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient late = null;
+        HostFixture resumed = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, tokens, compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            fixture.host.saveAndQuit();
+            awaitPhase(late, DirectConnectPhase.DISCONNECTED);
+            late.close();
+            resumed = host(compatibility, 3, "late-cold-resume", root);
+            late = client(resumed.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, tokens, compatibility);
+            awaitPhase(late, DirectConnectPhase.LOBBY);
+            resumed.host.startSession();
+            awaitPhase(late, DirectConnectPhase.READY);
+            assertNull("Cold resume cannot mint a Late Participant body", late.getLocalMovementEntityId());
+            assertEquals(1, resumed.host.getMovementEntities().size());
+            assertEquals(0, resumed.host.getPartyStatus().getMember(3).getRemainingLives());
+            assertNull(resumed.host.persistCampaign().getParticipant(3).getProgress());
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            if(resumed != null) resumed.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void loadingFloorDefersAdmissionAndReplacementInvalidatesOldCheckpoint() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-generation-edge");
+        HostFixture fixture = host(compatibility, 3, "late-generation-edge");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            fixture.host.beginNativeWorld();
+            long loadingGeneration = fixture.host.getNativeWorldGeneration();
+            late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
+                    identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.LOBBY);
+            assertEquals(0L, late.getPendingAdmissionCheckpoint());
+            assertNull(fixture.host.getPartyStatus().getMember(3));
+            fixture.host.completeNativeWorld(loadingGeneration);
+            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            long obsoleteCheckpoint = late.getPendingAdmissionCheckpoint();
+            fixture.host.beginNativeWorld();
+            long stableGeneration = fixture.host.getNativeWorldGeneration();
+            fixture.host.completeNativeWorld(loadingGeneration); // obsolete loading completion
+            late.acknowledgeNativeWorldReadiness(obsoleteCheckpoint);
+            assertNull(fixture.host.getPartyStatus().getMember(3));
+            fixture.host.completeNativeWorld(stableGeneration);
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(late.getPendingAdmissionCheckpoint() <= obsoleteCheckpoint
+                    && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            long replacement = late.getPendingAdmissionCheckpoint();
+            assertTrue(replacement > obsoleteCheckpoint);
+            assertEquals(stableGeneration, late.getNativeWorldGeneration());
+            late.acknowledgeNativeWorldReadiness(replacement);
+            deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(late.getPendingAdmissionCheckpoint() == 0L && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            late.acknowledgeNativeWorldReadiness(late.getPendingAdmissionCheckpoint());
+            awaitPhase(late, DirectConnectPhase.READY);
+            assertEquals(DirectConnectPhase.READY, existing.getStatus().getPhase());
+            assertFalse(fixture.host.isSessionPaused());
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void lateSpectatorCanChatAndReconnectWithoutHostInterruption() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-spectator-reconnect");
+        HostFixture fixture = host(compatibility, 3, "late-spectator-reconnect");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        DirectConnectClient late = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, tokens, compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            late.submitPartyChat("spectator hello");
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(existing.getPartyCommunicationState().getChatHistory().stream()
+                    .noneMatch(m -> "spectator hello".equals(m.getText()))
+                    && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            assertTrue("Bodyless Spectator can chat", existing.getPartyCommunicationState()
+                    .getChatHistory().stream().anyMatch(m -> "spectator hello".equals(m.getText())));
+            late.close();
+            awaitPartyState(existing, 3, PartyMemberState.DISCONNECTED);
+            assertEquals(DirectConnectPhase.READY, fixture.host.getStatus().getPhase());
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, tokens, compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            assertEquals(3, late.getCampaignSlot());
+            assertEquals(3, fixture.host.getRoster().getSlots().size());
+            assertEquals(2, fixture.host.getMovementEntities().size());
+            awaitPartyState(existing, 3, PartyMemberState.SPECTATING);
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void changesAfterCatchUpFenceReachJoinerBeforeActivation() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("admission-mutation-gap");
+        HostFixture fixture = host(compatibility, 3, "admission-mutation-gap");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
+                    identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            long baseline = late.getPendingAdmissionCheckpoint();
+            late.acknowledgeNativeWorldReadiness(baseline);
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(late.getPendingAdmissionCheckpoint() == 0L && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            long catchUp = late.getPendingAdmissionCheckpoint();
+            assertTrue(catchUp > baseline);
+            com.interrupt.dungeoneer.game.Progression progress = new com.interrupt.dungeoneer.game.Progression();
+            progress.progressionTriggers.put("opened-during-catchup", "done");
+            fixture.host.publishPartyProgression(progress);
+            deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(!late.getPartyProgression().persistent.containsKey("opened-during-catchup")
+                    && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            assertEquals("Changes after fence must close mutation gap", "done",
+                    late.getPartyProgression().persistent.get("opened-during-catchup"));
+            assertNull(fixture.host.getPartyStatus().getMember(3));
+            assertEquals(DirectConnectPhase.READY, existing.getStatus().getPhase());
+            late.acknowledgeNativeWorldReadiness(catchUp);
+            awaitPhase(late, DirectConnectPhase.READY);
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void nativeLateAdmissionWaitsForBothReconstructionCheckpoints() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("native-admission-checkpoints");
+        HostFixture fixture = host(compatibility, 3, "native-admission-checkpoints");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
+                    identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            assertNull(fixture.host.getPartyStatus().getMember(3));
+            assertFalse(late.getMovementSnapshots().isEmpty());
+            assertNotNull(late.getStatus().getFloorId());
+            long baseline = late.getPendingAdmissionCheckpoint();
+            assertTrue(baseline > 0);
+            late.acknowledgeNativeWorldReadiness(baseline);
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(late.getPendingAdmissionCheckpoint() <= baseline && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10L);
+            }
+            long catchUp = late.getPendingAdmissionCheckpoint();
+            assertTrue(catchUp > baseline);
+            assertNull(fixture.host.getPartyStatus().getMember(3));
+            late.acknowledgeNativeWorldReadiness(baseline); // stale render completion cannot activate
+            assertEquals(DirectConnectPhase.SYNCHRONIZING, late.getStatus().getPhase());
+            late.acknowledgeNativeWorldReadiness(catchUp);
+            awaitPhase(late, DirectConnectPhase.READY);
+            awaitPartyState(existing, 3, PartyMemberState.SPECTATING);
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void lateSpectatorCanAttachNativeFloorWithoutReceivingStarterItems() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-native-floor");
+        HostFixture fixture = host(compatibility, 3, "late-native-floor");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            com.interrupt.dungeoneer.entities.Player local = new com.interrupt.dungeoneer.entities.Player();
+            local.gold = 5;
+            local.inventory.add(new com.interrupt.dungeoneer.entities.Item());
+            com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
+                    new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(late);
+            assertTrue("Native Spectator floor entry must not wait for a character body",
+                    movement.applyInitialAuthoritativeState(local));
+            assertTrue(local.multiplayerIncapacitated);
+            assertEquals(0, local.gold);
+            assertEquals(0, local.inventory.size);
+            assertFalse(new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(late)
+                    .isLocalMapMarkerVisible());
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void lateParticipantStaysInactiveUntilBaselineIsAcknowledged() throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("late-baseline-barrier");
+        HostFixture fixture = host(compatibility, 3, "late-baseline-barrier");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        try(Socket late = new Socket("127.0.0.1", fixture.host.getBoundPort());
+                java.net.DatagramSocket udp = new java.net.DatagramSocket()) {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            late.setSoTimeout((int)TIMEOUT_MILLIS);
+            writeTcp(late, new DirectConnectWire.ClientHello(DirectConnectProtocol.VERSION,
+                    compatibility.getBuildId(), compatibility.getContentFormat(),
+                    compatibility.getContentSha256(), identity('3').getValue()));
+            DirectConnectWire.CampaignChallenge challenge =
+                    (DirectConnectWire.CampaignChallenge)readTcp(late);
+            writeTcp(late, new DirectConnectWire.SlotClaim(challenge.sessionId, "Late",
+                    AvatarCatalog.HUMANOID_3, 3, ""));
+            DirectConnectWire.ServerAccepted accepted =
+                    (DirectConnectWire.ServerAccepted)readTcp(late);
+            ByteBuf bytes = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                    new DirectConnectWire.UdpRegister(challenge.sessionId, accepted.udpToken));
+            try {
+                byte[] packet = new byte[bytes.readableBytes()];
+                bytes.readBytes(packet);
+                udp.send(new java.net.DatagramPacket(packet, packet.length,
+                        java.net.InetAddress.getByName("127.0.0.1"), fixture.host.getBoundPort()));
+            }
+            finally { bytes.release(); }
+            while(!(readTcp(late) instanceof DirectConnectWire.CombatStateMessage)) { }
+            assertNull("Unacknowledged join must not publish active Spectator",
+                    fixture.host.getPartyStatus().getMember(3));
+            assertEquals(2, fixture.host.getMovementEntities().size());
+            assertEquals(DirectConnectPhase.READY, existing.getStatus().getPhase());
+            assertFalse(fixture.host.isSessionPaused());
+        }
+        finally {
+            existing.close();
+            fixture.close();
+        }
+    }
+
+    @Test public void liveLateParticipantAutomaticallyJoinsAsSpectatorWithoutHostPause()
+            throws Exception {
+        DirectConnectCompatibility compatibility = compatibility("live-late-spectator");
+        HostFixture fixture = host(compatibility, 3, "live-late-spectator");
+        DirectConnectClient existing = approveClient(fixture, compatibility, '2', "Friend",
+                AvatarCatalog.HUMANOID_2);
+        DirectConnectClient late = null;
+        try {
+            fixture.host.startSession();
+            awaitPhase(existing, DirectConnectPhase.READY);
+            awaitMovementSnapshots(existing, 1);
+            long before = existing.getMovementSnapshots().get(0).getHostTick();
+            java.util.BitSet explored = new java.util.BitSet(); explored.set(15);
+            com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge privateFacts =
+                    new com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge(1L, 16).learnMap(
+                            fixture.host.getStatus().getFloorId(),
+                            new com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge(4, 4, explored));
+            fixture.host.publishPersonalKnowledge(new ParticipantId("campaign-slot-1"), privateFacts);
+            fixture.host.publishPersonalKnowledge(new ParticipantId("campaign-slot-2"), privateFacts);
+            late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
+                    3, new MemoryReconnectTokens(), compatibility);
+            awaitPhase(late, DirectConnectPhase.READY);
+            assertEquals(3, late.getCampaignSlot());
+            awaitPartyState(late, 3, PartyMemberState.SPECTATING);
+            awaitPartyState(existing, 3, PartyMemberState.SPECTATING);
+            assertNull("Spectator has no Active Floor body", late.getLocalMovementEntityId());
+            assertEquals(2, fixture.host.getMovementEntities().size());
+            assertFalse(fixture.host.isSessionPaused());
+            awaitMovementSnapshots(existing, 3);
+            List<MovementSnapshot> snapshots = existing.getMovementSnapshots();
+            assertTrue(snapshots.get(snapshots.size() - 1).getHostTick() > before);
+            assertEquals(0, late.getPersonalKnowledge().potionMask);
+            assertTrue(late.getPersonalKnowledge().maps.isEmpty());
+            assertEquals(3, fixture.roster.getSlots().size());
+        }
+        finally {
+            if(late != null) late.close();
+            existing.close();
+            fixture.close();
+        }
+    }
 
     @Test public void threePeerKnowledgeStaysPrivateAndWarmReconnectKeepsOwnFacts() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("private-knowledge");

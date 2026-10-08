@@ -111,8 +111,8 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     }
 
     public boolean isLocalMapMarkerVisible() {
-        if(peer.getPartyStatus() == null || peer.getLocalMovementEntityId() == null) return true;
-        PartyMemberStatus local = peer.getPartyStatus().getMember((int)peer.getLocalMovementEntityId().getValue());
+        if(peer.getPartyStatus() == null) return true;
+        PartyMemberStatus local = peer.getPartyStatus().getMember(peer.getLocalCampaignSlot());
         return local == null || local.getState() != PartyMemberState.SPECTATING;
     }
 
@@ -261,7 +261,9 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             Entity entity = objects.get(door.entityId);
             DoorSnapshot previous = appliedDoors.get(door.entityId);
             if(entity instanceof Door && (previous == null || previous.revision < door.revision)) {
-                if(previous != null && previous.active && !door.active)
+                if(previous != null && previous.active && !door.active
+                        && (peer.getStatus() == null || peer.getStatus().getPhase()
+                                == com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY))
                     ((Door)entity).playNetworkBreakPresentation(game.level);
                 ((Door)entity).applyNetworkSnapshot(door);
                 appliedDoors.put(door.entityId, door);
@@ -282,7 +284,9 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
             BreakableSnapshot previous = appliedBreakables.get(state.entityId);
             if(entity instanceof Breakable
                     && (previous == null || previous.revision < state.revision)) {
-                if(previous != null && previous.active && !state.active)
+                if(previous != null && previous.active && !state.active
+                        && (peer.getStatus() == null || peer.getStatus().getPhase()
+                                == com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY))
                     ((Breakable)entity).playNetworkBreakPresentation(game.level);
                 ((Breakable)entity).applyNetworkSnapshot(state);
                 appliedBreakables.put(state.entityId, state);
@@ -357,6 +361,9 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
 
     private void attach(Game current) {
         game = current;
+        if(peer.getLocalCampaignSlot() > 0) {
+            localId = new ParticipantId("campaign-slot-" + peer.getLocalCampaignSlot());
+        }
         if(game.itemManager != null) game.itemManager.setCampaignPeer(peer);
         if(host != null && game.progression != null) {
             if(host.isResumedCampaign()) game.initializePartyProgression(host.getPartyProgression());
@@ -393,6 +400,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
         }
         for(Entity entity : entities()) if(entity instanceof Item) remember((Item)entity);
         if(host != null) {
+            for(Item starter : starters) freshReturnFallback.add(ItemManager.Copy(starter.getClass(), starter));
             host.getItemWorld().initializePartyKeys(game.player.keys);
             for(MovementEntityDescriptor descriptor : peer.getMovementEntities()) {
                 ParticipantId participant = descriptor.getParticipantId();
@@ -478,6 +486,38 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 if(objectId != null) host.deliverTriggerPresentation(activator, objectId, value);
             };
         }
+    }
+
+    private final List<Item> freshReturnFallback = new ArrayList<Item>();
+
+    /** Native Party travel (#27) calls once destination is stable; revisits never return a character. */
+    public int freshReturnLateParticipants(long generation, boolean firstArrival) {
+        if(!firstArrival || game == null || !(peer instanceof com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost)) return 0;
+        com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost session =
+                (com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost)peer;
+        int returned = 0;
+        for(com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus member : peer.getPartyStatus().getMembers()) {
+            if(member.getEntityId() != null || member.getState()
+                    != com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING) continue;
+            ParticipantId participant = new ParticipantId("campaign-slot-" + member.getCampaignSlot());
+            Player template = startingKitTemplate();
+            Player character = template == null ? new Player() : template;
+            StartingKit kit = template == null ? new StartingKit() : rollStartingKit(template);
+            if(kit.worn.isEmpty() && kit.carried.isEmpty()) for(Item item : freshReturnFallback) {
+                Item copy = ItemManager.Copy(item.getClass(), item);
+                if(copy instanceof Armor) kit.worn.add(copy); else kit.carried.add(copy);
+            }
+            com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress fresh =
+                    new com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress(participant, 0L,
+                            0, 0, 1, character.stats.ATK, character.stats.DEF, character.stats.DEX,
+                            character.stats.SPD, character.stats.MAG, character.stats.END, 0,
+                            character.maxHp, character.inventorySize, character.hotbarSize);
+            if(session.freshReturnLateParticipant(member.getCampaignSlot(), generation, firstArrival, fresh, () -> {
+                for(Item item : kit.worn) registerStarter(item, participant, true);
+                for(Item item : kit.carried) registerStarter(item, participant, false);
+            })) returned++;
+        }
+        return returned;
     }
 
     /**

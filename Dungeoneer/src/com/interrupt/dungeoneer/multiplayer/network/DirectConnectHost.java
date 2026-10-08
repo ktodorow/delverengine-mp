@@ -139,7 +139,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Participant Host authority for explicit lobby approval and persistent Campaign Slots. */
+/** Host authority for lobby approval, live admission and persistent Campaign Slots. */
 public final class DirectConnectHost implements DirectConnectPeer, NativeCombatAuthority,
         com.interrupt.dungeoneer.multiplayer.economy.EconomyHost {
     private static final float REVIVAL_REACH = 1.6f;
@@ -201,6 +201,16 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     /** Approved slots whose protected live entity already returned safely after grace. */
     private final Map<LauncherIdentity, ReturnedParticipant> returnedParticipants =
             new LinkedHashMap<LauncherIdentity, ReturnedParticipant>();
+    /** Late slots have no Active Floor body until a Fresh Return. */
+    private final Set<LauncherIdentity> lateParticipants = new LinkedHashSet<LauncherIdentity>();
+    private final Map<LauncherIdentity, Long> lateEntryGenerations = new LinkedHashMap<LauncherIdentity, Long>();
+    private long nextAdmissionId;
+    private static final long ADMISSION_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(60L);
+
+    private boolean nativeWorldStable = true;
+    private volatile long authoritativeHostTick;
+    private volatile CombatSnapshot publishedCombatSnapshot;
+    private final Set<LauncherIdentity> freshReturnsPending = new LinkedHashSet<LauncherIdentity>();
 
     private volatile DirectConnectStatus status;
     private volatile Channel tcpListener;
@@ -321,11 +331,22 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             restoredMonsterSpawns.addAll(saved.getMonsterSpawns());
             consumedMonsterSpawners.addAll(saved.getConsumedMonsterSpawners());
             for(CampaignSave.ParticipantState participant : saved.getParticipants()) {
+                if(participant.getMovement() == null && participant.getParty().getRemainingLives() == 0) {
+                    LauncherIdentity identity = roster.getSlot(participant.getCampaignSlot()).getLauncherIdentity();
+                    lateParticipants.add(identity);
+                    lateEntryGenerations.put(identity, nativeWorldGeneration);
+                }
                 personalKnowledge.put(new ParticipantId("campaign-slot-" + participant.getCampaignSlot()),
                         participant.getPersonalKnowledge());
                 if(participant.getProgress() != null) {
                     economy.registerParticipant(participant.getProgress());
                 }
+            }
+            // Roster reservation may survive interruption before next world checkpoint.
+            for(CampaignSlot slot : roster.getSlots()) {
+                if(saved.getParticipant(slot.getNumber()) != null) continue;
+                lateParticipants.add(slot.getLauncherIdentity());
+                lateEntryGenerations.put(slot.getLauncherIdentity(), nativeWorldGeneration);
             }
         }
         this.movementWorld = movementWorld;
@@ -491,9 +512,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         GraceParticipant reconnecting = reconnectingParticipants.get(launcherIdentity);
         ReturnedParticipant returned = returnedParticipants.get(launcherIdentity);
-        if(sessionStarted && reconnecting == null && returned == null) {
+        if(sessionStarted && (partyWiped || partyProgression.victory)) {
             reject(context, RejectCode.NOT_IN_LOBBY,
-                    "Active Floor accepts only an authenticated Campaign Slot reconnect.");
+                    "Terminal Campaign cannot admit a Participant.");
             return false;
         }
         if(!sessionStarted && connections.size() >= roster.getCapacity() - 1) {
@@ -506,10 +527,11 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 (InetSocketAddress)context.channel().remoteAddress(), launcherIdentity);
         connection.reconnectGrace = reconnecting;
         connection.returnedParticipant = returned;
+        connection.lateParticipant = sessionStarted && reconnecting == null && returned == null;
         connections.put(context.channel(), connection);
         context.writeAndFlush(new CampaignChallenge(sessionId, roster.getCampaignId(),
                 roster.getCapacity()));
-        status = status(DirectConnectPhase.HANDSHAKING,
+        if(!sessionStarted) status = status(DirectConnectPhase.HANDSHAKING,
                 "Compatible Launcher Identity " + launcherIdentity.getFingerprint()
                         + " is selecting its Campaign Slot.",
                 launcherIdentity.getFingerprint(), null);
@@ -518,7 +540,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     private synchronized void claimSlot(ChannelHandlerContext context, SlotClaim claim) {
         RemoteConnection connection = connections.get(context.channel());
-        if(connection == null || connection.request != null || !sessionId.equals(claim.sessionId)) {
+        if(connection == null || connection.kicked || !sessionId.equals(claim.sessionId)) {
             reject(context, RejectCode.MALFORMED_HANDSHAKE,
                     "Malformed handshake: Campaign Slot claim is outside current lobby state.");
             return;
@@ -535,10 +557,42 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                     "Malformed Campaign Slot claim: " + safeMessage(ex));
             return;
         }
+        if(connection.request != null) {
+            SlotClaimRequest previous = connection.request;
+            if(previous.getRequestedSlot() != request.getRequestedSlot()
+                    || !previous.getPresentation().getNickname().equals(request.getPresentation().getNickname())
+                    || !previous.getPresentation().getAvatarId().equals(request.getPresentation().getAvatarId())
+                    || !java.util.Objects.equals(previous.getReconnectToken(), request.getReconnectToken())) {
+                reject(context, RejectCode.MALFORMED_HANDSHAKE,
+                        "Campaign Slot claim changed during admission.");
+            }
+            else if(connection.slot != null) {
+                context.writeAndFlush(new ServerAccepted(sessionId, connection.udpToken,
+                        roster.getCampaignId(), connection.slot.getNumber(), connection.slot.getReconnectToken()));
+            }
+            else {
+                context.writeAndFlush(new SlotPending(sessionId, "Campaign Slot awaits Host approval."));
+            }
+            return;
+        }
         connection.request = request;
 
         ClaimOutcome outcome;
-        if(sessionStarted) {
+        if(connection.lateParticipant) {
+            CampaignSlot existing = roster.findSlot(connection.launcherIdentity);
+            if(existing != null && !lateParticipants.contains(connection.launcherIdentity)) {
+                reject(context, RejectCode.RECONNECT_DENIED,
+                        "Existing Campaign Slot must use its reconnect contract.");
+                return;
+            }
+            int preference = request.getRequestedSlot();
+            if(existing == null && (preference > roster.getCapacity()
+                    || preference != 0 && roster.getSlot(preference) != null)) preference = 0;
+            SlotClaimRequest lateClaim = new SlotClaimRequest(connection.launcherIdentity,
+                    request.getPresentation(), preference, request.getReconnectToken());
+            outcome = existing == null ? roster.approve(lateClaim, random) : roster.submit(lateClaim);
+        }
+        else if(sessionStarted) {
             GraceParticipant reconnecting = connection.reconnectGrace;
             ReturnedParticipant returned = connection.returnedParticipant;
             CampaignSlot reconnectSlot = reconnecting == null
@@ -558,7 +612,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             outcome = roster.submit(request);
         }
         if(outcome.getStatus() == ClaimStatus.ADMITTED) {
-            if(!sessionStarted && !persistRoster(context.channel())) return;
+            if((!sessionStarted || connection.lateParticipant)
+                    && !persistRoster(context.channel())) return;
+            if(connection.lateParticipant) lateParticipants.add(connection.launcherIdentity);
             admit(connection, outcome.getSlot());
         }
         else if(outcome.getStatus() == ClaimStatus.NEEDS_APPROVAL
@@ -663,8 +719,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     private synchronized void sharedFloorReported(ChannelHandlerContext context,
             DirectConnectWire.SharedFloorFingerprintMessage message) {
-        RemoteConnection connection = activeConnection(context, message.sessionId, "Shared floor report");
-        if(connection == null || connection.reconnectGrace != null) return;
+        RemoteConnection connection = connections.get(context.channel());
+        if(connection == null || connection.slot == null || connection.udpAddress == null
+                || !sessionId.equals(message.sessionId) || connection.reconnectGrace != null) return;
         connection.floorFingerprint = message.fingerprint;
         verifySharedFloor(connection);
     }
@@ -673,10 +730,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private void verifySharedFloor(RemoteConnection connection) {
         SharedFloorFingerprint local = connection.floorFingerprint;
         if(hostFloorFingerprint == null || local == null || connection.kicked
-                || connection.movementDescriptor == null) return;
+                || connection.slot == null) return;
         if(hostFloorFingerprint.equals(local)) return;
         String differences = hostFloorFingerprint.describeDifferences(local);
-        String nickname = connection.movementDescriptor.getNickname();
+        String nickname = connection.slot.getPresentation().getNickname();
         if(com.badlogic.gdx.Gdx.app != null) com.badlogic.gdx.Gdx.app.error("DelverMultiplayer",
                 "Shared floor of " + nickname
                 + " differs from Host (Host/client): " + differences);
@@ -783,6 +840,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
         }
         partyStatus = createPartyStatus(descriptors);
+        publishedCombatSnapshot = combatEncounter.getSnapshot(currentHostTick());
         for(RemoteConnection connection : connections.values()) {
             if(connection.slot != null && connection.udpAddress != null
                     && connection.channel.isActive()) {
@@ -791,9 +849,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                         connection.movementDescriptor = descriptor;
                     }
                 }
-                sendCurrentSessionState(connection, connection.movementDescriptor,
-                        connection.movementDescriptor.getNickname()
-                                + " entered the Active Floor.");
+                if(connection.movementDescriptor != null) {
+                    sendCurrentSessionState(connection, connection.movementDescriptor,
+                            connection.movementDescriptor.getNickname() + " entered the Active Floor.");
+                }
             }
         }
         startMovementTicks();
@@ -854,6 +913,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         List<MovementEntityDescriptor> descriptors =
                 new ArrayList<MovementEntityDescriptor>();
         for(CampaignSlot slot : activeSlots) {
+            if(lateParticipants.contains(slot.getLauncherIdentity())) continue;
             long lifecycle = ++nextLifecycleSequence;
             CampaignSave.ParticipantState saved = durableCampaign == null ? null
                     : durableCampaign.getParticipant(slot.getNumber());
@@ -930,7 +990,11 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             CampaignSave.ParticipantState saved = durableCampaign == null ? null
                     : durableCampaign.getParticipant(slot.getNumber());
             if(saved == null) {
-                members.add(PartyMemberStatus.initial(slot, descriptor, startingLives));
+                members.add(lateParticipants.contains(slot.getLauncherIdentity())
+                        ? new PartyMemberStatus(slot.getNumber(), null, slot.getPresentation().getNickname(),
+                                slot.getPresentation().getAvatarId(), 0, PartyMemberStatus.DEFAULT_HEALTH, 0,
+                                PartyMemberState.DISCONNECTED)
+                        : PartyMemberStatus.initial(slot, descriptor, startingLives));
                 continue;
             }
             PartyMemberStatus previous = saved.getParty();
@@ -953,10 +1017,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 try {
                     AuthoritativeHostSession session = movementSession;
                     if(session != null && sessionStarted && !closing.get()) {
+                        updatePendingAdmissions(System.nanoTime());
                         if(!isSessionPaused()) {
                             session.advanceOneTick();
                             advanceLives(session.getHostTick());
                             expireReconnectGrace(session.getHostTick());
+                            advanceAdmissions(session.getHostTick());
                         }
                     }
                 }
@@ -972,10 +1038,14 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     private synchronized void partyChat(ChannelHandlerContext context,
             PartyChatSubmit submitted) {
-        RemoteConnection connection = activeConnection(context, submitted.sessionId,
-                "Party chat");
-        if(connection == null) return;
-        publishPartyChat(connection.movementDescriptor, submitted.text);
+        RemoteConnection connection = connections.get(context.channel());
+        if(connection == null || !sessionId.equals(submitted.sessionId)
+                || !sessionStarted || connection.slot == null) {
+            reject(context, RejectCode.MALFORMED_HANDSHAKE, "Party chat is outside current session.");
+            return;
+        }
+        if(connection.movementDescriptor == null && !connection.spectatorReady) return;
+        publishPartyChat(connection.slot.getNumber(), connection.slot.getPresentation().getNickname(), submitted.text);
     }
 
     private synchronized void pauseRequested(ChannelHandlerContext context,
@@ -1097,11 +1167,19 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private long nativeWorldGeneration = 1;
     @Override public synchronized long getNativeWorldGeneration() { return nativeWorldGeneration; }
     @Override public synchronized void beginNativeWorld() {
+        nativeWorldStable = false;
         if(resumeNativeWorldPending) {
             resumeNativeWorldPending = false;
             return;
         }
         nativeWorldGeneration++;
+        for(RemoteConnection connection : connections.values()) {
+            if(!connection.lateParticipant || connection.spectatorReady) continue;
+            connection.admissionId = 0L;
+            connection.admissionStage = 0;
+            connection.admissionChanges.clear();
+            connection.channel.writeAndFlush(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
+        }
         monsterEffects.clear(); publishedMonsterEffects.clear(); effectPublishTicks.clear();
         nativeDynamicStates.clear(); publishedNativeDynamicStates.clear(); nativeDynamicPublishTicks.clear();
         nativeMonsterSpawns.clear();
@@ -1626,6 +1704,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private RemoteConnection activeConnection(ChannelHandlerContext context, String messageSessionId,
             String action) {
         RemoteConnection connection = connections.get(context.channel());
+        if(sessionStarted && connection != null && connection.lateParticipant
+                && connection.movementDescriptor == null && sessionId.equals(messageSessionId)) return null;
         if(!sessionStarted || connection == null || connection.movementDescriptor == null
                 || !sessionId.equals(messageSessionId)) {
             reject(context, RejectCode.MALFORMED_HANDSHAKE,
@@ -1637,8 +1717,11 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     private void publishPartyChat(MovementEntityDescriptor descriptor, String text) {
         if(descriptor == null || !sessionStarted) return;
-        PartyChatMessage chat = new PartyChatMessage(++nextPartyChatSequence,
-                descriptor.getCampaignSlot(), descriptor.getNickname(), text);
+        publishPartyChat(descriptor.getCampaignSlot(), descriptor.getNickname(), text);
+    }
+
+    private void publishPartyChat(int slot, String nickname, String text) {
+        PartyChatMessage chat = new PartyChatMessage(++nextPartyChatSequence, slot, nickname, text);
         partyCommunication = partyCommunication.withChat(chat);
         broadcast(new PartyChatDelivery(sessionId, chat));
     }
@@ -1667,18 +1750,49 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     }
 
     private void broadcast(Message message) {
-        for(RemoteConnection connection : connections.values()) {
-            if(connection.channel.isActive() && connection.movementDescriptor != null) {
-                connection.channel.writeAndFlush(message);
-            }
+        for(RemoteConnection connection : connections.values()) deliverCurrentState(connection, message);
+    }
+
+    /** Baseline mutations are bounded and ordered; after catch-up fence TCP remains live. */
+    private void deliverCurrentState(RemoteConnection connection, Message message) {
+        if(!connection.channel.isActive()) return;
+        if(connection.movementDescriptor != null || connection.spectatorReady) {
+            connection.channel.writeAndFlush(message);
+            return;
         }
+        if(!connection.lateParticipant || connection.admissionId == 0L) return;
+        if(message instanceof CombatPresentationMessage
+                || message instanceof DirectConnectWire.NativeAnimationCueMessage
+                || message instanceof DirectConnectWire.NativeExplosionMessage
+                || message instanceof DirectConnectWire.NativeDynamicCueMessage
+                || message instanceof DirectConnectWire.NativeSpellPresentationMessage
+                || message instanceof DirectConnectWire.NativeMeleePresentationMessage
+                || message instanceof DirectConnectWire.NativeRangedPresentationMessage
+                || message instanceof DirectConnectWire.TriggerPresentationMessage) return;
+        if(message instanceof DirectConnectWire.MonsterEffectsMessage) {
+            DirectConnectWire.MonsterEffectsMessage effects = (DirectConnectWire.MonsterEffectsMessage)message;
+            message = new DirectConnectWire.MonsterEffectsMessage(sessionId, effects.state, false, effects.generation);
+        }
+        if(message instanceof PartyStatusMessage) {
+            message = new PartyStatusMessage(sessionId, withLateSpectator(connection,
+                    ((PartyStatusMessage)message).snapshot));
+        }
+        if(connection.admissionStage == DirectConnectWire.AdmissionSync.BASELINE_END
+                || connection.admissionStage == DirectConnectWire.AdmissionSync.ACK_BASELINE) {
+            if(connection.admissionChanges.size() >= MAX_ADMISSION_CHANGES) {
+                rejectPendingAdmission(connection, RejectCode.ADMISSION_TIMEOUT,
+                        "Admission catch-up exceeded bound; reconnect to retry.");
+                return;
+            }
+            connection.admissionChanges.addLast(message);
+        }
+        else connection.channel.writeAndFlush(message);
     }
 
     private void broadcastCombatState(CombatSnapshot snapshot) {
         for(RemoteConnection connection : connections.values()) {
-            if(connection.channel.isActive() && connection.movementDescriptor != null
-                    && connection.reconnectGrace == null) {
-                connection.channel.writeAndFlush(new CombatStateMessage(sessionId, snapshot));
+            if(connection.reconnectGrace == null) {
+                deliverCurrentState(connection, new CombatStateMessage(sessionId, snapshot));
             }
         }
     }
@@ -1707,19 +1821,17 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     }
 
     private void broadcastPartyStatus() {
-        PartyStatusMessage message = new PartyStatusMessage(sessionId, partyStatus);
         for(RemoteConnection connection : connections.values()) {
-            if(connection.channel.isActive() && connection.movementDescriptor != null
-                    && connection.reconnectGrace == null
-                    && connection.returnedParticipant == null) {
-                connection.channel.writeAndFlush(message);
+            if(connection.reconnectGrace == null && connection.returnedParticipant == null) {
+                deliverCurrentState(connection, new PartyStatusMessage(sessionId, partyStatus));
             }
         }
     }
 
     private void broadcastCombatPresentation(CombatPresentationEvent event) {
         for(RemoteConnection connection : connections.values()) {
-            if(connection.channel.isActive() && connection.movementDescriptor != null
+            if(connection.channel.isActive() && (connection.movementDescriptor != null
+                    || connection.spectatorReady)
                     && connection.reconnectGrace == null
                     && connection.returnedParticipant == null) {
                 connection.channel.writeAndFlush(
@@ -1744,6 +1856,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     private void admit(RemoteConnection connection, CampaignSlot slot) {
         connection.slot = slot;
+        if(lateParticipants.contains(connection.launcherIdentity)) connection.lateParticipant = true;
+        if(connection.lateParticipant) connection.admissionStartedNanos = System.nanoTime();
         if(connection.reconnectGrace != null) {
             connection.movementDescriptor = connection.reconnectGrace.descriptor;
         }
@@ -1780,7 +1894,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             RemoteConnection connection = findConnection(register.udpToken);
             if(connection == null || !sameAddress(connection.tcpAddress, packet.sender())) return;
             if(sessionStarted && connection.reconnectGrace == null
-                    && connection.returnedParticipant == null) return;
+                    && connection.returnedParticipant == null && !connection.lateParticipant) return;
             connection.udpAddress = packet.sender();
             try {
                 ByteBuf response = DirectConnectWire.encodeDatagram(udpListener.alloc(),
@@ -1790,6 +1904,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 else if(connection.returnedParticipant != null) {
                     completeReturnedParticipant(connection);
                 }
+                else if(connection.lateParticipant) { /* Stable Host tick begins admission. */ }
                 else {
                     status = status(DirectConnectPhase.LOBBY,
                             "Campaign Slot " + connection.slot.getNumber()
@@ -1853,6 +1968,13 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private synchronized void channelClosed(Channel channel) {
         RemoteConnection connection = connections.remove(channel);
         if(connection == null || closing.get()) return;
+        if(sessionStarted && connection.lateParticipant && connection.movementDescriptor == null) {
+            connection.admissionChanges.clear();
+            if(connection.spectatorReady) markPartyMemberDisconnected(connection.slot.getNumber());
+            status = status(DirectConnectPhase.READY, "Spectator disconnected; slot retained for retry.",
+                    connection.launcherIdentity.getFingerprint(), sharedFloorId());
+            return;
+        }
         if(sessionStarted && connection.movementDescriptor != null) {
             if(connection.kicked) return;
             GraceParticipant existing = reconnectingParticipants.get(connection.launcherIdentity);
@@ -2396,11 +2518,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         EntitySpawn spawn = new EntitySpawn(sessionId, descriptor);
         for(RemoteConnection remaining : connections.values()) {
-            if(remaining != connection && remaining.channel.isActive()
-                    && remaining.movementDescriptor != null
-                    && remaining.reconnectGrace == null) {
-                remaining.channel.writeAndFlush(spawn);
-            }
+            if(remaining != connection && remaining.reconnectGrace == null) deliverCurrentState(remaining, spawn);
         }
         markPartyMemberConnected(descriptor);
         publishPartyNotice(descriptor, descriptor.getNickname() + " joined", connection);
@@ -2410,17 +2528,240 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         connection.returnedParticipant = null;
     }
 
+    /** #27 calls only after first-arrival destination authority is installed and stable. */
+    public boolean freshReturnLateParticipant(int slotNumber, long generation,
+            boolean firstArrival, com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress fresh,
+            Runnable grantStarterKit) {
+        CampaignSlot slot;
+        ParticipantId participant;
+        MovementSpawn spawn;
+        MovementEntityDescriptor descriptor;
+        synchronized(this) {
+            if(!sessionStarted || !firstArrival || !nativeWorldStable || generation != nativeWorldGeneration
+                    || partyWiped || partyProgression.victory || fresh == null || grantStarterKit == null) return false;
+            slot = roster.getSlot(slotNumber);
+            PartyMemberStatus member = partyMember(slotNumber);
+            if(slot == null || member == null || member.getEntityId() != null
+                    || member.getState() != PartyMemberState.SPECTATING
+                    || !lateParticipants.contains(slot.getLauncherIdentity())
+                    || !lateEntryGenerations.containsKey(slot.getLauncherIdentity())
+                    || generation <= lateEntryGenerations.get(slot.getLauncherIdentity())) return false;
+            participant = participantId(slot);
+            if(!participant.equals(fresh.participantId) || fresh.gold != 0 || fresh.experience != 0
+                    || fresh.level != 1 || fresh.pendingStatChoices != 0) {
+                throw new IllegalArgumentException("Fresh Return requires a new native character.");
+            }
+            spawn = findLateSpawn(slotNumber);
+            descriptor = new MovementEntityDescriptor(++nextLifecycleSequence,
+                    entityId(slot), participant, slotNumber, slot.getPresentation().getNickname(),
+                    slot.getPresentation().getAvatarId());
+            if(!freshReturnsPending.add(slot.getLauncherIdentity())) return false;
+            itemWorld.registerParticipant(participant, fresh.inventorySize);
+            try { grantStarterKit.run(); }
+            catch(RuntimeException failure) {
+                itemWorld.discardOwnedItems(participant);
+                freshReturnsPending.remove(slot.getLauncherIdentity());
+                throw failure;
+            }
+        }
+        // Stage combat inertly without holding Host monitor, matching encounter->Host event order.
+        combatEncounter.addParticipant(descriptor, fresh.maximumHealth, false);
+        combatEncounter.updateParticipantPosition(participant, spawn.getX(), spawn.getY(), spawn.getZ());
+        boolean committed = false;
+        synchronized(this) {
+            PartyMemberStatus current = partyMember(slotNumber);
+            if(generation == nativeWorldGeneration && nativeWorldStable && current != null
+                    && current.getState() == PartyMemberState.SPECTATING && !partyWiped && !partyProgression.victory) {
+                movementSimulation.addParticipant(descriptor);
+                movementSimulation.setNativePosition(participant, spawn.getX(), spawn.getY(), spawn.getZ());
+                lives.addParticipant(participant, startingLives);
+                List<MovementEntityDescriptor> updated = new ArrayList<MovementEntityDescriptor>(livesDescriptors);
+                updated.add(descriptor);
+                livesDescriptors = updated;
+                economy.registerParticipant(fresh);
+                lateParticipants.remove(slot.getLauncherIdentity());
+                lateEntryGenerations.remove(slot.getLauncherIdentity());
+                for(RemoteConnection connection : connections.values()) {
+                    if(connection.slot == null || connection.slot.getNumber() != slotNumber) continue;
+                    connection.movementDescriptor = descriptor;
+                    connection.lateParticipant = false;
+                    connection.spectatorReady = false;
+                }
+                movementReplication.applySpawn(descriptor);
+                broadcast(new EntitySpawn(sessionId, descriptor));
+                List<PartyMemberStatus> members = new ArrayList<PartyMemberStatus>(partyStatus.getMembers());
+                for(int i = 0; i < members.size(); i++) if(members.get(i).getCampaignSlot() == slotNumber) {
+                    members.set(i, new PartyMemberStatus(slotNumber, descriptor.getEntityId(), descriptor.getNickname(),
+                            descriptor.getAvatarId(), fresh.maximumHealth, fresh.maximumHealth,
+                            startingLives, PartyMemberState.CONNECTED));
+                }
+                partyStatus = new PartyStatusSnapshot(++nextPartyStatusSequence, members);
+                broadcastPartyStatus();
+                publishEconomy();
+                publishPhysicalItems();
+                committed = true;
+            }
+            else itemWorld.discardOwnedItems(participant);
+            freshReturnsPending.remove(slot.getLauncherIdentity());
+        }
+        if(!committed) { combatEncounter.removeUnactivatedParticipant(participant); return false; }
+        combatEncounter.setParticipantCombatEligible(participant, true);
+        CombatSnapshot combat = combatEncounter.getSnapshot(currentHostTick());
+        synchronized(this) { publishedCombatSnapshot = combat; broadcastCombatState(combat); }
+        return true;
+    }
+
+    private MovementSpawn findLateSpawn(int slotNumber) {
+        MovementSpawn point = movementWorld.getSpawn(slotNumber);
+        for(int ring = 0; ring <= 8; ring++) {
+            for(int direction = 0; direction < (ring == 0 ? 1 : 16); direction++) {
+                double angle = direction * Math.PI / 8;
+                float x = point.getX() + (float)Math.cos(angle) * ring * 0.45f;
+                float y = point.getY() + (float)Math.sin(angle) * ring * 0.45f;
+                float z = movementWorld.getFloorZ(x, y, point.getZ());
+                if(!movementWorld.canOccupy(x, y, z)) continue;
+                boolean occupied = false;
+                for(MovementEntityState other : movementSimulation.currentStates()) {
+                    float dx = x - other.getX(), dy = y - other.getY();
+                    if(dx * dx + dy * dy < 0.4f * 0.4f && Math.abs(z - other.getZ()) < 0.75f) {
+                        occupied = true; break;
+                    }
+                }
+                if(!occupied) return new MovementSpawn(x, y, z, point.getRotation());
+            }
+        }
+        throw new IllegalStateException("Destination Respawn Point has no safe Late Participant placement.");
+    }
+
+    /** Wall-clock bound still expires during Party pause or native loading. */
+    public synchronized void updatePendingAdmissions(long nowNanos) {
+        for(RemoteConnection connection : new ArrayList<RemoteConnection>(connections.values())) {
+            if(!connection.lateParticipant || connection.spectatorReady || connection.slot == null
+                    || connection.kicked) continue;
+            if(partyWiped || partyProgression.victory) {
+                rejectPendingAdmission(connection, RejectCode.NOT_IN_LOBBY, "Campaign ended before admission.");
+            }
+            else if(nowNanos - connection.admissionStartedNanos >= ADMISSION_TIMEOUT_NANOS) {
+                rejectPendingAdmission(connection, RejectCode.ADMISSION_TIMEOUT,
+                        "Admission timed out; reconnect with same identity to retry this slot.");
+            }
+        }
+    }
+
+    private void rejectPendingAdmission(RemoteConnection connection, RejectCode code, String reason) {
+        connection.kicked = true;
+        connection.admissionId = 0L;
+        connection.admissionChanges.clear();
+        reject(connection.channel, code, reason);
+    }
+    /** Native loading / Party Transition must hold admission until destination is reconstructed. */
+    public synchronized void awaitNativeWorld() { nativeWorldStable = false; }
+
+    public synchronized void completeNativeWorld(long generation) {
+        if(generation == nativeWorldGeneration) nativeWorldStable = true;
+    }
+
+
+    private PartyStatusSnapshot withLateSpectator(RemoteConnection connection,
+            PartyStatusSnapshot current) {
+        List<PartyMemberStatus> members = new ArrayList<PartyMemberStatus>(current.getMembers());
+        CampaignSlot slot = connection.slot;
+        PartyMemberStatus spectator = new PartyMemberStatus(slot.getNumber(), null,
+                slot.getPresentation().getNickname(), slot.getPresentation().getAvatarId(),
+                0, PartyMemberStatus.DEFAULT_HEALTH, 0, PartyMemberState.SPECTATING);
+        boolean replaced = false;
+        for(int i = 0; i < members.size(); i++) {
+            if(members.get(i).getCampaignSlot() != slot.getNumber()) continue;
+            members.set(i, spectator);
+            replaced = true;
+            break;
+        }
+        if(!replaced) members.add(spectator);
+        return new PartyStatusSnapshot(++nextPartyStatusSequence, members);
+    }
+
+    private void beginLateAdmission(RemoteConnection connection) {
+        connection.admissionChanges.clear();
+        connection.admissionId = ++nextAdmissionId;
+        connection.admissionGeneration = nativeWorldGeneration;
+        connection.admissionTick = currentHostTick();
+        connection.admissionStage = DirectConnectWire.AdmissionSync.BASELINE_END;
+        connection.channel.write(admissionFence(connection, DirectConnectWire.AdmissionSync.BEGIN));
+        sendCurrentSessionState(connection, null, "Late Participant synchronizes current Active Floor.");
+        connection.channel.writeAndFlush(admissionFence(connection,
+                DirectConnectWire.AdmissionSync.BASELINE_END));
+    }
+
+    private DirectConnectWire.AdmissionSync admissionFence(RemoteConnection connection, int stage) {
+        return new DirectConnectWire.AdmissionSync(sessionId, connection.admissionId,
+                connection.admissionGeneration, connection.admissionTick, stage);
+    }
+
+    private synchronized void admissionAcknowledged(ChannelHandlerContext context,
+            DirectConnectWire.AdmissionSync acknowledgement) {
+        RemoteConnection connection = connections.get(context.channel());
+        if(connection == null || connection.admissionId == 0L || connection.spectatorReady
+                || !sessionId.equals(acknowledgement.sessionId)
+                || connection.admissionId != acknowledgement.admissionId
+                || connection.admissionGeneration != acknowledgement.generation
+                || connection.admissionGeneration != nativeWorldGeneration
+                || connection.admissionTick != acknowledgement.hostTick) return;
+        if(connection.admissionStage == DirectConnectWire.AdmissionSync.BASELINE_END
+                && acknowledgement.stage == DirectConnectWire.AdmissionSync.ACK_BASELINE) {
+            connection.admissionStage = DirectConnectWire.AdmissionSync.ACK_BASELINE;
+        }
+        else if(connection.admissionStage == DirectConnectWire.AdmissionSync.CATCH_UP_END
+                && acknowledgement.stage == DirectConnectWire.AdmissionSync.ACK_CATCH_UP) {
+            connection.admissionStage = DirectConnectWire.AdmissionSync.ACK_CATCH_UP;
+        }
+    }
+
+    private synchronized void advanceAdmissions(long hostTick) {
+        if(!nativeWorldStable || partyWiped || partyProgression.victory) return;
+        for(RemoteConnection connection : connections.values()) {
+            if(!connection.lateParticipant || connection.spectatorReady
+                    || connection.udpAddress == null || connection.kicked || !connection.channel.isActive()) continue;
+            if(connection.admissionId == 0L) {
+                beginLateAdmission(connection);
+                continue;
+            }
+            if(connection.admissionStage == DirectConnectWire.AdmissionSync.ACK_BASELINE) {
+                connection.admissionTick = hostTick;
+                connection.admissionStage = DirectConnectWire.AdmissionSync.CATCH_UP_END;
+                while(!connection.admissionChanges.isEmpty()) {
+                    connection.channel.write(connection.admissionChanges.removeFirst());
+                }
+                connection.channel.writeAndFlush(admissionFence(connection,
+                        DirectConnectWire.AdmissionSync.CATCH_UP_END));
+            }
+            else if(connection.admissionStage == DirectConnectWire.AdmissionSync.ACK_CATCH_UP) {
+                partyStatus = withLateSpectator(connection, partyStatus);
+                if(!lateEntryGenerations.containsKey(connection.launcherIdentity)) {
+                    lateEntryGenerations.put(connection.launcherIdentity, nativeWorldGeneration);
+                }
+                connection.admissionTick = hostTick;
+                connection.spectatorReady = true;
+                broadcastPartyStatus();
+                connection.channel.writeAndFlush(admissionFence(connection,
+                        DirectConnectWire.AdmissionSync.ACTIVATED));
+            }
+        }
+    }
+
     private void sendCurrentSessionState(RemoteConnection connection,
             MovementEntityDescriptor descriptor, String reconnectMessage) {
+        ParticipantId participant = participantId(connection.slot);
         for(MovementEntityDescriptor present : movementReplication.getEntities()) {
             connection.channel.write(new EntitySpawn(sessionId, present));
         }
-        connection.channel.write(new PartyStatusMessage(sessionId, partyStatus));
+        if(movementSimulation != null && currentHostTick() > 0L) connection.channel.write(new MovementSnapshotMessage(sessionId,
+                (MovementSnapshot)movementSimulation.snapshot(currentHostTick())));
+        connection.channel.write(new PartyStatusMessage(sessionId,
+                connection.lateParticipant && !connection.spectatorReady
+                        ? withLateSpectator(connection, partyStatus) : partyStatus));
         AuthoritativeCombatEncounter encounter = combatEncounter;
         if(encounter != null) {
-            AuthoritativeHostSession session = movementSession;
-            connection.channel.write(new CombatStateMessage(sessionId,
-                    encounter.getSnapshot(session == null ? 0L : session.getHostTick())));
+            connection.channel.write(new CombatStateMessage(sessionId, publishedCombatSnapshot));
         }
         connection.channel.write(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
         for(com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn spawn : nativeMonsterSpawns) {
@@ -2442,8 +2783,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         connection.channel.write(new DirectConnectWire.PotionMappingMessage(sessionId, potionMapping));
         connection.channel.write(new DirectConnectWire.PartyProgressionMessage(sessionId, partyProgression));
         connection.channel.write(new DirectConnectWire.PersonalKnowledgeMessage(sessionId,
-                connection.movementDescriptor.getParticipantId(), nativeWorldGeneration,
-                getPersonalKnowledge(connection.movementDescriptor.getParticipantId())));
+                participant, nativeWorldGeneration, getPersonalKnowledge(participant)));
         connection.channel.write(new DirectConnectWire.PartyKeysMessage(sessionId,
                 itemWorld.getKeyRevision(), itemWorld.getPartyKeys()));
         for(com.interrupt.dungeoneer.multiplayer.economy.ParticipantProgress progress : economy.progressSnapshot()) {
@@ -2469,12 +2809,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             connection.channel.write(new PartyChatDelivery(sessionId, message));
         }
         connection.channel.writeAndFlush(new SessionReady(sessionId,
-                getConnectedParticipantCount(), encounter == null ? 1L
-                        : encounter.getNextRequestId(descriptor.getParticipantId()),
-                itemWorld.nextRequestId(descriptor.getParticipantId()), sharedFloorId(),
+                getConnectedParticipantCount(), encounter == null || descriptor == null ? 1L
+                        : encounter.getNextRequestId(participant),
+                itemWorld.nextRequestId(participant), sharedFloorId(),
                 sharedFloorSeed));
         status = status(DirectConnectPhase.READY,
-                reconnectMessage, descriptor.getParticipantId().getValue(),
+                reconnectMessage, participant.getValue(),
                 sharedFloorId());
     }
 
@@ -2522,11 +2862,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         movementReplication.applyDespawn(lifecycleSequence, descriptor.getEntityId());
         EntityDespawn despawn = new EntityDespawn(sessionId, lifecycleSequence,
                 descriptor.getEntityId());
-        for(RemoteConnection remaining : connections.values()) {
-            if(remaining.channel.isActive() && remaining.movementDescriptor != null) {
-                remaining.channel.writeAndFlush(despawn);
-            }
-        }
+        broadcast(despawn);
         markPartyMemberDisconnected(descriptor.getCampaignSlot());
         status = status(DirectConnectPhase.READY, message,
                 descriptor.getParticipantId().getValue(), sharedFloorId());
@@ -2566,7 +2902,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         reject(context, RejectCode.MALFORMED_HANDSHAKE,
                 "Malformed handshake: " + safeMessage(failure));
         RemoteConnection connection = connections.get(context.channel());
-        if(connection != null) {
+        if(connection != null && !sessionStarted) {
             status = status(DirectConnectPhase.DISCONNECTED,
                     "Launcher Identity sent malformed session input and was disconnected.",
                     connection.launcherIdentity.getFingerprint(), null);
@@ -2574,7 +2910,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     }
 
     private synchronized void failConnection(RemoteConnection connection, String reason) {
-        status = status(DirectConnectPhase.FAILED, boundedReason(reason),
+        if(!sessionStarted) status = status(DirectConnectPhase.FAILED, boundedReason(reason),
                 connection.launcherIdentity.getFingerprint(), null);
         connection.channel.close();
     }
@@ -2921,20 +3257,23 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     }
 
     private long currentHostTick() {
-        AuthoritativeHostSession session = movementSession;
-        return session == null ? 0L : session.getHostTick();
+        return authoritativeHostTick;
     }
 
-    private synchronized void publishCombatEvent(HostSessionEvent event) {
-        if(event instanceof CombatStateEvent) {
-            CombatSnapshot snapshot = ((CombatStateEvent)event).getSnapshot();
-            synchronizePartyHealth(snapshot);
-            broadcastCombatState(snapshot);
-        }
-        else if(event instanceof CombatPresentationEvent) {
-            CombatPresentationEvent presentation = (CombatPresentationEvent)event;
-            if(combatPresentations.add(presentation)) {
-                broadcastCombatPresentation(presentation);
+    private void publishCombatEvent(HostSessionEvent event) {
+        // Encounter can emit while holding its monitor; never make admission acquire it back.
+        if(event instanceof CombatStateEvent) publishedCombatSnapshot = ((CombatStateEvent)event).getSnapshot();
+        synchronized(this) {
+            if(event instanceof CombatStateEvent) {
+                CombatSnapshot snapshot = ((CombatStateEvent)event).getSnapshot();
+                synchronizePartyHealth(snapshot);
+                broadcastCombatState(snapshot);
+            }
+            else if(event instanceof CombatPresentationEvent) {
+                CombatPresentationEvent presentation = (CombatPresentationEvent)event;
+                if(combatPresentations.add(presentation)) {
+                    broadcastCombatPresentation(presentation);
+                }
             }
         }
     }
@@ -3049,6 +3388,11 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 participants.add(previous);
                 continue;
             }
+            if(party == null && lateParticipants.contains(slot.getLauncherIdentity())) {
+                party = new PartyMemberStatus(slot.getNumber(), null, slot.getPresentation().getNickname(),
+                        slot.getPresentation().getAvatarId(), 0, PartyMemberStatus.DEFAULT_HEALTH, 0,
+                        PartyMemberState.DISCONNECTED);
+            }
             if(party == null) party = PartyMemberStatus.initial(slot, descriptor, startingLives);
             MovementEntityState movement = descriptor == null ? null
                     : movementSimulation.getState(descriptor.getParticipantId());
@@ -3058,7 +3402,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             participants.add(new CampaignSave.ParticipantState(slot.getNumber(), party,
                     movement, progress, holdingOrb, getPersonalKnowledge(participantId(slot))));
         }
-        CombatSnapshot combat = mergeAbsentCombat(combatEncounter.getSnapshot(currentHostTick()));
+        CombatSnapshot combat = mergeAbsentCombat(publishedCombatSnapshot);
         CampaignSave saved = new CampaignSave(compatibility, roster.getCampaignId(),
                 roster.getCapacity(), startingLives, partyWiped
                         ? CampaignSave.Outcome.DEFEATED : partyProgression.victory
@@ -3287,6 +3631,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         @Override
         public void publishSnapshot(long hostTick,
                 com.interrupt.dungeoneer.multiplayer.host.HostSessionSnapshot snapshot) {
+            authoritativeHostTick = hostTick;
             if(!(snapshot instanceof MovementSnapshot)
                     || hostTick % SNAPSHOT_INTERVAL_TICKS != 0L) return;
             MovementSnapshot movementSnapshot = (MovementSnapshot)snapshot;
@@ -3296,9 +3641,16 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             synchronized(DirectConnectHost.this) {
                 snapshotConnections = new ArrayList<RemoteConnection>(connections.values());
             }
+            synchronized(DirectConnectHost.this) {
+                for(RemoteConnection connection : snapshotConnections) {
+                    if(connection.lateParticipant && !connection.spectatorReady) {
+                        deliverCurrentState(connection, new MovementSnapshotMessage(sessionId, movementSnapshot));
+                    }
+                }
+            }
             for(RemoteConnection connection : snapshotConnections) {
                 if(connection.udpAddress == null || !connection.channel.isActive()
-                        || connection.movementDescriptor == null) continue;
+                        || connection.movementDescriptor == null && !connection.spectatorReady) continue;
                 try {
                     ByteBuf encoded = DirectConnectWire.encodeDatagram(udpListener.alloc(),
                             new MovementSnapshotMessage(sessionId, movementSnapshot));
@@ -3314,6 +3666,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
         @Override
         public void publishEvent(long hostTick, HostSessionEvent event) {
+            authoritativeHostTick = hostTick;
             publishCombatEvent(event);
         }
 
@@ -3323,6 +3676,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         @Override
         public void publishTransition(long hostTick, HostTransitionOutcome outcome) { }
     }
+
+    private static final int MAX_ADMISSION_CHANGES = 4096;
 
     private static final class RemoteConnection {
         private final Channel channel;
@@ -3335,6 +3690,11 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         private MovementEntityDescriptor movementDescriptor;
         private GraceParticipant reconnectGrace;
         private ReturnedParticipant returnedParticipant;
+        private boolean lateParticipant;
+        private boolean spectatorReady;
+        private long admissionId, admissionGeneration, admissionTick, admissionStartedNanos;
+        private int admissionStage;
+        private final java.util.ArrayDeque<Message> admissionChanges = new java.util.ArrayDeque<Message>();
         private boolean kicked;
         private SharedFloorFingerprint floorFingerprint;
 
@@ -3460,6 +3820,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             else if(message instanceof SlotClaim && helloAccepted) {
                 claimSlot(context, (SlotClaim)message);
+            }
+            else if(message instanceof DirectConnectWire.AdmissionSync && helloAccepted) {
+                admissionAcknowledged(context, (DirectConnectWire.AdmissionSync)message);
             }
             else if(message instanceof PartyChatSubmit && helloAccepted && sessionStarted) {
                 partyChat(context, (PartyChatSubmit)message);

@@ -125,6 +125,7 @@ final class DirectConnectWire {
     static final int PERSONAL_KNOWLEDGE_PART = 59;
     private static final int POTION_MAPPING = 60;
     static final int POTION_MAPPING_PART = 61;
+    private static final int ADMISSION_SYNC = 62;
     private static final int MAX_MAPPING_MESSAGE_BYTES = com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.MAX_BYTES + 128;
     private static final int MAX_KNOWLEDGE_MESSAGE_BYTES =
             com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge.MAX_BYTES + 256;
@@ -177,7 +178,17 @@ final class DirectConnectWire {
         if(message == null) throw new ProtocolException("Wire message cannot be null.");
         output.writeInt(DirectConnectProtocol.MAGIC);
 
-        if(message instanceof DiscoveryProbe) {
+        if(message instanceof AdmissionSync) {
+            AdmissionSync sync = (AdmissionSync)message;
+            output.writeByte(ADMISSION_SYNC);
+            writeString(output, sync.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
+                    "session identity");
+            output.writeLong(sync.admissionId);
+            output.writeLong(sync.generation);
+            output.writeLong(sync.hostTick);
+            output.writeByte(sync.stage);
+        }
+        else if(message instanceof DiscoveryProbe) {
             DiscoveryProbe probe = (DiscoveryProbe)message;
             if(probe.nonce == 0L || probe.protocolVersion < 1) {
                 throw new ProtocolException("Discovery probe identity is invalid.");
@@ -956,6 +967,18 @@ final class DirectConnectWire {
         int type = input.readUnsignedByte();
         Message message;
         switch(type) {
+            case ADMISSION_SYNC:
+                String admissionSession = readString(input,
+                        DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 25, "admission barrier");
+                try {
+                    message = new AdmissionSync(admissionSession, input.readLong(),
+                            input.readLong(), input.readLong(), input.readUnsignedByte());
+                }
+                catch(IllegalArgumentException failure) {
+                    throw new ProtocolException(failure.getMessage());
+                }
+                break;
             case MOVER_STATE:
                 String moverSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES,
                         "session identity");
@@ -2185,6 +2208,27 @@ final class DirectConnectWire {
         }
     }
 
+    /** Ordered TCP fences. Acknowledgements echo the exact admission, generation and tick. */
+    static final class AdmissionSync implements Message {
+        static final int BEGIN = 1, BASELINE_END = 2, CATCH_UP_END = 3,
+                ACK_BASELINE = 4, ACK_CATCH_UP = 5, ACTIVATED = 6;
+        final String sessionId;
+        final long admissionId, generation, hostTick;
+        final int stage;
+
+        AdmissionSync(String sessionId, long admissionId, long generation, long hostTick, int stage) {
+            if(admissionId < 1 || generation < 1 || hostTick < 0
+                    || stage < BEGIN || stage > ACTIVATED) {
+                throw new IllegalArgumentException("Admission barrier is outside protocol bounds.");
+            }
+            this.sessionId = sessionId;
+            this.admissionId = admissionId;
+            this.generation = generation;
+            this.hostTick = hostTick;
+            this.stage = stage;
+        }
+    }
+
     static final class ServerAccepted implements Message {
         final String sessionId;
         final long udpToken;
@@ -2215,7 +2259,8 @@ final class DirectConnectWire {
         AVATAR_UNAVAILABLE(10),
         APPROVAL_DECLINED(11),
         IDENTITY_IN_USE(12),
-        NOT_IN_LOBBY(13);
+        NOT_IN_LOBBY(13),
+        ADMISSION_TIMEOUT(14);
 
         final int id;
 

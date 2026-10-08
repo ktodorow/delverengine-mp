@@ -45,6 +45,16 @@ public interface DirectConnectPeer extends AutoCloseable {
 
     NetworkEntityId getLocalMovementEntityId();
 
+    /** Persistent slot identity also exists while Spectator has no world body. */
+    default int getLocalCampaignSlot() {
+        NetworkEntityId entity = getLocalMovementEntityId();
+        return entity == null ? 0 : (int)entity.getValue();
+    }
+
+    /** Render captures checkpoint before applying native state; stale completions are ignored. */
+    default long getPendingAdmissionCheckpoint() { return 0L; }
+    default void acknowledgeNativeWorldReadiness(long checkpoint) { }
+
     List<MovementEntityDescriptor> getMovementEntities();
 
     List<MovementSnapshot> getMovementSnapshots();

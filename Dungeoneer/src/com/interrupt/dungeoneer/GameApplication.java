@@ -225,7 +225,7 @@ public class GameApplication extends Game {
             startDirectConnectHost(compatibility);
         }
         else {
-            directConnectPeer = DirectConnectClient.connect(directConnectAddress,
+            directConnectPeer = DirectConnectClient.connectForNativeWorld(directConnectAddress,
                     directConnectPort, directConnectLauncherIdentity,
                     directConnectPresentation, directConnectRequestedSlot,
                     directConnectReconnectTokens, compatibility);
@@ -260,6 +260,7 @@ public class GameApplication extends Game {
                 new LevelMovementCollisionWorld(authoritativeLevel));
         try {
             if(floorId != null) host.useOwnedFloor(floorId);
+            host.awaitNativeWorld();
             directConnectPeer = host;
             showDirectConnectSession();
         }
@@ -399,7 +400,8 @@ public class GameApplication extends Game {
 
     public void enterDirectConnectFloor() {
         if(enteredDirectConnectFloor || directConnectPeer == null
-                || directConnectPeer.getStatus().getPhase() != DirectConnectPhase.READY) return;
+                || directConnectPeer.getStatus().getPhase() != DirectConnectPhase.READY
+                && directConnectPeer.getStatus().getPhase() != DirectConnectPhase.SYNCHRONIZING) return;
         enteredDirectConnectFloor = true;
 
         // Clients load the floor announced by Host from their own certified Owned Game Copy.

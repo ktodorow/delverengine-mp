@@ -44,8 +44,14 @@ public final class DirectConnectSessionScreen implements Screen {
     public void render(float delta) {
         handleHostControls();
         DirectConnectStatus status = peer.getStatus();
-        if(isFloorEntryReady(status.getPhase(), peer.getLocalMovementEntityId(),
-                peer.getMovementSnapshots()) && !floorEntryRequested) {
+        boolean spectator = peer.getPartyStatus() != null
+                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null
+                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()).getState()
+                        == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING;
+        if((isFloorEntryReady(status.getPhase(), peer.getLocalMovementEntityId(),
+                peer.getMovementSnapshots()) || spectator && (status.getPhase() == DirectConnectPhase.READY
+                        || status.getPhase() == DirectConnectPhase.SYNCHRONIZING)
+                        && !peer.getMovementSnapshots().isEmpty()) && !floorEntryRequested) {
             floorEntryRequested = true;
             Gdx.app.postRunnable(new Runnable() {
                 @Override

@@ -135,6 +135,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile String campaignId;
     private volatile int campaignCapacity;
     private volatile int campaignSlot;
+    private String acceptedReconnectToken;
     private volatile long udpToken;
     private volatile boolean udpRegistered;
     private volatile SessionReady readyMessage;
@@ -214,6 +215,18 @@ public final class DirectConnectClient implements DirectConnectPeer {
         DirectConnectClient client = new DirectConnectClient(host, port, launcherIdentity,
                 presentation, requestedSlot, reconnectTokens, compatibility,
                 NORMAL_MOVEMENT_DATAGRAMS);
+        client.start();
+        return client;
+    }
+
+    /** Native callers acknowledge only after render-thread controllers reconstruct each checkpoint. */
+    public static DirectConnectClient connectForNativeWorld(String host, int port,
+            LauncherIdentity launcherIdentity, SlotPresentation presentation,
+            int requestedSlot, ReconnectTokenStore reconnectTokens,
+            DirectConnectCompatibility compatibility) {
+        DirectConnectClient client = new DirectConnectClient(host, port, launcherIdentity,
+                presentation, requestedSlot, reconnectTokens, compatibility, NORMAL_MOVEMENT_DATAGRAMS);
+        client.nativeAdmission = true;
         client.start();
         return client;
     }
@@ -350,6 +363,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
             fail("Host returned malformed Campaign Slot acceptance.");
             return;
         }
+        if(campaignSlot != 0) {
+            if(campaignSlot != accepted.slotNumber || udpToken != accepted.udpToken
+                    || !java.util.Objects.equals(acceptedReconnectToken, accepted.reconnectToken)) {
+                fail("Host changed Campaign Slot acceptance during admission.");
+            }
+            return;
+        }
         try {
             reconnectTokens.save(campaignId, accepted.reconnectToken);
         }
@@ -358,6 +378,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
             return;
         }
         campaignSlot = accepted.slotNumber;
+        acceptedReconnectToken = accepted.reconnectToken;
         udpToken = accepted.udpToken;
         status = new DirectConnectStatus(DirectConnectPhase.REGISTERING_UDP,
                 "Campaign Slot " + campaignSlot
@@ -442,7 +463,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
             UdpRegistered registered = (UdpRegistered)message;
             if(!sessionId.equals(registered.sessionId) || udpToken != registered.udpToken) return;
             udpRegistered = true;
-            status = new DirectConnectStatus(DirectConnectPhase.LOBBY,
+            if(!admissionPending) status = new DirectConnectStatus(DirectConnectPhase.LOBBY,
                     "Campaign Slot " + campaignSlot
                             + " is ready. Waiting for Host to start play.",
                     sessionId, "host", null);
@@ -499,8 +520,11 @@ public final class DirectConnectClient implements DirectConnectPeer {
             }
             return;
         }
-        if(local.getEntityId() == null
-                || !local.getEntityId().equals(localMovementEntityId)) {
+        boolean bodylessSpectator = local.getState()
+                == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING
+                && local.getEntityId() == null;
+        if(!bodylessSpectator && (local.getEntityId() == null
+                || !local.getEntityId().equals(localMovementEntityId))) {
             fail("Host Party status omitted local Active Floor Entity.");
             return;
         }
@@ -656,12 +680,66 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     private void becomeReadyIfComplete() {
+        if(admissionPending) return;
         if(!udpRegistered || readyMessage == null || partyStatus == null
                 || combatSnapshot == null) return;
         status = new DirectConnectStatus(DirectConnectPhase.READY,
                 "Host started play with " + readyMessage.participantCount
                         + " Participants. Entering shared open-source test floor.",
                 sessionId, "host", readyMessage.floorId);
+    }
+
+    private boolean admissionPending;
+    private long admissionId, admissionGeneration;
+    private boolean nativeAdmission;
+    private long nextAdmissionCheckpoint, pendingAdmissionCheckpoint;
+    private DirectConnectWire.AdmissionSync pendingAdmissionFence;
+
+    @Override public synchronized long getPendingAdmissionCheckpoint() {
+        return pendingAdmissionCheckpoint;
+    }
+
+    @Override public synchronized void acknowledgeNativeWorldReadiness(long checkpoint) {
+        if(checkpoint == 0L || checkpoint != pendingAdmissionCheckpoint
+                || pendingAdmissionFence == null) return;
+        DirectConnectWire.AdmissionSync fence = pendingAdmissionFence;
+        pendingAdmissionCheckpoint = 0L;
+        pendingAdmissionFence = null;
+        int stage = fence.stage == DirectConnectWire.AdmissionSync.BASELINE_END
+                ? DirectConnectWire.AdmissionSync.ACK_BASELINE : DirectConnectWire.AdmissionSync.ACK_CATCH_UP;
+        tcpChannel.writeAndFlush(new DirectConnectWire.AdmissionSync(sessionId,
+                fence.admissionId, fence.generation, fence.hostTick, stage));
+    }
+
+    @Override public int getLocalCampaignSlot() { return campaignSlot; }
+
+    private synchronized void admissionSync(DirectConnectWire.AdmissionSync sync) {
+        if(!sessionId.equals(sync.sessionId)) { fail("Admission belongs to another session."); return; }
+        if(sync.stage == DirectConnectWire.AdmissionSync.BEGIN) {
+            if(sync.admissionId <= admissionId) return;
+            admissionPending = true;
+            admissionId = sync.admissionId;
+            admissionGeneration = sync.generation;
+            pendingAdmissionCheckpoint = 0L;
+            pendingAdmissionFence = null;
+            return;
+        }
+        if(sync.admissionId != admissionId || sync.generation != admissionGeneration) return;
+        if(sync.stage == DirectConnectWire.AdmissionSync.BASELINE_END
+                || sync.stage == DirectConnectWire.AdmissionSync.CATCH_UP_END) {
+            pendingAdmissionFence = sync;
+            pendingAdmissionCheckpoint = ++nextAdmissionCheckpoint;
+            if(nativeAdmission) {
+                status = new DirectConnectStatus(DirectConnectPhase.SYNCHRONIZING,
+                        "Loading current Active Floor as Spectator.", sessionId, "host",
+                        readyMessage == null ? null : readyMessage.floorId);
+            }
+            else acknowledgeNativeWorldReadiness(pendingAdmissionCheckpoint);
+        }
+        else if(sync.stage == DirectConnectWire.AdmissionSync.ACTIVATED) {
+            admissionPending = false;
+            becomeReadyIfComplete();
+        }
     }
 
     private synchronized void rejected(ServerRejected rejection) {
@@ -971,6 +1049,10 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(!sessionId.equals(message.sessionId)) { fail("Native world belongs to another session."); return; }
         if(message.generation <= nativeWorldGeneration) return;
         nativeWorldGeneration = message.generation;
+        if(admissionPending) {
+            pendingAdmissionFence = null;
+            pendingAdmissionCheckpoint = 0L;
+        }
         shopEntries.clear(); shopOpenings.clear();
         triggerPresentations.clear(); lastTriggerPresentationSequence = 0L;
         monsterEffects.clear(); nativeStatusCues.clear(); nativeExplosions.clear(); nativeAnimationCues.clear();
@@ -1411,6 +1493,15 @@ public final class DirectConnectClient implements DirectConnectPeer {
             }
             else if(message instanceof ServerRejected) {
                 rejected((ServerRejected)message);
+            }
+            else if(message instanceof DirectConnectWire.AdmissionSync && sessionId != null
+                    && campaignSlot != 0) {
+                admissionSync((DirectConnectWire.AdmissionSync)message);
+            }
+            else if(message instanceof MovementSnapshotMessage && sessionId != null && campaignSlot != 0) {
+                MovementSnapshotMessage movement = (MovementSnapshotMessage)message;
+                if(!sessionId.equals(movement.sessionId)) { fail("Movement belongs to another session."); return; }
+                if(movementReplication.applySnapshot(movement.snapshot)) acknowledgeMovementInputs(movement.snapshot);
             }
             else if(message instanceof SessionReady && sessionId != null
                     && campaignSlot != 0) {

@@ -53,6 +53,44 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class DirectConnectWireTest {
+    @Test public void admissionBarriersRoundTripAndRejectMalformedBounds() throws Exception {
+        for(int stage = DirectConnectWire.AdmissionSync.BEGIN; stage <= DirectConnectWire.AdmissionSync.ACTIVATED; stage++) {
+            DirectConnectWire.AdmissionSync decoded = (DirectConnectWire.AdmissionSync)roundTrip(
+                    new DirectConnectWire.AdmissionSync("session", 7L, 3L, 42L, stage));
+            assertEquals("session", decoded.sessionId);
+            assertEquals(7L, decoded.admissionId);
+            assertEquals(3L, decoded.generation);
+            assertEquals(42L, decoded.hostTick);
+            assertEquals(stage, decoded.stage);
+        }
+        ByteBuf valid = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.AdmissionSync("session", 7L, 3L, 42L, DirectConnectWire.AdmissionSync.BEGIN));
+        try {
+            int payload = valid.writerIndex() - 25;
+            ByteBuf id = valid.copy(); id.setLong(payload, 0); rejectPartyDatagram(id);
+            ByteBuf generation = valid.copy(); generation.setLong(payload + 8, 0); rejectPartyDatagram(generation);
+            ByteBuf tick = valid.copy(); tick.setLong(payload + 16, -1); rejectPartyDatagram(tick);
+            ByteBuf stage = valid.copy(); stage.setByte(stage.writerIndex() - 1, 7); rejectPartyDatagram(stage);
+            ByteBuf truncated = valid.copy(); truncated.writerIndex(truncated.writerIndex() - 1); rejectPartyDatagram(truncated);
+            ByteBuf trailing = valid.copy(); trailing.writeByte(0); rejectPartyDatagram(trailing);
+        }
+        finally { valid.release(); }
+    }
+
+    @Test public void bodylessLateSpectatorRoundTripsWithoutEntityOrLives() throws Exception {
+        com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus spectator =
+                new com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus(3, null, "Late", "humanoid-3",
+                        0, 8, 0, com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING);
+        DirectConnectWire.PartyStatusMessage decoded = (DirectConnectWire.PartyStatusMessage)roundTrip(
+                new DirectConnectWire.PartyStatusMessage("session",
+                        new com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot(7L,
+                                java.util.Collections.singletonList(spectator))));
+        assertNull(decoded.snapshot.getMember(3).getEntityId());
+        assertEquals(0, decoded.snapshot.getMember(3).getRemainingLives());
+        assertEquals(com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING,
+                decoded.snapshot.getMember(3).getState());
+    }
+
     @Test public void unversionedPersonalFactsAreRejectedBeforeDelivery() throws Exception {
         ByteBuf bytes = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
                 new DirectConnectWire.PersonalKnowledgeMessage("s", new ParticipantId("campaign-slot-2"), 1,

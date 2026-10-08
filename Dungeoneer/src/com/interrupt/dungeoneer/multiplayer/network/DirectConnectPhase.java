@@ -9,6 +9,7 @@ public enum DirectConnectPhase {
     AWAITING_APPROVAL,
     REGISTERING_UDP,
     LOBBY,
+    SYNCHRONIZING,
     READY,
     REJECTED,
     DISCONNECTED,

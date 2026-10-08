@@ -58,7 +58,8 @@ public final class PartyMemberStatus {
         if(state == PartyMemberState.DISCONNECTED && entityId != null) {
             throw new IllegalArgumentException("Disconnected Party member cannot own an Active Floor Entity.");
         }
-        if(state != PartyMemberState.DISCONNECTED && entityId == null) {
+        if(state != PartyMemberState.DISCONNECTED && state != PartyMemberState.SPECTATING
+                && entityId == null) {
             throw new IllegalArgumentException("Active Party member requires an Active Floor Entity.");
         }
         SlotPresentation presentation = new SlotPresentation(nickname, avatarId);

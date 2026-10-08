@@ -71,6 +71,29 @@ public final class AuthoritativeCombatEncounter {
         }
     }
 
+    /** Registers first world body at Fresh Return; reconnect uses existing combatant. */
+    public synchronized void addParticipant(MovementEntityDescriptor descriptor, int maximumHealth, boolean eligible) {
+        if(descriptor == null || maximumHealth < 1 || maximumHealth > 1000000) {
+            throw new IllegalArgumentException("Combat descriptor and health are required.");
+        }
+        if(participants.containsKey(descriptor.getParticipantId())) return;
+        if(participants.size() >= 4) throw new IllegalStateException("Combat supports four Participants.");
+        MutableCombatant participant = new MutableCombatant(participantTargetId(descriptor.getParticipantId()),
+                CombatantKind.PARTICIPANT, maximumHealth);
+        participant.combatEligible = eligible;
+        participants.put(descriptor.getParticipantId(), participant);
+        combatants.put(participant.id, participant);
+        actionCadences.put(descriptor.getParticipantId(), new MutableActionCadence());
+        snapshotSequence++;
+    }
+
+    public synchronized void removeUnactivatedParticipant(ParticipantId id) {
+        MutableCombatant participant = participants.get(id);
+        if(participant == null || participant.combatEligible) return;
+        participants.remove(id); combatants.remove(participant.id); actionCadences.remove(id);
+        snapshotSequence++;
+    }
+
     public static String participantTargetId(ParticipantId participantId) {
         if(participantId == null) throw new IllegalArgumentException("Participant ID cannot be null.");
         return "participant:" + participantId.getValue();

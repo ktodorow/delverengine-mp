@@ -49,6 +49,17 @@ public final class DirectConnectMovementController {
         if(player == null) throw new IllegalArgumentException("Local Player cannot be null.");
         NetworkEntityId localId = peer.getLocalMovementEntityId();
         List<MovementSnapshot> snapshots = peer.getMovementSnapshots();
+        com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus local =
+                peer.getPartyStatus() == null ? null
+                        : peer.getPartyStatus().getMember(peer.getLocalCampaignSlot());
+        if(localId == null && local != null && local.getState()
+                == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING) {
+            player.setMultiplayerIncapacitated(true);
+            player.inventory.clear();
+            player.equippedItems.clear();
+            player.gold = 0;
+            return true;
+        }
         if(localId == null || snapshots.isEmpty()) return false;
         MovementSnapshot latest = snapshots.get(snapshots.size() - 1);
         MovementEntityState authoritative = latest.getEntity(localId);
@@ -68,6 +79,14 @@ public final class DirectConnectMovementController {
         observedZ = player.z;
         observed = true;
         return true;
+    }
+
+    /** Reconstructs current bodies during admission without sampling input or advancing native play. */
+    public void prepare(Game game) {
+        if(game == null || game.level == null) return;
+        if(attachedLevel != game.level) attachToLevel(game.level);
+        updateRemoteAvatars(game.level, 0f);
+        bodies.updateParticipants(remoteAvatars.values(), peer.getCurrentMovementStates());
     }
 
     public void update(Game game, GameInput input, float deltaSeconds) {

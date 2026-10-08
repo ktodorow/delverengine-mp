@@ -8,14 +8,12 @@ import com.interrupt.dungeoneer.multiplayer.movement.AuthoritativeMovementSimula
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityDescriptor;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementEntityState;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /** Combines existing movement authority with encounter authority in one Host tick. */
 public final class AuthoritativeEncounterSimulation implements AuthoritativeHostSimulation {
     private final AuthoritativeMovementSimulation movement;
     private final AuthoritativeCombatEncounter combat;
-    private final List<MovementEntityDescriptor> descriptors;
 
     public AuthoritativeEncounterSimulation(AuthoritativeMovementSimulation movement,
             AuthoritativeCombatEncounter combat, List<MovementEntityDescriptor> descriptors) {
@@ -24,7 +22,6 @@ public final class AuthoritativeEncounterSimulation implements AuthoritativeHost
         }
         this.movement = movement;
         this.combat = combat;
-        this.descriptors = new ArrayList<MovementEntityDescriptor>(descriptors);
     }
 
     @Override
@@ -39,7 +36,7 @@ public final class AuthoritativeEncounterSimulation implements AuthoritativeHost
     @Override
     public void tick(long hostTick, float fixedDeltaSeconds, HostSessionOutput output) {
         movement.tick(hostTick, fixedDeltaSeconds, output);
-        for(MovementEntityDescriptor descriptor : descriptors) {
+        for(MovementEntityDescriptor descriptor : movement.getDescriptors()) {
             MovementEntityState state = movement.getState(descriptor.getParticipantId());
             if(state != null) {
                 combat.updateParticipantPosition(descriptor.getParticipantId(),

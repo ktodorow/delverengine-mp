@@ -56,6 +56,8 @@ public class NativeOwnershipRegressionTest {
     private final List<BreakableSnapshot> breakables = new ArrayList<>();
     private final List<String> compatibilityFailures = new ArrayList<>();
     private long nativeGeneration = 1L;
+    private com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase phase =
+            com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY;
     private com.badlogic.gdx.Application previousApp;
     private Integer hoveredSlot = 0;
     private Game previousGame, game;
@@ -91,6 +93,14 @@ public class NativeOwnershipRegressionTest {
             if(method.getName().equals("getPhysicalItems")) return states;
             if(method.getName().equals("getBreakableSnapshots")) return breakables;
             if(method.getName().equals("getNativeWorldGeneration")) return nativeGeneration;
+            if(method.getName().equals("getStatus")) {
+                Constructor<com.interrupt.dungeoneer.multiplayer.network.DirectConnectStatus> status =
+                        com.interrupt.dungeoneer.multiplayer.network.DirectConnectStatus.class.getDeclaredConstructor(
+                                com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.class,
+                                String.class, String.class, String.class, String.class);
+                status.setAccessible(true);
+                return status.newInstance(phase, "test", "session", "host", "floor");
+            }
             if(method.getName().equals("drainItemActionResults")) {
                 List<ItemActionResult> copy = new ArrayList<>(results); results.clear(); return copy;
             }
@@ -326,6 +336,26 @@ public class NativeOwnershipRegressionTest {
         controller.prepare(game);
         assertFalse(crate.isActive);
         assertEquals("Live destruction must not replay on later frames", 1, breaks[0]);
+    }
+
+    @Test public void reconstructionAppliesCatchUpDestructionWithoutHistoricalImpactCue() throws Exception {
+        final int[] breaks = {0};
+        Breakable crate = new Breakable() {
+            @Override public void playNetworkBreakPresentation(Level level) { breaks[0]++; }
+        };
+        this.<Map<Long, Entity>>field("objects").put(1000000L, crate);
+        phase = com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.SYNCHRONIZING;
+        breakables.add(new BreakableSnapshot(1000000L, 1L, 2, true, true,
+                1f, 2f, 0.5f, 0f, 0f, 0f, 0f, 0f, 0f));
+        controller.prepare(game);
+        breakables.set(0, new BreakableSnapshot(1000000L, 2L, 0, false, false,
+                1f, 2f, 0.5f, 0f, 0f, 0f, 0f, 0f, 0f));
+        controller.prepare(game);
+        assertFalse(crate.isActive);
+        assertEquals("Catch-up must restore outcome without replaying impact", 0, breaks[0]);
+        phase = com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY;
+        controller.prepare(game);
+        assertEquals(0, breaks[0]);
     }
 
     @Test public void clientRebindsWorldObjectsAndAcceptsLowerRevisionsOnNewFloor()

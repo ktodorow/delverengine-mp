@@ -146,6 +146,12 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
         return new MovementSnapshot(hostTick, hostTick, states);
     }
 
+    public synchronized List<MovementEntityDescriptor> getDescriptors() {
+        List<MovementEntityDescriptor> descriptors = new ArrayList<MovementEntityDescriptor>();
+        for(MutableMovement participant : participants.values()) descriptors.add(participant.descriptor);
+        return descriptors;
+    }
+
     public synchronized void removeParticipant(ParticipantId participantId) {
         if(participantId != null) participants.remove(participantId);
     }

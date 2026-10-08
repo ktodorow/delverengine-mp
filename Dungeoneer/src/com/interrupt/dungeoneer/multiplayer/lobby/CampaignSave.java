@@ -391,10 +391,11 @@ public final class CampaignSave {
         return null;
     }
 
-    /** Rejects roster mutation or cross-Campaign application before runtime state changes. */
+    /** Saved ownership stays fixed; active checkpoint may predate new late reservations. */
     public void verifyRoster(CampaignRoster roster) {
         if(roster == null || !campaignId.equals(roster.getCampaignId())
-                || capacity != roster.getCapacity() || roster.getSlots().size() != slots.size()) {
+                || capacity != roster.getCapacity() || roster.getSlots().size() < slots.size()
+                || outcome != Outcome.ACTIVE && roster.getSlots().size() != slots.size()) {
             throw new IllegalStateException("Campaign Save does not match current Campaign Roster.");
         }
         for(CampaignSlot saved : slots) {

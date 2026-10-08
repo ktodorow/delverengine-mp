@@ -89,6 +89,17 @@ public class GameScreen implements Screen {
 			DirectConnectPeer directConnect = directConnectPeer();
 			boolean directConnectReady = directConnect == null
 					|| canAdvanceDirectConnectGameplay(directConnect.getStatus().getPhase());
+            if(directConnect != null && directConnect.getStatus().getPhase() == DirectConnectPhase.SYNCHRONIZING) {
+                long checkpoint = directConnect.getPendingAdmissionCheckpoint();
+                if(networkMovementController != null) networkMovementController.prepare(game);
+                if(networkItemController != null) networkItemController.prepare(game);
+                if(networkEconomyController != null) networkEconomyController.prepare(game);
+                if(networkCombatController != null) networkCombatController.prepare(game);
+                if(networkLivesController != null) networkLivesController.prepare(game);
+                directConnect.acknowledgeNativeWorldReadiness(checkpoint);
+                gameManager.render();
+                return;
+            }
 			if(!directConnectReady) {
                 reportStoppedDirectConnect(directConnect);
                 GameApplication.instance.returnToDirectConnectSession();
@@ -157,8 +168,10 @@ public class GameScreen implements Screen {
             if(directConnectReady && networkItemController != null) networkItemController.update(game);
             if(directConnectReady && networkEconomyController != null) networkEconomyController.update(game);
             if(directConnect instanceof com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost) {
-                ((com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost)directConnect)
-                        .updateCampaignRecovery(System.nanoTime());
+                com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost host =
+                        (com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost)directConnect;
+                host.completeNativeWorld(host.getNativeWorldGeneration());
+                host.updateCampaignRecovery(System.nanoTime());
             }
 
 			// draw the game

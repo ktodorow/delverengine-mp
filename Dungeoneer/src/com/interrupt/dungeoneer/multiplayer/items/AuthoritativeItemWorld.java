@@ -358,6 +358,16 @@ public final class AuthoritativeItemWorld {
                 null, item.x, item.y, item.z, item.properties, true));
     }
 
+    /** Aborted new character keeps tombstones and monotonic identities; other Slots stay intact. */
+    public synchronized void discardOwnedItems(ParticipantId owner) {
+        for(PhysicalItemState item : new ArrayList<PhysicalItemState>(items.values())) {
+            if(item.consumed || !owner.equals(item.owner)) continue;
+            items.put(item.entityId, new PhysicalItemState(item.entityId, ++revision, item.templateId,
+                    null, item.x, item.y, item.z, item.properties, true));
+            releaseWield(item.entityId);
+        }
+    }
+
     /** Native Host physics can move world items, but cannot transfer ownership. */
     public synchronized void move(long entityId, float x, float y, float z) {
         PhysicalItemState item = items.get(entityId);

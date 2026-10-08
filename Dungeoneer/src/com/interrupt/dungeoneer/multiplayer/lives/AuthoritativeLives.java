@@ -55,6 +55,16 @@ public final class AuthoritativeLives {
         }
     }
 
+    /** First character for newly admitted bodyless slot; repeated calls preserve existing Lives. */
+    public synchronized void addParticipant(ParticipantId participant, int startingLives) {
+        requireStartingLives(startingLives);
+        if(participant == null) throw new IllegalArgumentException("Lives Participant is required.");
+        if(slots.containsKey(participant)) return;
+        if(slots.size() >= 4) throw new IllegalStateException("Lives supports four Participants.");
+        slots.put(participant, new MutableSlot(startingLives));
+        revision++;
+    }
+
     public static void requireStartingLives(int startingLives) {
         if(startingLives < MINIMUM_STARTING_LIVES || startingLives > MAXIMUM_STARTING_LIVES) {
             throw new IllegalArgumentException("Starting Lives must be 1-5.");
