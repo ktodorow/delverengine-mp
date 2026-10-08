@@ -1676,7 +1676,7 @@ public class Monster extends Actor implements Directional {
 		}
 	}
 
-    private transient SpriteAnimation lastNativeAnimation;
+    private SpriteAnimation lastNativeAnimation;
     private transient com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState networkAnimation;
     private transient long networkAnimationSequence;
     private transient boolean networkDeathRecovery;

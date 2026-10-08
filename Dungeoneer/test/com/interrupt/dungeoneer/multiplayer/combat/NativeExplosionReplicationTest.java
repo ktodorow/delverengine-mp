@@ -147,4 +147,42 @@ public class NativeExplosionReplicationTest {
         assertEquals(nativeParticles, Game.instance.level.non_collidable_entities.size);
         assertEquals("Replica fizzle cannot publish another cue", 1, cues.size());
     }
+
+    @Test public void floorCheckpointFreezesNativeBombProjectileAndEffectsWithoutRefiringExplosion() {
+        com.interrupt.dungeoneer.entities.items.FusedBomb bomb =
+                new com.interrupt.dungeoneer.entities.items.FusedBomb();
+        bomb.artType = Entity.ArtType.item; bomb.countdownTimer = 77f; bomb.isLit = true;
+        bomb.multiplayerIdentity = "item:44"; bomb.multiplayerDamageSource = "campaign-slot-2";
+        Game.instance.level.entities.add(bomb);
+        com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile projectile =
+                new com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile();
+        projectile.multiplayerIdentity = "projectile:45"; projectile.xa = 0.16f;
+        assertTrue("Native missile opts into persistent floor state", projectile.persists);
+        Game.instance.level.entities.add(projectile);
+        Explosion explosion = new Explosion(); explosion.explodeSound = null;
+        explosion.particleCount = 3;
+        explosion.playPresentation(Game.instance.level, 1);
+        assertEquals(5, Game.instance.level.non_collidable_entities.size);
+        for(int i = 0; i < 5; i++) {
+            Entity effect = Game.instance.level.non_collidable_entities.get(i);
+            assertTrue("Native explosion effect opts into floor persistence", effect.persists);
+            effect.multiplayerIdentity = "effect:" + i;
+        }
+
+        byte[] checkpoint = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(Game.instance.level);
+        Level returned = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.restore(checkpoint);
+        assertEquals("Native persistent projectile freezes with floor", 2, returned.entities.size);
+        assertEquals("Native persistent visuals return as state, without another explosion", 5,
+                returned.non_collidable_entities.size);
+        for(int i = 0; i < 5; i++) assertEquals("effect:" + i,
+                returned.non_collidable_entities.get(i).multiplayerIdentity);
+        com.interrupt.dungeoneer.entities.items.FusedBomb saved =
+                (com.interrupt.dungeoneer.entities.items.FusedBomb)returned.entities.first();
+        assertEquals(77f, saved.countdownTimer, 0f); assertTrue(saved.isLit);
+        assertEquals("item:44", saved.multiplayerIdentity);
+        assertEquals("campaign-slot-2", saved.multiplayerDamageSource);
+        assertEquals("projectile:45", returned.entities.get(1).multiplayerIdentity);
+        assertEquals(0.16f, returned.entities.get(1).xa, 0f);
+        assertEquals("Checkpoint does not tick or destroy live bomb", 77f, bomb.countdownTimer, 0f);
+    }
 }

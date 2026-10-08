@@ -67,6 +67,386 @@ public class DirectConnectCampaignPersistenceTest {
 
     @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
+    @Test public void hostActivatesOneAreaAndReturnsNativeWorldWithoutMovingItsDrops() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("floor-history"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        DirectConnectCompatibility compatibility = compatibility();
+        store.campaignSaves().save(save(compatibility, roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            final Level[] active = { nativeDormancyFloor() };
+            Door door = new Door(); door.multiplayerIdentity = "object:4141";
+            door.doorState = Door.DoorState.OPEN; active[0].entities.add(door);
+            com.interrupt.dungeoneer.entities.Monster survivor = new com.interrupt.dungeoneer.entities.Monster();
+            survivor.hp = 3; survivor.maxHp = 8; survivor.multiplayerIdentity = "monster:5151";
+            survivor.x = 1.5f; survivor.y = 2.5f; active[0].entities.add(survivor);
+            Entity defeated = new com.interrupt.dungeoneer.entities.Monster(); defeated.isActive = false;
+            active[0].entities.add(defeated);
+            active[0].tiles[0].floorHeight = -0.75f;
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
+            ParticipantId participant = new ParticipantId("campaign-slot-1");
+            host.getItemWorld().registerParticipant(participant, 12);
+            PhysicalItemState carried = host.getItemWorld().spawn("kept-sword", participant, 1f, 1f, 0f);
+            PhysicalItemState dropped = host.getItemWorld().spawn("old-floor-drop", null, 2f, 2f, 0f);
+            String originalArea = host.persistCampaign().getActiveAreaKey();
+            long generation = host.getNativeWorldGeneration();
+
+            assertTrue(host.activateCampaignFloor("dungeon:2", "levels/second.bin", 123L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> active[0] = level));
+            assertTrue(host.getNativeWorldGeneration() > generation);
+            assertEquals("levels/second.bin", host.getStatus().getFloorId());
+            assertNull("Prior-floor drop must not be active on destination", host.getItemWorld().get(dropped.entityId));
+            assertEquals(participant, host.getItemWorld().get(carried.entityId).owner);
+            assertEquals(1, host.persistCampaign().getDormantFloors().size());
+            assertEquals("Only destination is available to native simulation", 0, active[0].entities.size);
+            PhysicalItemState secondDrop = host.getItemWorld().spawn("new-floor-drop", null, 2f, 2f, 0f);
+            assertTrue("Global item identity cannot reuse dormant item ID", secondDrop.entityId > dropped.entityId);
+
+            assertFalse(host.activateCampaignFloor(originalArea, GameApplication.OPEN_SOURCE_TEST_LEVEL, 999L, null,
+                    () -> { throw new AssertionError("Visited area cannot regenerate"); }, level -> active[0] = level));
+            assertEquals(2, active[0].entities.size);
+            assertEquals("object:4141", active[0].entities.get(0).multiplayerIdentity);
+            assertEquals(Door.DoorState.OPEN, ((Door)active[0].entities.get(0)).doorState);
+            assertEquals("monster:5151", active[0].entities.get(1).multiplayerIdentity);
+            assertEquals(3, ((com.interrupt.dungeoneer.entities.Monster)active[0].entities.get(1)).hp);
+            assertEquals(-0.75f, active[0].tiles[0].floorHeight, 0f);
+            assertEquals("old-floor-drop", host.getItemWorld().get(dropped.entityId).templateId);
+            assertNull(host.getItemWorld().get(secondDrop.entityId));
+            CampaignSave saved = host.persistCampaign();
+            assertEquals(originalArea, saved.getActiveAreaKey());
+            assertEquals(1, saved.getDormantFloors().size());
+            assertEquals("dungeon:2", saved.getDormantFloors().get(0).getAreaKey());
+            assertEquals("new-floor-drop", saved.getDormantFloors().get(0).getWorldItems().get(0).templateId);
+            assertTrue(host.isSessionPaused());
+        }
+        finally { host.close(); }
+        DirectConnectHost resumed = DirectConnectHost.start(0, compatibility, roster, store,
+                new com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld(
+                        com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.restore(
+                                store.campaignSaves().load("friends", compatibility).getNativeFloor())));
+        try {
+            resumed.startSession(); resumed.setSessionPaused(true);
+            CampaignSave recovered = resumed.persistCampaign();
+            assertEquals(1, recovered.getDormantFloors().size());
+            assertEquals("dungeon:2", recovered.getDormantFloors().get(0).getAreaKey());
+        }
+        finally { resumed.close(); }
+    }
+
+    @Test public void nativeBridgeReturnKeepsSavedMonsterEffectInsteadOfReplayingBegin() throws Exception {
+        Game previous = Game.instance;
+        HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> strings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        com.interrupt.managers.StringManager.localizedStrings = new HashMap<>();
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("native-status-return"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        store.campaignSaves().save(save(compatibility(), roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController combat =
+                new com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController(host, false);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            Level nativeFloor = nativeDormancyFloor();
+            com.interrupt.dungeoneer.entities.Monster monster = new com.interrupt.dungeoneer.entities.Monster();
+            monster.multiplayerIdentity = "monster:9";
+            monster.hp = monster.maxHp = 20;
+            com.interrupt.dungeoneer.statuseffects.PoisonEffect poison =
+                    new com.interrupt.dungeoneer.statuseffects.PoisonEffect(500, 60, 1, false);
+            poison.showParticleEffect = false;
+            poison.restoreMultiplayerCursor(7171L, 59f, 0L);
+            monster.statusEffects = new com.badlogic.gdx.utils.Array<>(); monster.statusEffects.add(poison);
+            poison.doTick(monster, 59f);
+            nativeFloor.entities.add(monster);
+            Game game = partyStoryGame();
+            game.level = com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.restore(
+                    com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(nativeFloor));
+            com.interrupt.dungeoneer.entities.Monster returned =
+                    (com.interrupt.dungeoneer.entities.Monster)game.level.entities.first();
+            com.interrupt.dungeoneer.statuseffects.StatusEffect saved = returned.statusEffects.first();
+            host.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture("monster:9", 1L, returned));
+            combat.prepare(game);
+            // Native checkpoint is newer and richer than the DTO; bridge must not replace it.
+            assertTrue("Return retains native effect, including private damage cadence",
+                    saved == returned.statusEffects.first());
+            returned.statusEffects.first().doTick(returned, 2f);
+            assertEquals("Poison resumes after two active ticks, not another complete period", 19, returned.hp);
+            assertEquals(7171L, returned.statusEffects.first().getMultiplayerInstanceId());
+        }
+        finally { combat.dispose(); host.close(); Game.instance = previous;
+            com.interrupt.managers.StringManager.localizedStrings = strings; }
+    }
+
+    @Test public void itemBridgeReturnBindsOriginalDropWithoutCloningOrResettingNativeMotion() throws Exception {
+        Game previous = Game.instance;
+        HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> strings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        com.interrupt.managers.StringManager.localizedStrings = new HashMap<>();
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("native-items-return"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        // New campaign: native items are authoritative, without resumed placeholder inventory.
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        tokens.save("friends", roster.getSlot(2).getReconnectToken());
+        DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
+                identity('2'), roster.getSlot(2).getPresentation(), 2, tokens, compatibility());
+        try {
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            host.startSession(); awaitPhase(client, DirectConnectPhase.READY); host.setSessionPaused(true);
+            Game game = partyStoryGame(); game.level = nativeDormancyFloor();
+            com.interrupt.dungeoneer.entities.items.Gold gold = new com.interrupt.dungeoneer.entities.items.Gold(6);
+            gold.x = gold.y = 2.5f; gold.z = 0.5f;
+            game.level.entities.add(gold);
+            DirectConnectItemController items = new DirectConnectItemController(host);
+            items.prepare(game);
+            long id = host.getPhysicalItems().get(0).entityId;
+            gold.xa = 0.17f; gold.ya = -0.09f; gold.za = 0.21f;
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(game.level));
+            String origin = host.persistCampaign().getActiveAreaKey();
+            host.activateCampaignFloor("dungeon:2", "levels/second.bin", 123L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> game.level = level);
+            items.prepare(game); items.update(game);
+            assertEquals("Old floor drops cannot reappear through stale native bindings", 0,
+                    game.level.entities.size);
+            host.activateCampaignFloor(origin, GameApplication.OPEN_SOURCE_TEST_LEVEL, 999L, null,
+                    () -> { throw new AssertionError("Visited floor cannot rebuild"); }, level -> game.level = level);
+            Item nativeDrop = (Item)game.level.entities.first();
+            items.prepare(game); items.update(game);
+            assertEquals("One native drop, one durable physical identity", 1, game.level.entities.size);
+            assertEquals(1, host.getPhysicalItems().size());
+            assertEquals(id, host.getPhysicalItems().get(0).entityId);
+            assertTrue(game.level.entities.first() == nativeDrop);
+            assertEquals(0.17f, nativeDrop.xa, 0f);
+            assertEquals(-0.09f, nativeDrop.ya, 0f);
+            assertEquals(0.21f, nativeDrop.za, 0f);
+        }
+        finally { client.close(); host.close(); Game.instance = previous;
+            com.interrupt.managers.StringManager.localizedStrings = strings; }
+    }
+
+    @Test public void nativeColdResumeUsesChangedSavedTerrainInsteadOfPristineDefinition() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("saved-terrain"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        CampaignSave base = save(compatibility(), roster);
+        Level played = new Level(32, 32), pristine = new Level(32, 32);
+        for(int i = 0; i < played.tiles.length; i++) {
+            played.tiles[i] = com.interrupt.dungeoneer.tiles.Tile.EmptyTile();
+            played.tiles[i].floorHeight = 0f;
+            pristine.tiles[i] = com.interrupt.dungeoneer.tiles.Tile.EmptyTile();
+            pristine.tiles[i].floorHeight = 2f;
+            pristine.tiles[i].ceilHeight = 4f;
+        }
+        store.campaignSaves().save(new CampaignSave(base.getCompatibility(), base.getCampaignId(),
+                base.getCapacity(), base.getStartingLives(), base.getOutcome(), base.getFloorId(),
+                base.getFloorSeed(), base.getFloorFingerprint(), base.getNativeWorldGeneration(),
+                base.getSlots(), base.getParticipants(), base.getPhysicalItems(), base.getCombat(),
+                base.getDoors(), base.getBreakables(), base.getActorEffects(), base.getMonsterSpawns(),
+                base.getConsumedMonsterSpawners(),
+                com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(played)));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store,
+                new com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld(pristine));
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            CampaignSave saved = host.persistCampaign();
+            assertEquals(16.5f, saved.getParticipant(1).getMovement().getX(), 0f);
+            assertEquals(0.5f, saved.getParticipant(1).getMovement().getZ(), 0f);
+            assertTrue(saved.hasNativeFloor());
+        }
+        finally { host.close(); }
+    }
+
+    @Test public void nativeParticipantStatusFollowsBodyWithoutRestartOnFloorSwap() throws Exception {
+        Game previous = Game.instance;
+        HashMap<String, com.interrupt.dungeoneer.game.LocalizedString> strings =
+                com.interrupt.managers.StringManager.localizedStrings;
+        com.interrupt.managers.StringManager.localizedStrings = new HashMap<>();
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("participant-status-travel"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        store.campaignSaves().save(save(compatibility(), roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController combat =
+                new com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController(host, false);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            Game game = partyStoryGame(); game.level = nativeDormancyFloor();
+            String actor = "participant:campaign-slot-1";
+            host.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(actor, 1L, game.player));
+            combat.prepare(game);
+            com.interrupt.dungeoneer.statuseffects.PoisonEffect poison =
+                    new com.interrupt.dungeoneer.statuseffects.PoisonEffect(500, 60, 1, false);
+            poison.showParticleEffect = false;
+            game.player.statusEffects.add(poison);
+            poison.tick(game.player, 59f);
+            host.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(actor, 1L, game.player));
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(game.level));
+            host.activateCampaignFloor("dungeon:2", "levels/second.bin", 123L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> game.level = level);
+            combat.prepare(game);
+            assertTrue("Carried native body keeps private status timer and identity",
+                    game.player.statusEffects.first() == poison);
+            assertEquals(441f, poison.timer, 0f);
+        }
+        finally { combat.dispose(); host.close(); Game.instance = previous;
+            com.interrupt.managers.StringManager.localizedStrings = strings; }
+    }
+
+    @Test public void floorGenerationRemovesDormantDropsAndQueuedCuesOnConnectedObserver() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("observer-floor"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        store.campaignSaves().save(save(compatibility(), roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+        tokens.save("friends", roster.getSlot(2).getReconnectToken());
+        DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
+                identity('2'), roster.getSlot(2).getPresentation(), 2, tokens, compatibility());
+        try {
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            host.startSession(); awaitPhase(client, DirectConnectPhase.READY); host.setSessionPaused(true);
+            final Level[] active = { nativeDormancyFloor() };
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
+            PhysicalItemState dropped = host.getItemWorld().spawn("dormant-drop", null, 2f, 2f, 0f);
+            host.publishPhysicalItems();
+            awaitCondition(() -> client.getPhysicalItems().size() == 2);
+            host.publishTriggerSound(1001L);
+            long generation = host.getNativeWorldGeneration();
+            host.activateCampaignFloor("dungeon:2", "levels/second.bin", 123L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> active[0] = level);
+            awaitCondition(() -> client.getNativeWorldGeneration() > generation);
+            awaitCondition(() -> client.getCombatSnapshot() != null
+                    && client.getCombatSnapshot().getSequence() >= host.getCombatSnapshot().getSequence());
+            assertFalse("Destination receives reliable movement while paused", client.getMovementSnapshots().isEmpty());
+            for(com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot snapshot : client.getMovementSnapshots())
+                for(MovementEntityState body : snapshot.getEntities())
+                    assertTrue("Old-floor coordinates cannot remain in interpolation history", body.getX() < 4f);
+            assertEquals("Carried inventory follows Slot; dormant world drops leave observer", 1,
+                    client.getPhysicalItems().size());
+            assertEquals(8L, client.getPhysicalItems().get(0).entityId);
+            assertTrue(client.drainTriggerPresentations().isEmpty());
+            assertTrue(client.getDoorSnapshots().isEmpty());
+            assertTrue(client.getBreakableSnapshots().isEmpty());
+            assertTrue(host.isSessionPaused());
+            assertTrue(host.getItemWorld().get(dropped.entityId) == null);
+        }
+        finally { client.close(); host.close(); }
+    }
+
+    private void awaitCondition(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(!condition.getAsBoolean() && System.currentTimeMillis() < deadline) Thread.sleep(5L);
+        assertTrue("Timed out waiting for authoritative state", condition.getAsBoolean());
+    }
+
+    @Test public void exhaustedDropTimerFreezesWhileAnotherFloorRunsAndSurvivesColdSave() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("frozen-drop-timer"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        CampaignSave base = save(compatibility(), roster);
+        PhysicalItemState drop = new PhysicalItemState(19L, 5L, "timed-scatter", null,
+                2f, 2f, 0f, new ItemProperties(2, 1, "", "", 1));
+        List<PhysicalItemState> items = new ArrayList<>(base.getPhysicalItems()); items.add(drop);
+        CampaignSave initial = new CampaignSave(base.getCompatibility(), base.getCampaignId(),
+                base.getCapacity(), base.getStartingLives(), base.getOutcome(), base.getFloorId(),
+                base.getFloorSeed(), base.getFloorFingerprint(), base.getNativeWorldGeneration(),
+                base.getSlots(), base.getParticipants(), items, base.getCombat(), base.getDoors(),
+                base.getBreakables(), base.getActorEffects());
+        store.campaignSaves().save(initial.withFloorHistory(base.getFloorId(), Collections.emptyList(),
+                Collections.singletonMap(19L, 120L)));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            final Level[] active = { nativeDormancyFloor() };
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
+            long remaining = host.persistCampaign().getDropTimers().get(19L);
+            String origin = host.persistCampaign().getActiveAreaKey();
+            host.activateCampaignFloor("dungeon:2", "levels/second.bin", 123L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> active[0] = level);
+            long startingTick = host.getCombatSnapshot().getHostTick();
+            host.setSessionPaused(false);
+            awaitCondition(() -> host.getCombatSnapshot().getHostTick() >= startingTick + 150L);
+            host.setSessionPaused(true);
+            CampaignSave checkpoint = host.persistCampaign();
+            assertEquals(remaining, checkpoint.getDormantFloors().get(0).getDropTimers().get(19L).longValue());
+            assertFalse(checkpoint.getDormantFloors().get(0).getWorldItems().get(0).consumed);
+            assertEquals(remaining, store.campaignSaves().load("friends", compatibility())
+                    .getDormantFloors().get(0).getDropTimers().get(19L).longValue());
+            host.activateCampaignFloor(origin, base.getFloorId(), 999L, null,
+                    () -> { throw new AssertionError("Visited floor must restore"); }, level -> active[0] = level);
+            assertEquals(remaining, host.persistCampaign().getDropTimers().get(19L).longValue());
+            assertFalse(host.getItemWorld().get(19L).consumed);
+        }
+        finally { host.close(); }
+    }
+
+    private static Level nativeDormancyFloor() {
+        Level floor = new Level(4, 4);
+        for(int index = 0; index < floor.tiles.length; index++)
+            floor.tiles[index] = com.interrupt.dungeoneer.tiles.Tile.EmptyTile();
+        return floor;
+    }
+
+    @Test public void dormantItemIdentityCannotWrapOnColdResume() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("item-id-exhaustion"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        CampaignSave base = save(compatibility(), roster);
+        com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState dormant =
+                new com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState("dungeon:old", "levels/old.bin",
+                        321L, null, com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(nativeDormancyFloor()),
+                        Collections.singletonList(new PhysicalItemState(Long.MAX_VALUE, 1L, "old-drop", null,
+                                1f, 1f, 0f, new ItemProperties(2, 1, "", "", 1))), null,
+                        Collections.emptyList(), Collections.emptyList(), Collections.emptyList(),
+                        Collections.emptyList(), Collections.emptyList(), Collections.emptyMap());
+        store.campaignSaves().save(base.withFloorHistory(base.getFloorId(),
+                Collections.singletonList(dormant), Collections.emptyMap()));
+        DirectConnectHost host = null;
+        try {
+            host = DirectConnectHost.start(0, compatibility(), roster, store);
+            org.junit.Assert.fail("Exhausted global identity cannot wrap and reuse existing drops");
+        }
+        catch(IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("identity space exhausted"));
+        }
+        finally { if(host != null) host.close(); }
+    }
+
+    @Test public void sourceCommandsQueuedAtPauseCannotMovePartyOnDestination() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(temporaryFolder.newFolder("floor-command-fence"),
+                new SecureRandom());
+        CampaignRoster roster = persistenceRoster(store);
+        store.campaignSaves().save(save(compatibility(), roster));
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        try {
+            host.startSession(); host.setSessionPaused(true);
+            final Level[] active = { nativeDormancyFloor() };
+            host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
+            java.lang.reflect.Field field = DirectConnectHost.class.getDeclaredField("movementSession");
+            field.setAccessible(true);
+            com.interrupt.dungeoneer.multiplayer.host.AuthoritativeHostSession commands =
+                    (com.interrupt.dungeoneer.multiplayer.host.AuthoritativeHostSession)field.get(host);
+            long priorInput = host.persistCampaign().getParticipant(1).getMovement().getLastProcessedInputTick();
+            // Represents input accepted immediately before Party pause, still waiting for next tick.
+            commands.submit(new com.interrupt.dungeoneer.multiplayer.movement.MovementInputCommand(
+                    new ParticipantId("campaign-slot-1"),
+                    new com.interrupt.dungeoneer.multiplayer.movement.MovementInputFrame(
+                            priorInput + 1L, 1f, 0f, 0f, false)));
+            host.activateCampaignFloor("dungeon:2", "levels/second.bin", 123L, null,
+                    DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> active[0] = level);
+            long start = commands.getHostTick();
+            host.setSessionPaused(false);
+            awaitCondition(() -> commands.getHostTick() >= start + 12L);
+            host.setSessionPaused(true);
+            assertEquals("Prior-floor command cannot run on destination", priorInput,
+                    host.persistCampaign().getParticipant(1).getMovement().getLastProcessedInputTick());
+        }
+        finally { host.close(); }
+    }
+
     @Test public void coldResumeRetainsUnspentPartyKeysWithHostSubset() throws Exception {
         File root = temporaryFolder.newFolder("party-keys");
         CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());

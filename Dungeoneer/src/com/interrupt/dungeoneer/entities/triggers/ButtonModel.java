@@ -85,7 +85,9 @@ public class ButtonModel extends Model {
 	private float animationTime = 0;
 	private boolean animating = false;
 	private transient ParticipantContext animatingParticipant;
+    private com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant pendingAnimationParticipant;
 	private transient ParticipantContext triggeringParticipant;
+    private com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant pendingTriggerParticipant;
 	private transient ParticipantContext propagatedParticipant;
 	
 	public ButtonModel() { meshFile = "meshes/obelisk.obj"; isSolid = true; }
@@ -100,6 +102,9 @@ public class ButtonModel extends Model {
 	
 	@Override
 	public void tick(Level level, float delta) {
+        getTriggeringParticipantContext();
+        if(animatingParticipant == null && pendingAnimationParticipant != null)
+            animatingParticipant = pendingAnimationParticipant.restore();
 		
 		if(animating) {
 			animationTime += delta;
@@ -109,6 +114,7 @@ public class ButtonModel extends Model {
 				animationTime = triggerAnimationTime;
 				fire(animatingParticipant, null);
 				animatingParticipant = null;
+                pendingAnimationParticipant = null;
 			}
 		}
 		
@@ -131,6 +137,7 @@ public class ButtonModel extends Model {
 			if (triggerTime<=0){
 				doTriggerEvent(triggerValue); // fire!
 				triggeringParticipant = null;
+                pendingTriggerParticipant = null;
 				if (triggerResets){
 					triggerStatus=TriggerStatus.RESETTING;
 					triggerTime=triggerResetTime;
@@ -152,6 +159,7 @@ public class ButtonModel extends Model {
             animating = true;
             animationTime = 0;
             animatingParticipant = participant;
+            pendingAnimationParticipant = com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant.capture(animatingParticipant);
         }
     }
 
@@ -161,6 +169,7 @@ public class ButtonModel extends Model {
 			animating = true;
 			animationTime = 0;
 			animatingParticipant = localParticipant(p);
+            pendingAnimationParticipant = com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant.capture(animatingParticipant);
 		}
 	}
 	
@@ -174,6 +183,7 @@ public class ButtonModel extends Model {
 			triggerStatus=TriggerStatus.TRIGGERED;
 			triggerTime=triggerDelay;
 			triggeringParticipant = participant;
+            pendingTriggerParticipant = com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant.capture(participant);
 			
 			// update the value if one was given
 			if(value != null && !value.equals(""))
@@ -226,6 +236,8 @@ public class ButtonModel extends Model {
 	}
 
 	protected ParticipantContext getTriggeringParticipantContext() {
+        if(triggeringParticipant == null && pendingTriggerParticipant != null)
+            triggeringParticipant = pendingTriggerParticipant.restore();
 		return triggeringParticipant;
 	}
 

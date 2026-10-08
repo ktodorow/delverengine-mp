@@ -72,6 +72,8 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
     private final Map<Monster, String> monsterIds = new IdentityHashMap<Monster, String>();
     private final Set<String> boundMonsterIds = new LinkedHashSet<String>();
     private final Set<String> restoredAuthoritativeActors = new LinkedHashSet<String>();
+    private final Map<String, com.interrupt.dungeoneer.entities.Actor> restoredParticipantEffects =
+            new LinkedHashMap<>();
     /** Floor whose initial hostile Monsters have been keyed; later arrivals get Host-assigned ids. */
     private Level monstersAttachedLevel;
     private int monsterIndexCounter;
@@ -319,6 +321,7 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         if(Game.instance != null) Game.instance.SetGameTimeScale(1f);
         detachFromPlayer();
         detachFromLevel();
+        restoredParticipantEffects.clear();
     }
 
     public Monster getMonster() {
@@ -1706,15 +1709,23 @@ public final class DirectConnectCombatController implements Player.WeaponAttackL
         if(nativeAuthority == null) return;
         for(ActorEffectsSnapshot effects : peer.getActorEffects()) {
             String key = "effects:" + effects.monsterId;
-            if(restoredAuthoritativeActors.contains(key)) continue;
             com.interrupt.dungeoneer.entities.Actor actor = monsters.get(effects.monsterId);
             if(actor == null) {
                 actor = effects.monsterId.equals(localCombatantId())
                         ? attachedPlayer : remoteAvatar(effects.monsterId);
             }
             if(actor == null) continue;
+            if(actor instanceof Monster && restoredAuthoritativeActors.contains(key)
+                    || !(actor instanceof Monster) && restoredParticipantEffects.get(key) == actor) continue;
+            // Native floor checkpoint keeps private status cadence and callback state.
+            // Detached effects describe observers; they must not restart native monsters.
+            if(actor instanceof Monster && attachedLevel.restoredCampaignFloor) {
+                restoredAuthoritativeActors.add(key);
+                continue;
+            }
             effects.restoreAuthoritative(actor);
-            restoredAuthoritativeActors.add(key);
+            if(actor instanceof Monster) restoredAuthoritativeActors.add(key);
+            else restoredParticipantEffects.put(key, actor);
         }
     }
 

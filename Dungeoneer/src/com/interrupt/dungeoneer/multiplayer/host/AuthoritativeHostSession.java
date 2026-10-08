@@ -26,19 +26,32 @@ public final class AuthoritativeHostSession implements HostSessionCommandGateway
     }
 
     @Override
-    public synchronized void submit(HostSessionCommand command) {
+    public void submit(HostSessionCommand command) {
+        submit(command, () -> true);
+    }
+
+    public synchronized void submit(HostSessionCommand command,
+            java.util.function.BooleanSupplier maySubmit) {
         if(command == null) throw new IllegalArgumentException("Host command cannot be null.");
         if(command.getParticipantId() == null) {
             throw new IllegalArgumentException("Host command Participant identity cannot be null.");
         }
-        pendingCommands.add(command);
+        if(maySubmit == null) throw new IllegalArgumentException("Command gate cannot be null.");
+        if(maySubmit.getAsBoolean()) pendingCommands.add(command);
     }
 
     public void advanceOneTick() {
+        advanceOneTick(() -> true);
+    }
+
+    /** Recheck pause while holding session monitor, before touching any simulation state. */
+    public boolean advanceOneTick(java.util.function.BooleanSupplier mayAdvance) {
+        if(mayAdvance == null) throw new IllegalArgumentException("Tick gate cannot be null.");
         final long tick;
         final HostSessionSnapshot snapshot;
         final TickOutput output;
         synchronized(this) {
+            if(!mayAdvance.getAsBoolean()) return false;
             hostTick++;
             tick = hostTick;
             output = new TickOutput(tick);
@@ -55,6 +68,13 @@ public final class AuthoritativeHostSession implements HostSessionCommandGateway
         }
         output.publishPending();
         transport.publishSnapshot(tick, snapshot);
+        return true;
+    }
+
+    /** Quiesces prior simulation and discards commands accepted for its floor. */
+    public synchronized long discardPendingCommands() {
+        pendingCommands.clear();
+        return hostTick;
     }
 
     public synchronized long getHostTick() {

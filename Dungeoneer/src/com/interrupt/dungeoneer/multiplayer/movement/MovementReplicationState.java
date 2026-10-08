@@ -51,9 +51,24 @@ public final class MovementReplicationState {
     }
 
     public synchronized boolean applySnapshot(MovementSnapshot snapshot) {
+        return applySnapshot(snapshot, false);
+    }
+
+    /** Preserve Slot lifecycle and stale-packet fences while dropping prior-floor interpolation. */
+    public synchronized void beginFloor() {
+        snapshots.clear();
+    }
+
+    public synchronized boolean applyFloorSnapshot(MovementSnapshot snapshot) {
+        return applySnapshot(snapshot, true);
+    }
+
+    private boolean applySnapshot(MovementSnapshot snapshot, boolean floorBaseline) {
         if(snapshot == null) throw new IllegalArgumentException("Movement snapshot cannot be null.");
         if(snapshot.getSequence() <= latestSnapshotSequence
-                || snapshot.getHostTick() <= latestSnapshotHostTick) return false;
+                || snapshot.getHostTick() < latestSnapshotHostTick
+                || !floorBaseline && snapshot.getHostTick() == latestSnapshotHostTick) return false;
+        if(floorBaseline) snapshots.clear();
         List<MovementEntityState> accepted = new ArrayList<MovementEntityState>();
         for(MovementEntityState state : snapshot.getEntities()) {
             MovementEntityDescriptor descriptor = entities.get(state.getEntityId());

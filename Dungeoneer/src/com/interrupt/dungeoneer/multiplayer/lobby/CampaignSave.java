@@ -31,8 +31,9 @@ public final class CampaignSave {
      * 3: Host Active Floor checkpoint in Delver's own level format (absent in format 2).
      * 4: Party Progression and Party Keys.
      * 5: personal Slot knowledge and shared potion appearance/effect mapping.
+     * 6: logical Active area identity, Dormant Floors and frozen death-drop timers.
      */
-    public static final int FORMAT = 5;
+    public static final int FORMAT = 6;
     public static final int MAX_CONSUMED_MONSTER_SPAWNERS = 4096;
     public static final int MAX_SPAWNER_KEY_BYTES = 512;
 
@@ -103,6 +104,9 @@ public final class CampaignSave {
     private final List<NativeMonsterSpawn> monsterSpawns;
     private final List<String> consumedMonsterSpawners;
     private final byte[] nativeFloor;
+    private final String activeAreaKey;
+    private final List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> dormantFloors;
+    private final java.util.Map<Long, Long> dropTimers;
     private final com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping potionMapping;
     private final int partyKeys;
     private final long keyRevision;
@@ -199,6 +203,27 @@ public final class CampaignSave {
             int partyKeys, long keyRevision,
             com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression,
             com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping potionMapping) {
+        this(compatibility, campaignId, capacity, startingLives, outcome, floorId, floorSeed,
+                floorFingerprint, nativeWorldGeneration, slots, participants, physicalItems, combat,
+                doors, breakables, actorEffects, monsterSpawns, consumedMonsterSpawners, nativeFloor,
+                partyKeys, keyRevision, partyProgression, potionMapping, floorId,
+                Collections.<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState>emptyList(),
+                Collections.<Long, Long>emptyMap());
+    }
+
+    private CampaignSave(DirectConnectCompatibility compatibility, String campaignId,
+            int capacity, int startingLives, Outcome outcome, String floorId,
+            long floorSeed, SharedFloorFingerprint floorFingerprint,
+            long nativeWorldGeneration, List<CampaignSlot> slots,
+            List<ParticipantState> participants, List<PhysicalItemState> physicalItems,
+            CombatSnapshot combat, List<DoorSnapshot> doors, List<BreakableSnapshot> breakables,
+            List<ActorEffectsSnapshot> actorEffects, List<NativeMonsterSpawn> monsterSpawns,
+            List<String> consumedMonsterSpawners, byte[] nativeFloor,
+            int partyKeys, long keyRevision,
+            com.interrupt.dungeoneer.multiplayer.participant.PartyProgressionSnapshot partyProgression,
+            com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping potionMapping, String activeAreaKey,
+            List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> dormantFloors,
+            java.util.Map<Long, Long> dropTimers) {
         if(potionMapping == null) throw new IllegalArgumentException("Saved potion mapping is required.");
         if(partyProgression == null) throw new IllegalArgumentException("Saved Party Progression is required.");
         if(partyKeys < 0 || partyKeys > 1000000 || keyRevision < 0
@@ -331,6 +356,21 @@ public final class CampaignSave {
             }
         }
 
+        this.activeAreaKey = com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.requireAreaKey(activeAreaKey);
+        if(dormantFloors == null || dormantFloors.size()
+                > com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.MAX_DORMANT_FLOORS)
+            throw new IllegalArgumentException("Dormant Floor count is outside bounds.");
+        Set<String> areas = new HashSet<>();
+        areas.add(activeAreaKey);
+        Set<Long> physicalIds = new HashSet<>(itemIds);
+        for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor : dormantFloors) {
+            if(floor == null || !areas.add(floor.getAreaKey()))
+                throw new IllegalArgumentException("Active/Dormant area identity is duplicate.");
+            for(PhysicalItemState item : floor.getWorldItems()) if(!physicalIds.add(item.entityId))
+                throw new IllegalArgumentException("Physical item occupies more than one Campaign area.");
+        }
+        this.dormantFloors = immutable(dormantFloors);
+        this.dropTimers = com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.validateDropTimers(physicalItems, dropTimers);
         this.compatibility = compatibility;
         this.capacity = capacity;
         this.startingLives = startingLives;
@@ -356,6 +396,20 @@ public final class CampaignSave {
     }
 
     public com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping getPotionMapping() { return potionMapping; }
+
+    public CampaignSave withFloorHistory(String activeAreaKey,
+            List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> dormantFloors,
+            java.util.Map<Long, Long> dropTimers) {
+        return new CampaignSave(compatibility, campaignId, capacity, startingLives, outcome,
+                floorId, floorSeed, floorFingerprint, nativeWorldGeneration, slots, participants,
+                physicalItems, combat, doors, breakables, actorEffects, monsterSpawns,
+                consumedMonsterSpawners, nativeFloor, partyKeys, keyRevision, partyProgression,
+                potionMapping, activeAreaKey, dormantFloors, dropTimers);
+    }
+
+    public String getActiveAreaKey() { return activeAreaKey; }
+    public List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> getDormantFloors() { return dormantFloors; }
+    public java.util.Map<Long, Long> getDropTimers() { return dropTimers; }
 
     public DirectConnectCompatibility getCompatibility() { return compatibility; }
     public String getCampaignId() { return campaignId; }

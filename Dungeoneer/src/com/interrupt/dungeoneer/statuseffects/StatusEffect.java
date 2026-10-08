@@ -105,14 +105,16 @@ public class StatusEffect {
 		return null;
 	}
 
-    private transient long multiplayerInstanceId;
-    public transient float multiplayerElapsed;
-    private transient long multiplayerPulseCount;
+    // Native Campaign checkpoints retain presentation identity/phase during floor dormancy.
+    private long multiplayerInstanceId;
+    public float multiplayerElapsed;
+    private long multiplayerPulseCount;
     private static final java.util.concurrent.atomic.AtomicLong nextMultiplayerInstanceId =
             new java.util.concurrent.atomic.AtomicLong();
 
     public long getMultiplayerInstanceId() {
         if(multiplayerInstanceId == 0) multiplayerInstanceId = nextMultiplayerInstanceId.incrementAndGet();
+        else restoreMultiplayerCursor(multiplayerInstanceId, multiplayerElapsed, multiplayerPulseCount);
         return multiplayerInstanceId;
     }
 

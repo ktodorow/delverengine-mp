@@ -19,7 +19,7 @@ public class Fire extends AnimatedSprite {
     /** Replica of a Host world fire: no burn or spread, but it burns out on the local clock. */
     private transient boolean worldReplica;
     /** True for fires created while the floor runs (bomb spawns), never for floor-start fires. */
-    private transient boolean runtimeSpawned;
+    private boolean runtimeSpawned;
 
     public void setPresentationOnly() { presentationOnly = true; burnsOut = false; }
     public void advancePresentation(float hostElapsed) { presentationDelta += hostElapsed; }
@@ -94,7 +94,9 @@ public class Fire extends AnimatedSprite {
         super.init(level, source);
 
         if(source == Level.Source.SPAWNED) runtimeSpawned = true;
-        this.lifeTime += Game.rand.nextFloat() * this.randomLifeTime;
+        if(source != Level.Source.LEVEL_LOAD) {
+            this.lifeTime += Game.rand.nextFloat() * this.randomLifeTime;
+        }
         this.fireCollision.set(this.radius, this. radius, this.radius * 2);
     }
 

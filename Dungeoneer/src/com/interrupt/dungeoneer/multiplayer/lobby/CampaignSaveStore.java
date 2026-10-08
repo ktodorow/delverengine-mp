@@ -423,6 +423,12 @@ public final class CampaignSaveStore {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }
+        if(format == 5 && protocol <= 49
+                && compatibility.getBuildId().equals("mp-v108-prototype-late-admission-53")
+                && expected.getBuildId().equals("mp-v108-prototype-dormant-floors-54")) {
+            compatibility = new DirectConnectCompatibility(expected.getBuildId(),
+                    compatibility.getContentFormat(), compatibility.getContentSha256());
+        }
         String campaignId = input.readUTF();
         int capacity = input.readInt();
         int startingLives = input.readInt();
@@ -513,10 +519,19 @@ public final class CampaignSaveStore {
         com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping mapping = format >= 5
                 ? com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.readFrom(input)
                 : com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.fromItems(items);
-        return new CampaignSave(compatibility, campaignId, capacity, startingLives, outcome,
+        CampaignSave saved = new CampaignSave(compatibility, campaignId, capacity, startingLives, outcome,
                 floorId, floorSeed, fingerprint, nativeWorldGeneration, slots, participants,
                 items, combat, doors, breakables, actorEffects, spawns, spawners, nativeFloor,
                 partyKeys, keyRevision, progression, mapping);
+        if(format < 6) return saved;
+        String activeArea = input.readUTF();
+        java.util.Map<Long, Long> timers = readDropTimers(input);
+        int floorCount = boundedCount(input.readInt(), 0,
+                com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.MAX_DORMANT_FLOORS,
+                "Dormant Floor");
+        List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> dormant = new ArrayList<>();
+        for(int index = 0; index < floorCount; index++) dormant.add(readFloor(input));
+        return saved.withFloorHistory(activeArea, dormant, timers);
     }
 
     private void write(DataOutputStream output, CampaignSave campaign) throws IOException {
@@ -592,6 +607,86 @@ public final class CampaignSaveStore {
             participant.getPersonalKnowledge().writeTo(output);
         }
         campaign.getPotionMapping().writeTo(output);
+        output.writeUTF(campaign.getActiveAreaKey());
+        writeDropTimers(output, campaign.getDropTimers());
+        output.writeInt(campaign.getDormantFloors().size());
+        for(com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor : campaign.getDormantFloors())
+            writeFloor(output, floor);
+    }
+
+    private static java.util.Map<Long, Long> readDropTimers(DataInputStream in) throws IOException {
+        int count = boundedCount(in.readInt(), 0, MAX_ITEMS, "floor drop timer");
+        java.util.Map<Long, Long> timers = new java.util.LinkedHashMap<>();
+        for(int index = 0; index < count; index++) {
+            long id = in.readLong(), remaining = in.readLong();
+            if(timers.put(id, remaining) != null) throw new IllegalArgumentException("Duplicate floor drop timer.");
+        }
+        return timers;
+    }
+
+    private static void writeDropTimers(DataOutputStream out, java.util.Map<Long, Long> timers) throws IOException {
+        out.writeInt(timers.size());
+        for(java.util.Map.Entry<Long, Long> timer : timers.entrySet()) {
+            out.writeLong(timer.getKey()); out.writeLong(timer.getValue());
+        }
+    }
+
+    private com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState readFloor(DataInputStream in) throws IOException {
+        String areaKey = in.readUTF(), floorId = in.readUTF();
+        long seed = in.readLong();
+        SharedFloorFingerprint fingerprint = readFingerprint(in);
+        byte[] nativeFloor = new byte[boundedCount(in.readInt(), 1, NativeFloorSave.MAX_BYTES, "Dormant native byte")];
+        in.readFully(nativeFloor);
+        int count = boundedCount(in.readInt(), 0, MAX_ITEMS, "Dormant item");
+        List<PhysicalItemState> items = new ArrayList<>();
+        for(int index = 0; index < count; index++) items.add(readItem(in));
+        CombatSnapshot combat = in.readBoolean() ? readCombat(in) : null;
+        count = boundedCount(in.readInt(), 0, MAX_WORLD_OBJECTS, "Dormant door");
+        List<DoorSnapshot> doors = new ArrayList<>();
+        for(int index = 0; index < count; index++) doors.add(readDoor(in));
+        count = boundedCount(in.readInt(), 0, MAX_WORLD_OBJECTS, "Dormant breakable");
+        List<BreakableSnapshot> breakables = new ArrayList<>();
+        for(int index = 0; index < count; index++) breakables.add(readBreakable(in));
+        count = boundedCount(in.readInt(), 0, DirectConnectProtocol.MAX_MONSTERS, "Dormant effect actor");
+        List<ActorEffectsSnapshot> effects = new ArrayList<>();
+        for(int index = 0; index < count; index++) effects.add(readEffects(in));
+        count = boundedCount(in.readInt(), 0, CombatSnapshot.MAX_MONSTERS, "Dormant Monster spawn");
+        List<NativeMonsterSpawn> spawns = new ArrayList<>();
+        for(int index = 0; index < count; index++) spawns.add(new NativeMonsterSpawn(
+                in.readUTF(), in.readUTF(), in.readUTF(), in.readFloat(), in.readFloat(), in.readFloat(),
+                in.readInt(), in.readInt()));
+        count = boundedCount(in.readInt(), 0, CampaignSave.MAX_CONSUMED_MONSTER_SPAWNERS, "Dormant spawner");
+        List<String> spawners = new ArrayList<>();
+        for(int index = 0; index < count; index++) spawners.add(in.readUTF());
+        return new com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState(areaKey,
+                floorId, seed, fingerprint, nativeFloor, items, combat, doors, breakables, effects,
+                spawns, spawners, readDropTimers(in));
+    }
+
+    private void writeFloor(DataOutputStream out, com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState floor) throws IOException {
+        out.writeUTF(floor.getAreaKey()); out.writeUTF(floor.getFloorId()); out.writeLong(floor.getSeed());
+        writeFingerprint(out, floor.getFingerprint());
+        byte[] nativeFloor = floor.getNativeFloor();
+        out.writeInt(nativeFloor.length); out.write(nativeFloor);
+        out.writeInt(floor.getWorldItems().size());
+        for(PhysicalItemState item : floor.getWorldItems()) writeItem(out, item);
+        out.writeBoolean(floor.getCombat() != null);
+        if(floor.getCombat() != null) writeCombat(out, floor.getCombat());
+        out.writeInt(floor.getDoors().size());
+        for(DoorSnapshot door : floor.getDoors()) writeDoor(out, door);
+        out.writeInt(floor.getBreakables().size());
+        for(BreakableSnapshot object : floor.getBreakables()) writeBreakable(out, object);
+        out.writeInt(floor.getActorEffects().size());
+        for(ActorEffectsSnapshot effect : floor.getActorEffects()) writeEffects(out, effect);
+        out.writeInt(floor.getMonsterSpawns().size());
+        for(NativeMonsterSpawn spawn : floor.getMonsterSpawns()) {
+            out.writeUTF(spawn.monsterId); out.writeUTF(spawn.theme); out.writeUTF(spawn.name);
+            out.writeFloat(spawn.x); out.writeFloat(spawn.y); out.writeFloat(spawn.z);
+            out.writeInt(spawn.health); out.writeInt(spawn.maximumHealth);
+        }
+        out.writeInt(floor.getConsumedMonsterSpawners().size());
+        for(String spawner : floor.getConsumedMonsterSpawners()) out.writeUTF(spawner);
+        writeDropTimers(out, floor.getDropTimers());
     }
 
     private static void writeParty(DataOutputStream out, PartyMemberStatus value) throws IOException {

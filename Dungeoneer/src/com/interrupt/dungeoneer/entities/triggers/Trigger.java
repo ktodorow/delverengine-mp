@@ -93,6 +93,7 @@ public class Trigger extends Entity {
 	protected TriggerStatus triggerStatus=TriggerStatus.WAITING;
 	private float triggerTime = 0;
 	private transient ParticipantContext triggeringParticipant;
+    private com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant pendingTriggerParticipant;
 	private transient ParticipantContext propagatedParticipant;
 	
 	public Trigger() {
@@ -124,6 +125,7 @@ public class Trigger extends Entity {
 	
 	@Override
 	public void tick(Level level, float delta) {
+        getTriggeringParticipantContext();
         if(level != null && level.nativeTriggerReplica) return;
 		
 		// check for touch events
@@ -160,6 +162,7 @@ public class Trigger extends Entity {
 			if (triggerTime<=0){
 				doTriggerEvent(triggerValue); // fire!
 				triggeringParticipant = null;
+                pendingTriggerParticipant = null;
 				if (triggerResets){
 					triggerStatus=TriggerStatus.RESETTING;
 					triggerTime=triggerResetTime;
@@ -226,6 +229,7 @@ public class Trigger extends Entity {
 			triggerStatus=TriggerStatus.TRIGGERED;
 			triggerTime=triggerDelay;
 			triggeringParticipant = participant;
+            pendingTriggerParticipant = com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant.capture(participant);
 			
 			// update the value if one was given
 			if(value != null && !value.equals(""))
@@ -264,12 +268,14 @@ public class Trigger extends Entity {
 	}
 
 	protected ParticipantContext getTriggeringParticipantContext() {
+        if(triggeringParticipant == null && pendingTriggerParticipant != null)
+            triggeringParticipant = pendingTriggerParticipant.restore();
 		return triggeringParticipant;
 	}
 
 	/** This peer's own player set the chain off, or no Participant did (a Monster, a timer). */
 	protected boolean activatedHere() {
-		ParticipantContext participant = triggeringParticipant;
+		ParticipantContext participant = getTriggeringParticipantContext();
 		return participant == null || LocalPlayerCompatibilityAdapter.LOCAL_PARTICIPANT_ID
 				.equals(participant.getParticipantId());
 	}
@@ -283,7 +289,7 @@ public class Trigger extends Entity {
 			presentToActivator(value, true);
 			return;
 		}
-		ParticipantContext participant = triggeringParticipant;
+		ParticipantContext participant = getTriggeringParticipantContext();
 		if(participant.isPresentedByActivator()) return;
 		Level level = Game.instance == null ? null : Game.instance.level;
 		if(level != null && level.nativeTriggerPresentationListener != null) {

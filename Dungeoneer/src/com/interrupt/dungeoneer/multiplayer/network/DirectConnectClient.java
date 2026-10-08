@@ -473,6 +473,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(message instanceof MovementSnapshotMessage) {
             MovementSnapshotMessage movement = (MovementSnapshotMessage)message;
             if(!sessionId.equals(movement.sessionId)) return;
+            if(floorMovementBaselinePending) return;
             if(movementReplication.applySnapshot(movement.snapshot)) {
                 acknowledgeMovementInputs(movement.snapshot);
             }
@@ -1049,6 +1050,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
         if(!sessionId.equals(message.sessionId)) { fail("Native world belongs to another session."); return; }
         if(message.generation <= nativeWorldGeneration) return;
         nativeWorldGeneration = message.generation;
+        floorMovementBaselinePending = true;
+        movementReplication.beginFloor();
+        physicalItems.entrySet().removeIf(entry -> entry.getValue().owner == null);
+        combatSnapshot = null;
+        combatPresentations.clear();
+        pendingMovementInputs.clear();
+        itemActionResults.clear(); doorFeedback.clear();
         if(admissionPending) {
             pendingAdmissionFence = null;
             pendingAdmissionCheckpoint = 0L;
@@ -1069,6 +1077,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
     }
 
     private long lastNativeAnimationCueSequence;
+    private boolean floorMovementBaselinePending;
     private final java.util.ArrayDeque<NativeAnimationCue> nativeAnimationCues = new java.util.ArrayDeque<>();
     @Override public synchronized List<NativeAnimationCue> drainNativeAnimationCues() {
         List<NativeAnimationCue> result = new ArrayList<>(nativeAnimationCues);
@@ -1501,7 +1510,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof MovementSnapshotMessage && sessionId != null && campaignSlot != 0) {
                 MovementSnapshotMessage movement = (MovementSnapshotMessage)message;
                 if(!sessionId.equals(movement.sessionId)) { fail("Movement belongs to another session."); return; }
-                if(movementReplication.applySnapshot(movement.snapshot)) acknowledgeMovementInputs(movement.snapshot);
+                boolean applied = floorMovementBaselinePending
+                        ? movementReplication.applyFloorSnapshot(movement.snapshot)
+                        : movementReplication.applySnapshot(movement.snapshot);
+                if(applied) {
+                    floorMovementBaselinePending = false;
+                    acknowledgeMovementInputs(movement.snapshot);
+                }
             }
             else if(message instanceof SessionReady && sessionId != null
                     && campaignSlot != 0) {

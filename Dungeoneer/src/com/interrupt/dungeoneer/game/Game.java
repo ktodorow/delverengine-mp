@@ -647,6 +647,7 @@ public class Game {
 
 	public void changeLevel(Stairs stair)
 	{
+		if(GameApplication.isDirectConnectSession()) return;
 
 		if(stair.direction == StairDirection.up && player.getCurrentTravelKey() != null) {
 			doLevelExit(null);
@@ -672,6 +673,7 @@ public class Game {
 	}
 
 	public void warpToLevel(String newTravelPathId, TriggeredWarp warp) {
+		if(GameApplication.isDirectConnectSession()) return;
 		Gdx.app.log("DelverLifeCycle", "Warping to: " + warp.levelToLoad);
 
 		// save game on change
@@ -780,6 +782,7 @@ public class Game {
 	}
 
 	public void doLevelExit(TriggeredWarp warp) {
+		if(GameApplication.isDirectConnectSession()) return;
 		Gdx.app.log("DelverLifeCycle", "Exiting level");
 
 		if(!Game.inEditor)
@@ -853,6 +856,8 @@ public class Game {
 	}
 
 	public void doLevelChange(Stairs stair) {
+		// Party floor activation owns multiplayer travel; native local travel splits worlds.
+		if(GameApplication.isDirectConnectSession()) return;
 		if(stair == null) return;
 
 		Gdx.app.log("DelverLifeCycle", "Changing level: " + stair.direction);

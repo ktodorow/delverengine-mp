@@ -165,7 +165,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     private long breakableRevision;
     private Game game;
     private Level objectLevel;
-    private final com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles movementObstacles =
+    private com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles movementObstacles =
             new com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles();
     private long objectGeneration = -1L;
     private ParticipantId localId;
@@ -181,6 +181,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     public void prepare(Game current) {
         if(current == null || current.player == null || current.level == null) return;
         if(game == null) attach(current);
+        else if(objectLevel != current.level) attachNextFloor(current);
         if(host == null && current.progression != null) peer.getPartyProgression().applyTo(current.progression);
         if(objectLevel != current.level) attachWorldObjects();
         long generation = peer.getNativeWorldGeneration();
@@ -412,6 +413,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 for(Entity entity : entities()) {
                     if(entity instanceof Item) entity.isActive = false;
                 }
+                bindRestoredFloorItems();
             }
             else {
                 // Register worn starters first so they do not occupy backpack capacity.
@@ -485,6 +487,61 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 Long objectId = objectIds.get(trigger);
                 if(objectId != null) host.deliverTriggerPresentation(activator, objectId, value);
             };
+        }
+    }
+
+    /** Drops belong to their native floor; only carried bindings follow Campaign Slots. */
+    private void attachNextFloor(Game current) {
+        if(objectLevel != null) {
+            objectLevel.nativeTriggerSoundListener = null;
+            objectLevel.nativeSecretDiscoveryListener = null;
+            objectLevel.nativeTriggerPresentationListener = null;
+        }
+        Map<Long, PhysicalItemState> active = new HashMap<>();
+        for(PhysicalItemState state : peer.getPhysicalItems()) active.put(state.entityId, state);
+        for(java.util.Iterator<Map.Entry<Long, Item>> iterator = nativeItems.entrySet().iterator(); iterator.hasNext();) {
+            Map.Entry<Long, Item> binding = iterator.next();
+            PhysicalItemState state = active.get(binding.getKey());
+            if(state == null || state.owner == null || state.consumed) {
+                itemIds.remove(binding.getValue());
+                iterator.remove();
+            }
+        }
+        applied.clear(); lastPickupAttempts.clear(); transientItemIds.clear();
+        pendingPlacements.clear(); pendingConsumption.clear(); pendingConsumptionAim.clear();
+        pendingGoldPickups.clear(); restoredNativeMetadata.clear();
+        publishedDoors.clear(); appliedDoors.clear(); publishedMovers.clear(); appliedMovers.clear();
+        publishedBreakables.clear(); appliedBreakables.clear();
+        game = current;
+        game.player.setItemAuthorityListener(this);
+        movementObstacles = new com.interrupt.dungeoneer.multiplayer.movement.NativeMovementObstacles();
+        for(Entity entity : entities()) if(entity instanceof Item) remember((Item)entity);
+        bindRestoredFloorItems();
+        attachWorldObjects();
+    }
+
+    private void bindRestoredFloorItems() {
+        if(host == null || !game.level.restoredCampaignFloor) return;
+        for(Entity entity : entities()) {
+            if(!(entity instanceof Item)) continue;
+            Item item = (Item)entity;
+            String identity = item.multiplayerIdentity;
+            Long id = null;
+            if(identity != null && identity.startsWith("item:")) {
+                try { id = Long.valueOf(identity.substring(5)); }
+                catch(NumberFormatException invalid) { /* Older checkpoints rebuild from DTOs. */ }
+            }
+            PhysicalItemState state = id == null ? null : host.getItemWorld().get(id);
+            if(state == null || state.owner != null || state.consumed) {
+                item.isActive = false;
+                continue;
+            }
+            item.isActive = true;
+            nativeItems.put(id, item); itemIds.put(item, id);
+            // The native checkpoint is current; retain velocity, fuse and private timers.
+            applied.put(id, state.revision);
+            restoreNativeMetadata(state, item);
+            restoredNativeMetadata.add(id);
         }
     }
 
@@ -743,6 +800,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
     private void register(Item item, ParticipantId owner) {
         String key = remember(item);
         PhysicalItemState state = host.getItemWorld().spawn(key, owner, item.x, item.y, item.z, properties(item));
+        item.multiplayerIdentity = "item:" + state.entityId;
         nativeItems.put(state.entityId, item);
         itemIds.put(item, state.entityId);
         if(item instanceof Key) host.getItemWorld().registerKey(state.entityId);
@@ -916,6 +974,7 @@ public final class DirectConnectItemController implements Player.ItemAuthorityLi
                 item = ItemManager.Copy(template.getClass(), template);
                 nativeItems.put(state.entityId, item);
                 itemIds.put(item, state.entityId);
+                item.multiplayerIdentity = "item:" + state.entityId;
             }
             if(host != null && host.isResumedCampaign()
                     && restoredNativeMetadata.add(state.entityId)) {

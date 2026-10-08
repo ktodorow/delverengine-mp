@@ -96,6 +96,28 @@ public class GameManagerEscapeTest {
         assertFalse(game.loadLevel(0, null));
     }
 
+    @Test public void directConnectNativeTravelCannotCreateSeparateParticipantFloors() throws Exception {
+        DirectConnectPeer client = (DirectConnectPeer)Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] { DirectConnectPeer.class },
+                (proxy, method, arguments) -> null);
+        GameApplication.instance = application(client);
+        Game game = new ObjenesisStd().newInstance(Game.class);
+        game.player = new com.interrupt.dungeoneer.entities.Player();
+        game.level = new com.interrupt.dungeoneer.game.Level(4, 4);
+        Field levelNumber = Game.class.getDeclaredField("levelNum");
+        levelNumber.setAccessible(true); levelNumber.setInt(game, 1);
+        com.interrupt.dungeoneer.game.Level active = game.level;
+        com.interrupt.dungeoneer.entities.Stairs down = new com.interrupt.dungeoneer.entities.Stairs();
+        down.direction = com.interrupt.dungeoneer.entities.Stairs.StairDirection.down;
+        game.changeLevel(down);
+        game.doLevelChange(down);
+        game.warpToLevel("side-area", new ObjenesisStd().newInstance(com.interrupt.dungeoneer.entities.triggers.TriggeredWarp.class));
+        game.doLevelExit(null);
+        assertSame("Only Party activation boundary can install destination", active, game.level);
+        org.junit.Assert.assertEquals(1, levelNumber.getInt(game));
+        org.junit.Assert.assertNull(game.player.getCurrentTravelKey());
+    }
+
     private static GameApplication application(DirectConnectPeer peer) throws Exception {
         GameApplication application = new ObjenesisStd().newInstance(GameApplication.class);
         Field field = GameApplication.class.getDeclaredField("directConnectPeer");

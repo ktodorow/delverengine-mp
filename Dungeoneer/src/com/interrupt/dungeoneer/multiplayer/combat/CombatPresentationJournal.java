@@ -25,6 +25,9 @@ public final class CombatPresentationJournal {
         return true;
     }
 
+    /** Floor cue cleanup retains sequence fence against duplicate delivery. */
+    public synchronized void clear() { events.clear(); }
+
     public synchronized List<CombatPresentationEvent> getEvents() {
         return Collections.unmodifiableList(
                 new ArrayList<CombatPresentationEvent>(events));

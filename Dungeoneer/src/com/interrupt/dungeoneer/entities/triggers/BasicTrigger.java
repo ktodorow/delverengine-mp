@@ -72,6 +72,7 @@ public class BasicTrigger extends Entity {
     protected Trigger.TriggerStatus triggerStatus= Trigger.TriggerStatus.WAITING;
     private float triggerTime = 0;
     private transient ParticipantContext triggeringParticipant;
+    private com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant pendingTriggerParticipant;
     private transient ParticipantContext propagatedParticipant;
 
     public BasicTrigger() {
@@ -92,6 +93,7 @@ public class BasicTrigger extends Entity {
 
     @Override
     public void tick(Level level, float delta) {
+        getTriggeringParticipantContext();
         if(level != null && level.nativeTriggerReplica) return;
         if (triggerStatus== Trigger.TriggerStatus.DESTROYED && selfDestructs){
             this.isActive=false;
@@ -108,6 +110,7 @@ public class BasicTrigger extends Entity {
             if (triggerTime<=0){
                 doTriggerEvent(triggerValue); // fire!
                 triggeringParticipant = null;
+                pendingTriggerParticipant = null;
                 if (triggerResets){
                     triggerStatus= Trigger.TriggerStatus.RESETTING;
                     triggerTime=triggerResetTime;
@@ -160,6 +163,7 @@ public class BasicTrigger extends Entity {
             triggerStatus= Trigger.TriggerStatus.TRIGGERED;
             triggerTime=triggerDelay;
             triggeringParticipant = participant;
+            pendingTriggerParticipant = com.interrupt.dungeoneer.multiplayer.participant.PendingTriggerParticipant.capture(participant);
 
             // update the value if one was given
             if(value != null && !value.equals(""))
@@ -213,6 +217,8 @@ public class BasicTrigger extends Entity {
     }
 
     protected ParticipantContext getTriggeringParticipantContext() {
+        if(triggeringParticipant == null && pendingTriggerParticipant != null)
+            triggeringParticipant = pendingTriggerParticipant.restore();
         return triggeringParticipant;
     }
 

@@ -25,7 +25,7 @@ import java.util.Random;
 /** Base class for all entities in Delver Engine Levels. */
 public class Entity {
     /** Causal Participant attribution; never used for native collision exclusion. */
-    public transient String multiplayerDamageSource;
+    public String multiplayerDamageSource;
 
 	/** Id of Entity. */
 	@EditorProperty( group = "General" )

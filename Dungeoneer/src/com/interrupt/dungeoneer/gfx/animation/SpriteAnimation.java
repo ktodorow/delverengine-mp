@@ -16,8 +16,14 @@ import com.interrupt.dungeoneer.interfaces.Directional;
 
 public class SpriteAnimation {
     private static final java.util.concurrent.atomic.AtomicLong playbackIds = new java.util.concurrent.atomic.AtomicLong();
-    private transient long playbackId;
-    public long getPlaybackId() { return playbackId; }
+    private long playbackId;
+    public long getPlaybackId() {
+        // Recovered native playbacks must not collide with a later start in this JVM.
+        long previous;
+        do { previous = playbackIds.get(); }
+        while(previous < playbackId && !playbackIds.compareAndSet(previous, playbackId));
+        return playbackId;
+    }
     public float getPlaybackTime() { return time; }
 
     /** Seek accepted phase. Recovery never runs historic frame actions. */

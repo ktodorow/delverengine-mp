@@ -45,7 +45,7 @@ public final class AuthoritativeCombatEncounter {
             new LinkedHashMap<String, ParticipantId>();
     private final Map<String, Long> lastMonsterStateTicks =
             new LinkedHashMap<String, Long>();
-    private final MovementCollisionWorld world;
+    private MovementCollisionWorld world;
     private final List<CombatRequest> pendingNativeRequests =
             new ArrayList<CombatRequest>();
     private long snapshotSequence = 1L;
@@ -165,6 +165,13 @@ public final class AuthoritativeCombatEncounter {
         }
         snapshotSequence = Math.max(snapshotSequence, saved.getSequence());
         pendingNativeRequests.clear();
+    }
+
+    /** Replaces native area actors while retaining current Participant health and request IDs. */
+    public synchronized void activateFloor(MovementCollisionWorld destination, CombatSnapshot state) {
+        if(destination == null) throw new IllegalArgumentException("Destination combat world is required.");
+        restoreSnapshot(state);
+        world = destination;
     }
 
     public synchronized void updateParticipantPosition(ParticipantId participantId, float x, float y) {

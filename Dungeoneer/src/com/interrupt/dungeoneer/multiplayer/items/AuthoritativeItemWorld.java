@@ -395,6 +395,26 @@ public final class AuthoritativeItemWorld {
         return Collections.unmodifiableList(new ArrayList<PhysicalItemState>(items.values()));
     }
 
+    /** Replace physical area contents; Slot inventory, wielded gear and request history travel. */
+    public synchronized void activateFloor(List<PhysicalItemState> worldItems, long nextId) {
+        Map<Long, PhysicalItemState> replacement = new LinkedHashMap<>();
+        for(PhysicalItemState item : items.values()) if(item.owner != null) replacement.put(item.entityId, item);
+        for(PhysicalItemState item : worldItems) {
+            if(item == null || item.owner != null || replacement.put(item.entityId, item) != null)
+                throw new IllegalArgumentException("Destination item ownership/identity is invalid.");
+        }
+        if(replacement.size() > MAX_ITEMS) throw new IllegalArgumentException("Destination item count exceeds bounds.");
+        items.clear(); items.putAll(replacement);
+        for(PhysicalItemState item : worldItems) revision = Math.max(revision, item.revision);
+        reserveEntityIds(nextId);
+    }
+
+    /** All dormant physical identities remain reserved, including destroyed-item tombstones. */
+    public synchronized void reserveEntityIds(long nextId) {
+        if(nextId < 1L || nextId == Long.MAX_VALUE) throw new IllegalArgumentException("Physical item identity space exhausted.");
+        nextEntityId = Math.max(nextEntityId, nextId);
+    }
+
     /** Replaces current item registry with a validated save without replaying item actions. */
     public synchronized void restore(List<PhysicalItemState> saved) {
         if(saved == null || saved.size() > MAX_ITEMS) {

@@ -42,7 +42,7 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
      */
     static final float WATER_SPEED = 0.56f;
 
-    private final MovementCollisionWorld world;
+    private MovementCollisionWorld world;
     private final Map<ParticipantId, MutableMovement> participants =
             new TreeMap<ParticipantId, MutableMovement>();
 
@@ -64,6 +64,23 @@ public final class AuthoritativeMovementSimulation implements AuthoritativeHostS
             MovementSpawn spawn = world.getSpawn(descriptor.getCampaignSlot());
             participants.put(descriptor.getParticipantId(), new MutableMovement(
                     descriptor, spawn));
+        }
+    }
+
+    /** Party activation replaces one collision world and clears source-floor motion/input. */
+    public synchronized void activateFloor(MovementCollisionWorld destination) {
+        if(destination == null) throw new IllegalArgumentException("Destination movement world is required.");
+        Map<ParticipantId, MovementSpawn> arrivals = new LinkedHashMap<>();
+        for(MutableMovement participant : participants.values())
+            arrivals.put(participant.descriptor.getParticipantId(), destination.getSpawn(participant.descriptor.getCampaignSlot()));
+        world = destination;
+        for(MutableMovement participant : participants.values()) {
+            boolean frozen = participant.frozen;
+            participant.freeze();
+            MovementSpawn arrival = arrivals.get(participant.descriptor.getParticipantId());
+            setNativePosition(participant.descriptor.getParticipantId(), arrival.getX(), arrival.getY(), arrival.getZ());
+            participant.rotation = arrival.getRotation();
+            participant.frozen = frozen;
         }
     }
 
