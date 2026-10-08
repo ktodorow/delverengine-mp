@@ -10,15 +10,17 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility;
 public final class CampaignLibrary {
     public static final class Entry {
         private final String campaignId;
+        private final String campaignName;
         private final int capacity;
         private final int claimedSlots;
         private final boolean saved;
         private final boolean archived;
         private final boolean recovery;
 
-        private Entry(String campaignId, int capacity, int claimedSlots, boolean saved,
+        private Entry(String campaignId, String campaignName, int capacity, int claimedSlots, boolean saved,
                 boolean archived, boolean recovery) {
             this.campaignId = campaignId;
+            this.campaignName = campaignName;
             this.capacity = capacity;
             this.claimedSlots = claimedSlots;
             this.saved = saved;
@@ -27,6 +29,7 @@ public final class CampaignLibrary {
         }
 
         public String getCampaignId() { return campaignId; }
+        public String getCampaignName() { return campaignName; }
         public int getCapacity() { return capacity; }
         public int getClaimedSlots() { return claimedSlots; }
         public boolean hasSave() { return saved; }
@@ -55,7 +58,7 @@ public final class CampaignLibrary {
         List<Entry> entries = new ArrayList<Entry>();
         for(String campaignId : store.listCampaigns()) {
             CampaignRoster roster = store.load(campaignId, avatarCatalog);
-            entries.add(new Entry(campaignId, roster.getCapacity(), roster.getSlots().size(),
+            entries.add(new Entry(campaignId, roster.getCampaignName(), roster.getCapacity(), roster.getSlots().size(),
                     store.campaignSaves().exists(campaignId),
                     store.campaignSaves().isTerminal(campaignId),
                     store.campaignSaves().needsRecovery(campaignId)));
@@ -112,7 +115,7 @@ public final class CampaignLibrary {
         if(saved.getOutcome() == CampaignSave.Outcome.ACTIVE) {
             return "Terminal outcome preserved; final archive write failed. Keep Campaign files for repair.";
         }
-        return "Campaign " + id + " - " + saved.getOutcome().name()
+        return "Campaign " + saved.getCampaignName() + " - " + saved.getOutcome().name()
                 + " | Floor " + saved.getFloorId() + " | Roster " + saved.getSlots().size()
                 + " | Starting Lives " + saved.getStartingLives() + ". Read-only history; cannot resume.";
     }

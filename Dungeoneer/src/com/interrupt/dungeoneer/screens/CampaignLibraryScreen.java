@@ -2,13 +2,15 @@ package com.interrupt.dungeoneer.screens;
 
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Input;
-import com.badlogic.gdx.Screen;
-import com.badlogic.gdx.graphics.GL20;
-import com.badlogic.gdx.graphics.OrthographicCamera;
-import com.badlogic.gdx.graphics.g2d.BitmapFont;
-import com.badlogic.gdx.graphics.g2d.SpriteBatch;
-import com.badlogic.gdx.utils.Align;
+import com.badlogic.gdx.graphics.g2d.NinePatch;
+import com.badlogic.gdx.scenes.scene2d.InputEvent;
+import com.badlogic.gdx.scenes.scene2d.Stage;
+import com.badlogic.gdx.scenes.scene2d.ui.*;
+import com.badlogic.gdx.scenes.scene2d.utils.ClickListener;
+import com.badlogic.gdx.scenes.scene2d.utils.NinePatchDrawable;
+import com.badlogic.gdx.utils.viewport.FitViewport;
 import com.interrupt.dungeoneer.GameApplication;
+import com.interrupt.dungeoneer.GameManager;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignLibrary;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 
@@ -17,13 +19,13 @@ import java.util.List;
 import java.io.File;
 
 /** Host-facing Campaign Library shown before a Direct Connect listener is opened. */
-public final class CampaignLibraryScreen implements Screen {
+public final class CampaignLibraryScreen extends BaseScreen {
     private final GameApplication application;
     private final CampaignLibrary library;
     private final int newCampaignCapacity;
-    private final SpriteBatch batch = new SpriteBatch();
-    private final BitmapFont font = new BitmapFont();
-    private final OrthographicCamera camera = new OrthographicCamera();
+    private final Table campaignRows = new Table();
+    private final Label message;
+    private final ButtonGroup<TextButton> selection = new ButtonGroup<>();
     private volatile List<CampaignLibrary.Entry> entries = Collections.emptyList();
     private volatile String error;
     private int selected;
@@ -41,58 +43,88 @@ public final class CampaignLibraryScreen implements Screen {
         this.application = application;
         this.library = library;
         this.newCampaignCapacity = newCampaignCapacity;
+        screenName = "CampaignLibraryScreen";
+        splashLevel = splashScreenInfo.backgroundLevel;
+        viewport = new FitViewport(426, 280);
+        ui = new Stage(viewport);
+        Table root = new Table();
+        root.setFillParent(true);
+        Table panel = new Table(skin);
+        panel.setBackground(new NinePatchDrawable(new NinePatch(skin.getRegion("window"), 8, 8, 8, 8)));
+        panel.pad(10);
+        panel.add(new Label("Co-op Campaigns", skin)).padBottom(6);
+        panel.row();
+        Table primary = new Table();
+        action(primary, "New Campaign", 160, this::requestNewCampaign);
+        action(primary, "Back", 160, () -> {
+            if(application.isMultiplayerLauncher()) application.showMultiplayerMenu();
+        });
+        panel.add(primary).padBottom(6);
+        panel.row();
+        ScrollPane scroll = new ScrollPane(campaignRows);
+        scroll.setScrollingDisabled(true, false);
+        panel.add(scroll).width(350).height(110);
+        panel.row();
+        Table actions = new Table();
+        action(actions, "Resume", 80, this::resumeSelected);
+        action(actions, "Recover", 80, this::recoverSelected);
+        action(actions, "Export", 80, () -> { if(!entries.isEmpty()) requestExport(); });
+        action(actions, "Import", 80, this::requestImport);
+        panel.add(actions).padTop(6);
+        panel.row();
+        message = new Label("", skin);
+        message.setFontScale(0.7f);
+        message.setWrap(true);
+        panel.add(message).width(350).height(32).padTop(4);
+        root.add(panel);
+        ui.addActor(root);
         refresh();
     }
 
     @Override public void show() {
-        Gdx.input.setInputProcessor(null);
+        super.show();
+        Gdx.input.setInputProcessor(ui);
         Gdx.input.setCursorCatched(false);
     }
 
-    @Override
-    public void render(float delta) {
+    @Override protected void tick(float delta) {
+        super.tick(delta);
         handleInput();
-        Gdx.gl.glClearColor(0.035f, 0.045f, 0.06f, 1f);
-        Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT | GL20.GL_DEPTH_BUFFER_BIT);
-        camera.update();
-        batch.setProjectionMatrix(camera.combined);
+        ui.act(delta);
+        message.setText((opening ? "Opening Campaign..." : error == null
+                ? "N: New Campaign | Enter: Resume | R: Recover | Esc: Back" : error).replace("[", "[["));
+        if(selected < selection.getButtons().size) selection.getButtons().get(selected).setChecked(true);
+    }
 
-        float width = camera.viewportWidth;
-        float y = camera.viewportHeight * 0.86f;
-        batch.begin();
-        font.getData().setScale(1.4f);
-        font.draw(batch, "Co-op Campaign Library", width * 0.05f, y,
-                width * 0.9f, Align.center, false);
-        font.getData().setScale(1f);
-        y -= 44f;
-        font.draw(batch, "[N] New Campaign (Capacity " + newCampaignCapacity
-                        + ")   [UP/DOWN] Select   [ENTER] Host / inspect archive\n"
-                        + "[R] Recover after crash   [E] Export   [I] Import Host export",
-                width * 0.05f, y, width * 0.9f, Align.center, true);
-        y -= 42f;
-        if(entries.isEmpty()) {
-            font.draw(batch, "No Co-op Campaigns yet. Press N to create one.",
-                    width * 0.1f, y, width * 0.8f, Align.center, true);
-        }
-        else {
-            for(int index = 0; index < entries.size() && index < 12; index++) {
-                CampaignLibrary.Entry entry = entries.get(index);
-                font.draw(batch, (index == selected ? "> " : "  ") + campaignLine(entry),
-                        width * 0.12f, y, width * 0.76f, Align.left, false);
-                y -= 28f;
+    @Override protected void draw(float delta) {
+        Gdx.gl.glViewport(0, 0, curWidth, curHeight);
+        super.draw(delta);
+        viewport.apply();
+        ui.draw();
+    }
+
+    private void action(Table parent, String label, int width, Runnable action) {
+        TextButton button = new TextButton(label, skin);
+        button.addListener(new ClickListener() {
+            @Override public void clicked(InputEvent event, float x, float y) {
+                Gdx.app.postRunnable(() -> {
+                    if(disposed || opening || promptOpen || application.getScreen() != CampaignLibraryScreen.this) return;
+                    try { action.run(); } catch(RuntimeException failure) { fail(failure); }
+                });
             }
-        }
-        if(opening) {
-            y -= 24f;
-            font.draw(batch, "Opening Campaign...", width * 0.1f, y,
-                    width * 0.8f, Align.center, true);
-        }
-        else if(error != null) {
-            y -= 24f;
-            font.draw(batch, error, width * 0.1f, y,
-                    width * 0.8f, Align.center, true);
-        }
-        batch.end();
+        });
+        parent.add(button).width(width).height(24).padRight(4);
+    }
+
+    private void resumeSelected() {
+        if(entries.isEmpty()) return;
+        CampaignLibrary.Entry entry = entries.get(selected);
+        if(entry.isArchived()) error = library.describeArchive(entry.getCampaignId(), application.getCampaignCompatibility());
+        else open(library.resume(entry.getCampaignId()));
+    }
+
+    private void recoverSelected() {
+        if(!entries.isEmpty()) open(library.recover(entries.get(selected).getCampaignId(), application.getCampaignCompatibility()));
     }
 
     private void handleInput() {
@@ -110,15 +142,11 @@ public final class CampaignLibraryScreen implements Screen {
             selected = (selected + 1) % entries.size();
         }
         if(Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && !entries.isEmpty()) {
-            try {
-                CampaignLibrary.Entry entry = entries.get(selected);
-                if(entry.isArchived()) error = library.describeArchive(entry.getCampaignId(), application.getCampaignCompatibility());
-                else open(library.resume(entry.getCampaignId()));
-            }
+            try { resumeSelected(); }
             catch(RuntimeException failure) { fail(failure); }
         }
         if(Gdx.input.isKeyJustPressed(Input.Keys.R) && !entries.isEmpty()) {
-            try { open(library.recover(entries.get(selected).getCampaignId(), application.getCampaignCompatibility())); }
+            try { recoverSelected(); }
             catch(RuntimeException failure) { fail(failure); }
         }
         if(Gdx.input.isKeyJustPressed(Input.Keys.E) && !entries.isEmpty()) requestExport();
@@ -151,7 +179,7 @@ public final class CampaignLibraryScreen implements Screen {
                 promptOpen = false;
                 try {
                     CampaignRoster imported = library.importCampaign(new File(text.trim()), application.getCampaignCompatibility());
-                    error = "Imported " + imported.getCampaignId() + ". Original Host ownership preserved.";
+                    error = "Imported " + imported.getCampaignName() + ". Original Host ownership preserved.";
                     refresh();
                 }
                 catch(RuntimeException failure) { fail(failure); }
@@ -161,17 +189,9 @@ public final class CampaignLibraryScreen implements Screen {
     }
 
     private void requestNewCampaign() {
-        promptOpen = true;
-        Gdx.input.getTextInput(new Input.TextInputListener() {
-            @Override public void input(String text) {
-                if(disposed || application.getScreen() != CampaignLibraryScreen.this) return;
-                promptOpen = false;
-                try { open(library.create(text == null ? "" : text.trim(), newCampaignCapacity)); }
-                catch(RuntimeException failure) { fail(failure); }
-            }
-
-            @Override public void canceled() { promptOpen = false; }
-        }, "New Co-op Campaign", "", "Letters, numbers, dot, dash, underscore");
+        Gdx.app.postRunnable(() -> {
+            if(!disposed && application.getScreen() == this) application.showNewCampaignSetup(newCampaignCapacity);
+        });
     }
 
     private void open(final CampaignRoster roster) {
@@ -194,6 +214,23 @@ public final class CampaignLibraryScreen implements Screen {
         try {
             entries = library.list();
             if(selected >= entries.size()) selected = Math.max(0, entries.size() - 1);
+            campaignRows.clearChildren();
+            selection.clear();
+            if(entries.isEmpty()) campaignRows.add(new Label("No Co-op Campaigns yet.", skin));
+            for(int index = 0; index < entries.size(); index++) {
+                final int row = index;
+                TextButton button = new TextButton(campaignLine(entries.get(index)).replace("[", "[["),
+                        com.interrupt.dungeoneer.ui.UiSkin.createChoiceButtonStyle(skin));
+                button.getLabel().setFontScale(0.7f);
+                button.getLabel().setWrap(true);
+                selection.add(button);
+                button.setChecked(index == selected);
+                button.addListener(new ClickListener() {
+                    @Override public void clicked(InputEvent event, float x, float y) { selected = row; }
+                });
+                campaignRows.add(button).width(340).height(40).padBottom(3);
+                campaignRows.row();
+            }
         }
         catch(RuntimeException failure) { fail(failure); }
     }
@@ -207,7 +244,7 @@ public final class CampaignLibraryScreen implements Screen {
     public void showFailure(String message) { error = message; }
 
     static String campaignLine(CampaignLibrary.Entry entry) {
-        return entry.getCampaignId() + "  |  "
+        return entry.getCampaignName() + "  |  "
                 + (entry.isArchived() ? "Campaign Archive (read-only)" : entry.needsRecovery()
                         ? "Unclean shutdown - [R] Recover" : entry.hasSave() ? "Saved Campaign" : "Not started")
                 + "  |  Capacity " + entry.getCapacity()
@@ -215,16 +252,15 @@ public final class CampaignLibraryScreen implements Screen {
     }
 
     @Override public void resize(int width, int height) {
-        camera.setToOrtho(false, Math.max(1, width), Math.max(1, height));
+        curWidth = width; curHeight = height;
+        viewport.update(width, height, true);
+        GameManager.renderer.setSize(width, height);
     }
-    @Override public void pause() { }
-    @Override public void resume() { }
-    @Override public void hide() { }
 
     @Override public void dispose() {
         if(disposed) return;
         disposed = true;
-        batch.dispose();
-        font.dispose();
+        if(Gdx.input.getInputProcessor() == ui) Gdx.input.setInputProcessor(null);
+        ui.dispose();
     }
 }

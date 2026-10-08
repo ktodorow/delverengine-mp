@@ -7,6 +7,7 @@ import com.badlogic.gdx.graphics.g2d.TextureAtlas;
 import com.badlogic.gdx.scenes.scene2d.ui.Label.LabelStyle;
 import com.badlogic.gdx.scenes.scene2d.ui.Skin;
 import com.badlogic.gdx.scenes.scene2d.ui.TextButton.TextButtonStyle;
+import com.badlogic.gdx.scenes.scene2d.ui.TextField;
 import com.interrupt.dungeoneer.Art;
 import com.interrupt.dungeoneer.game.Game;
 import com.interrupt.dungeoneer.game.Options;
@@ -26,6 +27,25 @@ public class UiSkin {
     	if(font == null) loadSkin();
     	//font.setScale(1f);
     	return font;
+    }
+
+    /** Native skin has button styles but no TextFieldStyle; reuse its font and drawables. */
+    public static TextField.TextFieldStyle createTextFieldStyle(Skin nativeSkin) {
+        TextButtonStyle buttons = nativeSkin.get(TextButtonStyle.class);
+        TextField.TextFieldStyle input = new TextField.TextFieldStyle();
+        input.font = input.messageFont = buttons.font;
+        input.fontColor = input.focusedFontColor = input.disabledFontColor = input.messageFontColor = buttons.fontColor;
+        input.background = input.disabledBackground = buttons.up;
+        input.focusedBackground = input.selection = buttons.down == null ? buttons.up : buttons.down;
+        return input;
+    }
+
+    /** Choice state uses native pressed art and native selected font color. */
+    public static TextButtonStyle createChoiceButtonStyle(Skin nativeSkin) {
+        TextButtonStyle style = new TextButtonStyle(nativeSkin.get(TextButtonStyle.class));
+        if(style.checked == null) style.checked = style.down == null ? style.up : style.down;
+        style.checkedFontColor = nativeSkin.getColor("gamepad-selected");
+        return style;
     }
 
     public static void loadSkin() {

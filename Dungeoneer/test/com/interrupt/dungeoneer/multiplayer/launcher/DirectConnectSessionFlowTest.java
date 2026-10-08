@@ -142,7 +142,7 @@ public class DirectConnectSessionFlowTest {
         CampaignRoster roster = roster(store);
         java.util.concurrent.atomic.AtomicReference<String> displayed = new java.util.concurrent.atomic.AtomicReference<String>();
         DirectConnectSessionFlow flow = new DirectConnectSessionFlow(() -> displayed.set(null));
-        DatagramSocket occupiedUdp = new DatagramSocket(0);
+        DatagramSocket occupiedUdp = SocketTestPorts.occupyUdpWithAvailableTcp();
         int port = occupiedUdp.getLocalPort();
         try {
             try {
@@ -154,6 +154,7 @@ public class DirectConnectSessionFlowTest {
             }
             catch(Exception expected) {
                 assertTrue("Launcher failure must reach existing screen error handlers", expected instanceof RuntimeException);
+                assertTrue("Fixture must fail UDP after opening TCP", expected.getMessage().contains("UDP listener"));
                 assertNull(flow.getPeer());
             }
             displayed.set("Host bind failed");

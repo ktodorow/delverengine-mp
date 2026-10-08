@@ -15,7 +15,7 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility;
 
 /** Host-local persistent Campaign Roster store. It never reads original single-player saves. */
 public final class CampaignRosterStore {
-    private static final String FORMAT = "1";
+    private static final String FORMAT = "2";
 
     private final File campaignsRoot;
     private final SecureRandom random;
@@ -83,7 +83,8 @@ public final class CampaignRosterStore {
         File file = rosterFile(campaignId);
         if(!file.isFile()) throw new IllegalStateException("Campaign Roster does not exist: " + campaignId);
         Properties properties = AtomicProperties.load(file, "Campaign Roster");
-        if(!FORMAT.equals(properties.getProperty("format"))) {
+        boolean legacy = "1".equals(properties.getProperty("format"));
+        if(!legacy && !FORMAT.equals(properties.getProperty("format"))) {
             throw new IllegalStateException("Campaign Roster has unsupported format: " + file);
         }
         if(!campaignId.equals(properties.getProperty("campaignId"))) {
@@ -108,7 +109,11 @@ public final class CampaignRosterStore {
             }
         }
         try {
-            return CampaignRoster.restore(campaignId, capacity, avatarCatalog, slots);
+            CampaignRoster loaded = CampaignRoster.restore(campaignId, capacity, avatarCatalog, slots).withMetadata(
+                    legacy ? campaignId : require(properties, "campaignName"),
+                    legacy ? 3 : parseInt(require(properties, "startingLives"), "Starting Lives"));
+            if(legacy) save(loaded);
+            return loaded;
         }
         catch(IllegalArgumentException ex) {
             throw new IllegalStateException("Campaign Roster is corrupt: " + file, ex);
@@ -119,6 +124,8 @@ public final class CampaignRosterStore {
         Properties properties = new Properties();
         properties.setProperty("format", FORMAT);
         properties.setProperty("campaignId", roster.getCampaignId());
+        properties.setProperty("campaignName", roster.getCampaignName());
+        properties.setProperty("startingLives", Integer.toString(roster.getStartingLives()));
         properties.setProperty("capacity", Integer.toString(roster.getCapacity()));
         for(CampaignSlot slot : roster.getSlots()) {
             String prefix = "slot." + slot.getNumber() + ".";
@@ -130,8 +137,34 @@ public final class CampaignRosterStore {
             properties.setProperty(prefix + "avatar",
                     slot.getPresentation().getAvatarId());
         }
-        AtomicProperties.store(rosterFile(roster.getCampaignId()), properties,
+        File file = rosterFile(roster.getCampaignId());
+        backupLegacyRoster(file);
+        AtomicProperties.store(file, properties,
                 "Delver Multiplayer Host-owned Campaign Roster");
+    }
+
+    /** Complete backup before atomic replacement, including callers that save without loading. */
+    private static void backupLegacyRoster(File file) {
+        if(!file.isFile() || !"1".equals(AtomicProperties.load(file, "Campaign Roster").getProperty("format"))) return;
+        File backup = new File(file.getParentFile(), "roster.properties.before-format-2");
+        java.nio.file.Path staging = null;
+        try {
+            if(backup.exists()) {
+                if(!backup.isFile() || !java.util.Arrays.equals(Files.readAllBytes(file.toPath()),
+                        Files.readAllBytes(backup.toPath()))) throw new IOException("Existing roster backup differs from original.");
+                return;
+            }
+            staging = Files.createTempFile(file.getParentFile().toPath(), "roster-backup-", ".tmp");
+            Files.copy(file.toPath(), staging, StandardCopyOption.REPLACE_EXISTING);
+            try { Files.move(staging, backup.toPath(), StandardCopyOption.ATOMIC_MOVE); }
+            catch(java.nio.file.AtomicMoveNotSupportedException unsupported) { Files.move(staging, backup.toPath()); }
+        }
+        catch(IOException failure) {
+            throw new IllegalStateException("Could not back up Campaign Roster; original retained: " + file, failure);
+        }
+        finally {
+            if(staging != null) try { Files.deleteIfExists(staging); } catch(IOException ignored) { }
+        }
     }
 
     SecureRandom getRandom() {
@@ -147,7 +180,7 @@ public final class CampaignRosterStore {
             AvatarCatalog avatars, DirectConnectCompatibility compatibility) {
         CampaignSave saved = campaignSaves.readExport(source, host, compatibility);
         CampaignRoster roster = CampaignRoster.restore(saved.getCampaignId(), saved.getCapacity(),
-                avatars, saved.getSlots());
+                avatars, saved.getSlots()).withMetadata(saved.getCampaignName(), saved.getStartingLives());
         File destination = new File(campaignsRoot, saved.getCampaignId());
         if(destination.exists()) throw new IllegalStateException("Campaign already exists: " + saved.getCampaignId());
         File staging = null;

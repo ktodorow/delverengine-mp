@@ -109,7 +109,7 @@ public final class DirectConnectSessionScreen implements Screen {
         if(peer instanceof DirectConnectHost) {
             DirectConnectHost host = (DirectConnectHost)peer;
             y -= 32f;
-            font.draw(batch, "Campaign " + host.getRoster().getCampaignId() + "  |  Capacity "
+            font.draw(batch, "Campaign " + host.getRoster().getCampaignName() + "  |  Capacity "
                             + host.getRoster().getCapacity() + "  |  Connected "
                             + host.getConnectedParticipantCount()
                             + "  |  Starting Lives " + host.getStartingLives()

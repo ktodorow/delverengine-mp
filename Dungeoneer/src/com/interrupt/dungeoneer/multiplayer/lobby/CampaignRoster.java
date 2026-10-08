@@ -49,6 +49,8 @@ public final class CampaignRoster {
     }
 
     private final String campaignId;
+    private String campaignName;
+    private int startingLives = 3;
     private final int capacity;
     private final AvatarCatalog avatarCatalog;
     private final List<CampaignSlot> slots;
@@ -56,6 +58,7 @@ public final class CampaignRoster {
     private CampaignRoster(String campaignId, int capacity, AvatarCatalog avatarCatalog,
             List<CampaignSlot> slots) {
         this.campaignId = requireCampaignId(campaignId);
+        this.campaignName = campaignId;
         if(capacity < 2 || capacity > 4) {
             throw new IllegalArgumentException("Campaign Capacity must be two, three, or four.");
         }
@@ -78,6 +81,38 @@ public final class CampaignRoster {
     static CampaignRoster restore(String campaignId, int capacity, AvatarCatalog avatarCatalog,
             List<CampaignSlot> slots) {
         return new CampaignRoster(campaignId, capacity, avatarCatalog, slots);
+    }
+
+    public static CampaignRoster createNamed(String campaignId, String campaignName, int capacity,
+            int startingLives, AvatarCatalog avatars, LauncherIdentity host, SlotPresentation presentation,
+            SecureRandom random) {
+        CampaignRoster roster = create(campaignId, capacity, avatars, host, presentation, random);
+        return roster.withMetadata(campaignName, startingLives);
+    }
+
+    CampaignRoster withMetadata(String name, int lives) {
+        campaignName = requireCampaignName(name);
+        com.interrupt.dungeoneer.multiplayer.lives.AuthoritativeLives.requireStartingLives(lives);
+        startingLives = lives;
+        return this;
+    }
+
+    public String getCampaignName() { return campaignName; }
+    public int getStartingLives() { return startingLives; }
+
+    public static String requireCampaignName(String name) {
+        if(name == null) throw new IllegalArgumentException("Campaign Name cannot be null.");
+        String trimmed = name.trim();
+        if(trimmed.isEmpty() || trimmed.codePointCount(0, trimmed.length()) > 64
+                || trimmed.getBytes(StandardCharsets.UTF_8).length > 256) {
+            throw new IllegalArgumentException("Campaign Name must be 1-64 characters and at most 256 UTF-8 bytes.");
+        }
+        for(int offset = 0; offset < trimmed.length();) {
+            int codePoint = trimmed.codePointAt(offset);
+            if(Character.isISOControl(codePoint)) throw new IllegalArgumentException("Campaign Name cannot contain control characters.");
+            offset += Character.charCount(codePoint);
+        }
+        return trimmed;
     }
 
     public synchronized ClaimOutcome submit(SlotClaimRequest request) {

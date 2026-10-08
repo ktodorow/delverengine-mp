@@ -40,10 +40,44 @@ import static org.junit.Assert.fail;
 public class CampaignSaveStoreTest {
     @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
+    @Test public void formatSevenNameMigrationBacksUpExactBytesAndKeepsOwnershipAndWorld() throws Exception {
+        File root = temporaryFolder.newFolder("format-seven-name");
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        CampaignSave original = withFloor(save("friends", compatibility("mp-v108-prototype-party-travel-55")),
+                new byte[] { 7, 8, 9 });
+        store.save(original);
+        File file = new File(new File(root, "friends"), "campaign.save");
+        try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
+            legacy.seek(4); legacy.writeInt(7);
+            // Format 8 appends modified UTF: two-byte length plus seven ASCII bytes of "friends".
+            legacy.setLength(legacy.length() - 9);
+        }
+        byte[] before = Files.readAllBytes(file.toPath());
+        DirectConnectCompatibility next = compatibility("mp-v108-prototype-named-campaigns-56");
+        assertFailure(store, "friends", new DirectConnectCompatibility(next.getBuildId(), "owned-v108", repeat('b')), "incompatible");
+        assertTrue(Arrays.equals(before, Files.readAllBytes(file.toPath())));
+        assertFalse(new File(file.getParentFile(), "campaign.save.before-format-8").exists());
+        CampaignSave migrated = store.load("friends", next);
+        assertEquals("friends", migrated.getCampaignId());
+        assertEquals("friends", migrated.getCampaignName());
+        assertEquals(next.getBuildId(), migrated.getCompatibility().getBuildId());
+        assertEquals(original.getSlots().get(0).getLauncherIdentity(), migrated.getSlots().get(0).getLauncherIdentity());
+        assertEquals(original.getSlots().get(1).getReconnectToken(), migrated.getSlots().get(1).getReconnectToken());
+        assertEquals(5, migrated.getStartingLives());
+        assertEquals(41, migrated.getParticipant(2).getProgress().gold);
+        assertEquals(19L, migrated.getPhysicalItems().get(0).entityId);
+        assertTrue(Arrays.equals(original.getNativeFloor(), migrated.getNativeFloor()));
+        File backup = new File(file.getParentFile(), "campaign.save.before-format-8");
+        assertTrue(Arrays.equals(before, Files.readAllBytes(backup.toPath())));
+        assertEquals("friends", store.load("friends", next).getCampaignName());
+        assertTrue(Arrays.equals(before, Files.readAllBytes(backup.toPath())));
+    }
+
     @Test public void campaignRoundTripRetainsDifferentAreasAndTheirNativeWorldState() throws Exception {
         CampaignSaveStore store = new CampaignSaveStore(temporaryFolder.newFolder("dormant"));
         DirectConnectCompatibility compatibility = compatibility("build-49");
-        CampaignSave active = withFloor(save("friends", compatibility), new byte[] { 1, 2 });
+        CampaignSave active = withFloor(save("friends", compatibility), new byte[] { 1, 2 })
+                .withCampaignName("Friday friends / dungeon");
         com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState prior =
                 com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState.fromCampaign(
                         "dungeon:1", withFloor(save("friends", compatibility), new byte[] { 7, 8, 9 }));
@@ -52,6 +86,7 @@ public class CampaignSaveStoreTest {
         store.save(campaign);
 
         CampaignSave loaded = store.load("friends", compatibility);
+        assertEquals("Friday friends / dungeon", loaded.getCampaignName());
         assertEquals("dungeon:2", loaded.getActiveAreaKey());
         assertTrue(Arrays.equals(new byte[] { 1, 2 }, loaded.getNativeFloor()));
         assertEquals(1, loaded.getDormantFloors().size());
@@ -82,7 +117,7 @@ public class CampaignSaveStoreTest {
         File file = new File(new File(root, "friends"), "campaign.save");
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
             legacy.seek(4); legacy.writeInt(6); legacy.writeInt(49);
-            legacy.setLength(legacy.length() - 4);
+            legacy.setLength(legacy.length() - 13);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         DirectConnectCompatibility next = compatibility("mp-v108-prototype-party-travel-55");
@@ -91,7 +126,7 @@ public class CampaignSaveStoreTest {
         assertEquals(original.getActiveAreaKey(), migrated.getActiveAreaKey());
         assertEquals(41, migrated.getParticipant(2).getProgress().gold);
         assertTrue(Arrays.equals(before, Files.readAllBytes(new File(file.getParentFile(),
-                "campaign.save.before-format-7").toPath())));
+                "campaign.save.before-format-8").toPath())));
     }
 
     @Test public void formatFiveMigrationRetainsActiveFloorAndBacksUpOriginalBeforeAddingHistory() throws Exception {
@@ -104,7 +139,7 @@ public class CampaignSaveStoreTest {
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
             legacy.seek(4); legacy.writeInt(5); legacy.writeInt(49);
             // Historical format 5 ends before area key, timer/dormant counts and format 7 provenance.
-            legacy.setLength(legacy.length() - 30);
+            legacy.setLength(legacy.length() - 39);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         DirectConnectCompatibility next = compatibility("mp-v108-prototype-dormant-floors-54");
@@ -117,7 +152,7 @@ public class CampaignSaveStoreTest {
         assertEquals(41, migrated.getParticipant(2).getProgress().gold);
         assertEquals(19L, migrated.getPhysicalItems().get(0).entityId);
         assertTrue(Arrays.equals(before, Files.readAllBytes(new File(file.getParentFile(),
-                "campaign.save.before-format-7").toPath())));
+                "campaign.save.before-format-8").toPath())));
     }
 
     @Test public void previousBuildMigratesWithoutInventingPersonalKnowledge() throws Exception {
@@ -129,7 +164,7 @@ public class CampaignSaveStoreTest {
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
             legacy.seek(4); legacy.writeInt(4); legacy.writeInt(47);
             // Format 5: 48 bytes of personal records/mapping; format 6: 26 bytes of empty floor history; format 7: 4-byte empty provenance count.
-            legacy.setLength(legacy.length() - 78);
+            legacy.setLength(legacy.length() - 87);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         DirectConnectCompatibility next = compatibility("mp-v108-prototype-campaign-library-52");
@@ -192,7 +227,7 @@ public class CampaignSaveStoreTest {
         File legacy = new File(new File(root, "legacy"), "campaign.save");
         try(RandomAccessFile file = new RandomAccessFile(legacy, "rw")) {
             file.seek(4L); file.writeInt(2);
-            file.setLength(file.length() - 129L);
+            file.setLength(file.length() - 137L);
         }
         CampaignSave loaded = store.load("legacy", compatibility);
         assertFalse(loaded.hasNativeFloor());
@@ -272,7 +307,7 @@ public class CampaignSaveStoreTest {
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
             legacy.seek(4); legacy.writeInt(3);
             // Formats 4/5: 98 bytes of shared/personal facts; format 6: 26 bytes of empty floor history; format 7: 4-byte empty provenance count.
-            legacy.setLength(legacy.length() - 128);
+            legacy.setLength(legacy.length() - 137);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         CampaignSave migrated = store.load("friends", original.getCompatibility());
@@ -291,7 +326,7 @@ public class CampaignSaveStoreTest {
         store.save(original);
         File file = new File(new File(root, "friends"), "campaign.save");
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
-            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 129);
+            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 138);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         store.load("friends", original.getCompatibility());
@@ -340,7 +375,7 @@ public class CampaignSaveStoreTest {
         new CampaignSaveStore(root).save(original);
         File file = new File(new File(root, "friends"), "campaign.save");
         try(RandomAccessFile legacy = new RandomAccessFile(file, "rw")) {
-            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 129);
+            legacy.seek(4); legacy.writeInt(2); legacy.setLength(legacy.length() - 138);
         }
         byte[] before = Files.readAllBytes(file.toPath());
         CampaignSaveStore failing = new CampaignSaveStore(root, (source, target) -> {

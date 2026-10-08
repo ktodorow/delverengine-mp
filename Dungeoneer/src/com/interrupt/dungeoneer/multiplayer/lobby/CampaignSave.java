@@ -33,8 +33,9 @@ public final class CampaignSave {
      * 5: personal Slot knowledge and shared potion appearance/effect mapping.
      * 6: logical Active area identity, Dormant Floors and frozen death-drop timers.
      * 7: unclaimed death-scatter provenance for atomic Fresh Return cleanup.
+     * 8: friendly Campaign Name, independent of private campaign identity.
      */
-    public static final int FORMAT = 7;
+    public static final int FORMAT = 8;
     public static final int MAX_CONSUMED_MONSTER_SPAWNERS = 4096;
     public static final int MAX_SPAWNER_KEY_BYTES = 512;
 
@@ -88,6 +89,7 @@ public final class CampaignSave {
 
     private final DirectConnectCompatibility compatibility;
     private final String campaignId;
+    private String campaignName;
     private final int capacity;
     private final int startingLives;
     private final Outcome outcome;
@@ -402,11 +404,21 @@ public final class CampaignSave {
     public CampaignSave withFloorHistory(String activeAreaKey,
             List<com.interrupt.dungeoneer.multiplayer.floor.CampaignFloorState> dormantFloors,
             java.util.Map<Long, Long> dropTimers) {
-        return new CampaignSave(compatibility, campaignId, capacity, startingLives, outcome,
+        CampaignSave copy = new CampaignSave(compatibility, campaignId, capacity, startingLives, outcome,
                 floorId, floorSeed, floorFingerprint, nativeWorldGeneration, slots, participants,
                 physicalItems, combat, doors, breakables, actorEffects, monsterSpawns,
                 consumedMonsterSpawners, nativeFloor, partyKeys, keyRevision, partyProgression,
                 potionMapping, activeAreaKey, dormantFloors, dropTimers).withScatterOwners(scatterOwners);
+        copy.campaignName = campaignName;
+        return copy;
+    }
+
+    /** Immutable metadata copy; IDs, characters and ownership remain intact. */
+    public CampaignSave withCampaignName(String name) {
+        String validated = CampaignRoster.requireCampaignName(name);
+        CampaignSave copy = withScatterOwners(scatterOwners);
+        copy.campaignName = validated;
+        return copy;
     }
 
     /** Original character's unclaimed death scatter; pickup removes provenance. */
@@ -428,6 +440,7 @@ public final class CampaignSave {
                 combat, doors, breakables, actorEffects, monsterSpawns, consumedMonsterSpawners, nativeFloor,
                 partyKeys, keyRevision, partyProgression, potionMapping, activeAreaKey, dormantFloors, dropTimers);
         copy.scatterOwners = Collections.unmodifiableMap(new java.util.LinkedHashMap<>(owners));
+        copy.campaignName = campaignName;
         return copy;
     }
     public java.util.Map<Long, Integer> getScatterOwners() { return scatterOwners; }
@@ -438,6 +451,7 @@ public final class CampaignSave {
 
     public DirectConnectCompatibility getCompatibility() { return compatibility; }
     public String getCampaignId() { return campaignId; }
+    public String getCampaignName() { return campaignName == null ? campaignId : campaignName; }
     public int getCapacity() { return capacity; }
     public int getStartingLives() { return startingLives; }
     public Outcome getOutcome() { return outcome; }

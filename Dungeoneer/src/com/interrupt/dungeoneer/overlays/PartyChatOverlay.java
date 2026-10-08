@@ -6,7 +6,6 @@ import com.badlogic.gdx.scenes.scene2d.InputListener;
 import com.badlogic.gdx.scenes.scene2d.ui.Label;
 import com.badlogic.gdx.scenes.scene2d.ui.Table;
 import com.badlogic.gdx.scenes.scene2d.ui.TextButton;
-import com.badlogic.gdx.scenes.scene2d.ui.TextButton.TextButtonStyle;
 import com.badlogic.gdx.scenes.scene2d.ui.TextField;
 import com.badlogic.gdx.scenes.scene2d.utils.ClickListener;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
@@ -67,20 +66,7 @@ public final class PartyChatOverlay extends WindowOverlay {
 
     static TextField.TextFieldStyle createMessageStyle(
             com.badlogic.gdx.scenes.scene2d.ui.Skin skin) {
-        TextButtonStyle buttons = skin.get(TextButtonStyle.class);
-        TextField.TextFieldStyle input = new TextField.TextFieldStyle();
-        input.font = buttons.font;
-        input.fontColor = buttons.fontColor;
-        input.focusedFontColor = buttons.fontColor;
-        input.disabledFontColor = buttons.fontColor;
-        input.messageFont = buttons.font;
-        input.messageFontColor = buttons.fontColor;
-        input.background = buttons.up;
-        input.focusedBackground = buttons.down == null ? buttons.up : buttons.down;
-        input.disabledBackground = buttons.up;
-        input.selection = buttons.down == null ? buttons.up : buttons.down;
-        input.cursor = null;
-        return input;
+        return com.interrupt.dungeoneer.ui.UiSkin.createTextFieldStyle(skin);
     }
 
     @Override

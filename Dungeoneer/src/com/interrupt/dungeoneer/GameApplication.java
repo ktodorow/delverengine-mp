@@ -78,6 +78,7 @@ public class GameApplication extends Game {
             new DirectConnectSessionFlow(this::releaseDirectConnectResources);
     private DirectConnectSessionScreen directConnectScreen;
     private CampaignLibraryScreen campaignLibraryScreen;
+    private com.interrupt.dungeoneer.screens.HostSetupScreen hostSetupScreen;
     private DirectConnectMovementController directConnectMovementController;
     private DirectConnectCombatController directConnectCombatController;
     private com.interrupt.dungeoneer.multiplayer.lives.DirectConnectLivesController directConnectLivesController;
@@ -359,12 +360,15 @@ public class GameApplication extends Game {
         Screen completedMenu = getScreen() instanceof MultiplayerMenuScreen ? getScreen() : null;
         CampaignLibraryScreen completedLibrary = campaignLibraryScreen;
         DirectConnectSessionScreen completedSession = directConnectScreen;
+        com.interrupt.dungeoneer.screens.HostSetupScreen completedSetup = hostSetupScreen;
+        hostSetupScreen = null;
         campaignLibraryScreen = null;
         directConnectScreen = new DirectConnectSessionScreen(this, peer);
         setScreen(directConnectScreen);
         if(completedLibrary != null) completedLibrary.dispose();
         if(completedSession != null) completedSession.dispose();
         if(completedMenu != null) completedMenu.dispose();
+        if(completedSetup != null) completedSetup.dispose();
     }
 
     private void showCampaignLibrary() {
@@ -392,11 +396,44 @@ public class GameApplication extends Game {
 
     public void showMultiplayerHostLibrary() {
         directConnectLauncherIdentity = com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentityStore.loadOrCreate();
-        directConnectPresentation = new SlotPresentation("Host", AvatarCatalog.HUMANOID_1);
+        directConnectPresentation = com.interrupt.dungeoneer.multiplayer.lobby.LauncherPresentationStore.load();
         directConnectRosterStore = new CampaignRosterStore();
         Screen previous = getScreen();
         showCampaignLibrary();
         if(previous != null) previous.dispose();
+        hostSetupScreen = null;
+    }
+
+    public void showNewCampaignSetup(int capacity) {
+        if(getDirectConnectPeer() != null) throw new IllegalStateException("Leave current session before creating a Campaign.");
+        Screen previous = getScreen();
+        hostSetupScreen = new com.interrupt.dungeoneer.screens.HostSetupScreen(this, capacity,
+                com.interrupt.dungeoneer.multiplayer.lobby.LauncherPresentationStore.load());
+        setScreen(hostSetupScreen);
+        campaignLibraryScreen = null;
+        if(previous != null) previous.dispose();
+    }
+
+    public void returnFromCampaignSetup() {
+        Screen previous = getScreen();
+        hostSetupScreen = null;
+        showCampaignLibrary();
+        if(previous != null) previous.dispose();
+    }
+
+    /** Setup stays installed until listener and profile writes succeed. No implicit Start. */
+    public void openNewCampaignLobby(DirectConnectSessionFlow.HostSetup setup) {
+        ensureNativeRendering();
+        final CampaignRosterStore store = directConnectRosterStore;
+        final LauncherIdentity identity = directConnectLauncherIdentity;
+        sessionFlow.openNewCampaign(setup, store, identity, (request, roster) ->
+                createDirectConnectHost(request.getPort(), roster, store, null, createDirectConnectCompatibility()));
+        directConnectPort = setup.getPort();
+        directConnectRoster = ((DirectConnectHost)sessionFlow.getPeer()).getRoster();
+        directConnectFloor = null;
+        directConnectPresentation = setup.getPresentation();
+        directConnectCampaignCapacity = setup.getCapacity();
+        showDirectConnectSession(sessionFlow.getPeer());
     }
 
     /** Temporary existing-session route; full remembered presentation form belongs to #45. */
@@ -409,7 +446,7 @@ public class GameApplication extends Game {
                     try {
                         connectDirectConnectSession(address.trim(), directConnectPort,
                                 com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentityStore.loadOrCreate(),
-                                new SlotPresentation("Participant", AvatarCatalog.HUMANOID_2), 0,
+                                com.interrupt.dungeoneer.multiplayer.lobby.LauncherPresentationStore.load(), 0,
                                 new com.interrupt.dungeoneer.multiplayer.lobby.ProfileReconnectTokenStore());
                     }
                     catch(RuntimeException failure) { showDirectConnectFailure(failure.getMessage()); }
@@ -801,6 +838,8 @@ public class GameApplication extends Game {
 
         com.interrupt.dungeoneer.game.Game.inEditor = false;
         editorRunning = false;
+        // New setup retains native backdrop through bind/retry; release it only at explicit Start.
+        BaseScreen.freeBackgroundLevel();
         mainMenuScreen = new SplashScreen();
         mainScreen = new GameScreen(level, gameManager, input,
                 com.interrupt.dungeoneer.game.Game.PreparedLevelMode.CAMPAIGN);
@@ -848,6 +887,7 @@ public class GameApplication extends Game {
         directConnectPartyTravel = null;
         if(directConnectScreen != null) directConnectScreen.dispose();
         if(campaignLibraryScreen != null) campaignLibraryScreen.dispose();
+        if(hostSetupScreen != null) hostSetupScreen.dispose();
         if(gameoverScreen != null) gameoverScreen.dispose();
         if(winScreen != null) winScreen.dispose();
         if(levelChangeScreen != null) levelChangeScreen.dispose();
@@ -855,6 +895,7 @@ public class GameApplication extends Game {
         directConnectScreen = null;
         campaignLibraryScreen = null;
         mainScreen = null;
+        hostSetupScreen = null;
         gameoverScreen = null;
         winScreen = null;
         levelChangeScreen = null;
@@ -869,7 +910,7 @@ public class GameApplication extends Game {
     public void dispose() {
         Gdx.app.log("DelverLifeCycle", "Goodbye");
         boolean directResources = getDirectConnectPeer() != null || directConnectScreen != null
-                || campaignLibraryScreen != null;
+                || campaignLibraryScreen != null || hostSetupScreen != null;
         try { if(getDirectConnectPeer() != null) getDirectConnectPeer().close(); }
         finally {
             try {

@@ -295,6 +295,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         this.compatibility = compatibility;
         this.roster = roster;
+        startingLives = roster.getStartingLives();
         this.rosterStore = rosterStore;
         campaignSaveStore = rosterStore.campaignSaves();
         if(campaignSaveStore.isTerminal(roster.getCampaignId())) {
@@ -3541,7 +3542,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 new ArrayList<String>(consumedMonsterSpawners), nativeFloor,
                 itemWorld.getPartyKeys(), itemWorld.getKeyRevision(), partyProgression, potionMapping)
                 .withFloorHistory(activeAreaKey, new ArrayList<>(dormantFloors.values()), remainingDropTimers());
-        saved = saved.withScatterOwners(currentScatterOwners(saved));
+        saved = saved.withScatterOwners(currentScatterOwners(saved)).withCampaignName(roster.getCampaignName());
         lastCapturedCampaign = saved;
         return saved;
     }

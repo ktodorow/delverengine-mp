@@ -435,6 +435,13 @@ public final class CampaignSaveStore {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }
+        if(format <= 7 && protocol <= 50 && expected.getBuildId().equals("mp-v108-prototype-named-campaigns-56")
+                && (compatibility.getBuildId().equals("mp-v108-prototype-party-travel-55")
+                    || format <= 6 && compatibility.getBuildId().equals("mp-v108-prototype-dormant-floors-54")
+                    || format <= 5 && compatibility.getBuildId().equals("mp-v108-prototype-late-admission-53"))) {
+            compatibility = new DirectConnectCompatibility(expected.getBuildId(),
+                    compatibility.getContentFormat(), compatibility.getContentSha256());
+        }
         String campaignId = input.readUTF();
         int capacity = input.readInt();
         int startingLives = input.readInt();
@@ -545,7 +552,8 @@ public final class CampaignSaveStore {
             long item = input.readLong(); int slot = input.readInt();
             if(owners.put(item, slot) != null) throw new IllegalArgumentException("Duplicate scatter identity.");
         }
-        return saved.withScatterOwners(owners);
+        saved = saved.withScatterOwners(owners);
+        return format >= 8 ? saved.withCampaignName(input.readUTF()) : saved;
     }
 
     private void write(DataOutputStream output, CampaignSave campaign) throws IOException {
@@ -630,6 +638,7 @@ public final class CampaignSaveStore {
         for(java.util.Map.Entry<Long, Integer> entry : campaign.getScatterOwners().entrySet()) {
             output.writeLong(entry.getKey()); output.writeInt(entry.getValue());
         }
+        output.writeUTF(campaign.getCampaignName());
     }
 
     private static java.util.Map<Long, Long> readDropTimers(DataInputStream in) throws IOException {
