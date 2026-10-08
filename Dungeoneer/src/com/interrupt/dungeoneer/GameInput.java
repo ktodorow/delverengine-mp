@@ -423,6 +423,11 @@ public class GameInput implements InputProcessor {
 		isPressedMouse1 = false;
 		isPressedMouse2 = false;
 		isPressedMouse3 = false;
+		wasPressedMouse1 = wasPressedMouse2 = wasPressedMouse3 = false;
+		newlyPressedMouse1 = newlyPressedMouse2 = newlyPressedMouse3 = false;
+		newlyMouseScrollUp = newlyMouseScrollDown = false;
+		leftPointer = rightPointer = uiTouchPointer = lastTouchedPointer = null;
+		ignoreLastMouseLocation = true;
 
 		for(int i = 0; i < keysDown.length; i++) {
 			keysDown[i] = false;

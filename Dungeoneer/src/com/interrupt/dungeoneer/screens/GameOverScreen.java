@@ -49,6 +49,7 @@ public class GameOverScreen extends StatsScreen {
     private boolean firstDeath = false;
 
     private boolean dealtAchievements = false;
+    private boolean disposed;
     
     private String[] winTexts = {
             StringManager.get("screens.GameOverScreen.win_text_0"),
@@ -80,7 +81,11 @@ public class GameOverScreen extends StatsScreen {
 
 	@Override
 	public void dispose() {
-		// TODO Auto-generated method stub
+		disposed = true;
+		delayTimer.stop();
+		delayTimer.clear();
+		if(ui != null) { ui.dispose(); ui = null; }
+		super.dispose();
 	}
 
 	@Override
@@ -193,6 +198,7 @@ public class GameOverScreen extends StatsScreen {
         Timer.Task startFade = new Timer.Task() {
             @Override
             public void run() {
+                if(disposed) return;
                 doTick = true;
 
                 if(gameOver) {
@@ -318,8 +324,13 @@ public class GameOverScreen extends StatsScreen {
         freeBackgroundLevel();
 
         if(GameApplication.isDirectConnectSession()) {
-            // Defeated Co-op Campaign: nothing to reload; leaving the session ends this instance.
-            Gdx.app.exit();
+            // Defeated campaign stays archived; return to multiplayer entry in this window.
+            final GameApplication application = GameApplication.instance;
+            final com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer expected = application.getDirectConnectPeer();
+            Gdx.app.postRunnable(() -> {
+                if(!disposed && application.getScreen() == this && application.getDirectConnectPeer() == expected)
+                    application.leaveDirectConnectSession();
+            });
             return;
         }
         if(!gameOver) {

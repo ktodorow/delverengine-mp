@@ -29,34 +29,43 @@ public final class DirectConnectSessionScreen implements Screen {
     private boolean floorEntryRequested = false;
     private boolean disposed = false;
     private String entryError;
+    private boolean navigationPending;
+    private boolean confirmClose;
 
     public DirectConnectSessionScreen(GameApplication application, DirectConnectPeer peer) {
         if(application == null) throw new IllegalArgumentException("Game application cannot be null.");
-        if(peer == null) throw new IllegalArgumentException("Direct Connect peer cannot be null.");
         this.application = application;
         this.peer = peer;
     }
 
     @Override
-    public void show() { }
+    public void show() {
+        Gdx.input.setInputProcessor(null);
+        Gdx.input.setCursorCatched(false);
+    }
 
     @Override
     public void render(float delta) {
+        if(disposed) return;
+        handleNavigation();
         handleHostControls();
-        DirectConnectStatus status = peer.getStatus();
-        boolean spectator = peer.getPartyStatus() != null
+        DirectConnectStatus status = peer == null ? null : peer.getStatus();
+        DirectConnectPhase phase = status == null ? DirectConnectPhase.FAILED : status.getPhase();
+        boolean spectator = peer != null && peer.getPartyStatus() != null
                 && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null
                 && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()).getState()
                         == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING;
-        if((isFloorEntryReady(status.getPhase(), peer.getLocalMovementEntityId(),
-                peer.getMovementSnapshots()) || spectator && (status.getPhase() == DirectConnectPhase.READY
-                        || status.getPhase() == DirectConnectPhase.SYNCHRONIZING)
+        if(peer != null && !navigationPending && !confirmClose && (isFloorEntryReady(phase, peer.getLocalMovementEntityId(),
+                peer.getMovementSnapshots()) || spectator && (phase == DirectConnectPhase.READY
+                        || phase == DirectConnectPhase.SYNCHRONIZING)
                         && !peer.getMovementSnapshots().isEmpty()) && !floorEntryRequested) {
             floorEntryRequested = true;
             Gdx.app.postRunnable(new Runnable() {
                 @Override
                 public void run() {
-                    try { application.enterDirectConnectFloor(); }
+                    if(disposed || application.getScreen() != DirectConnectSessionScreen.this
+                            || application.getDirectConnectPeer() != peer) return;
+                    try { application.enterDirectConnectFloor(peer); }
                     catch(RuntimeException failure) {
                         entryError = failure.getMessage();
                         try {
@@ -84,15 +93,15 @@ public final class DirectConnectSessionScreen implements Screen {
                 width * 0.9f, Align.center, false);
         font.getData().setScale(1f);
         y -= 42f;
-        font.draw(batch, peer.getRole() + "  |  " + peer.getEndpoint(),
+        font.draw(batch, peer == null ? "Connection attempt" : peer.getRole() + "  |  " + peer.getEndpoint(),
                 textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
         y -= 34f;
-        font.draw(batch, status.getPhase().name(), textLeft(width, 0.9f), y,
+        font.draw(batch, phase.name(), textLeft(width, 0.9f), y,
                 width * 0.9f, Align.center, false);
         y -= 30f;
-        font.draw(batch, entryError == null ? status.getMessage() : entryError, textLeft(width, 0.8f), y,
+        font.draw(batch, entryError != null ? entryError : status == null ? "Session could not open." : status.getMessage(), textLeft(width, 0.8f), y,
                 width * 0.8f, Align.center, true);
-        if(status.getSessionId() != null) {
+        if(status != null && status.getSessionId() != null) {
             y -= 40f;
             font.draw(batch, "Private Session " + status.getSessionId(),
                     textLeft(width, 0.9f), y, width * 0.9f, Align.center, false);
@@ -124,21 +133,58 @@ public final class DirectConnectSessionScreen implements Screen {
                         textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
             }
         }
-        if(status.getPhase() == DirectConnectPhase.CLOSED
-                || status.getPhase() == DirectConnectPhase.DISCONNECTED
-                || status.getPhase() == DirectConnectPhase.FAILED) {
+        if(confirmClose) {
             y -= 36f;
-            font.draw(batch, "Session stopped. Restart to host or rejoin original Host. [ESC] Exit",
+            font.draw(batch, "Close Host lobby and disconnect Participants? [Y] Close   [N] Keep open",
                     textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
-            if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) Gdx.app.exit();
+        }
+        else if(phase == DirectConnectPhase.CLOSED
+                || phase == DirectConnectPhase.DISCONNECTED
+                || phase == DirectConnectPhase.FAILED
+                || phase == DirectConnectPhase.REJECTED) {
+            y -= 36f;
+            font.draw(batch, "Session stopped. [T] Retry   [ESC] Back / Cancel",
+                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
+        }
+        else {
+            y -= 36f;
+            font.draw(batch, peer instanceof DirectConnectHost ? "[ESC] Close lobby" : "[ESC] Cancel / Leave",
+                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
         }
         batch.end();
     }
 
     public void showFailure(String error) { entryError = error; }
 
+    private void handleNavigation() {
+        if(navigationPending) return;
+        if(confirmClose) {
+            if(Gdx.input.isKeyJustPressed(Input.Keys.Y)) navigate(application::leaveDirectConnectSession);
+            else if(Gdx.input.isKeyJustPressed(Input.Keys.N) || Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) confirmClose = false;
+            return;
+        }
+        DirectConnectPhase phase = peer == null ? DirectConnectPhase.FAILED : peer.getStatus().getPhase();
+        boolean stopped = phase == DirectConnectPhase.CLOSED || phase == DirectConnectPhase.FAILED
+                || phase == DirectConnectPhase.REJECTED || phase == DirectConnectPhase.DISCONNECTED;
+        if(stopped && Gdx.input.isKeyJustPressed(Input.Keys.T)) navigate(application::retryDirectConnectSession);
+        else if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) {
+            if(!stopped && peer instanceof DirectConnectHost) confirmClose = true;
+            else navigate(application::leaveDirectConnectSession);
+        }
+    }
+
+    private void navigate(final Runnable action) {
+        navigationPending = true;
+        Gdx.app.postRunnable(() -> {
+            if(disposed || application.getScreen() != this) return;
+            try { action.run(); }
+            catch(RuntimeException failure) { application.showDirectConnectFailure(failure.getMessage()); }
+            finally { navigationPending = false; }
+        });
+    }
+
     private void handleHostControls() {
-        if(!(peer instanceof DirectConnectHost)) return;
+        if(navigationPending || confirmClose || !(peer instanceof DirectConnectHost)) return;
         DirectConnectPhase phase = peer.getStatus().getPhase();
         if(phase == DirectConnectPhase.CLOSED || phase == DirectConnectPhase.FAILED) return;
         DirectConnectHost host = (DirectConnectHost)peer;

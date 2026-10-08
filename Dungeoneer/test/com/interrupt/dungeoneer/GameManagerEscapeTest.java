@@ -144,11 +144,9 @@ public class GameManagerEscapeTest {
     }
 
     private static GameApplication application(DirectConnectPeer peer) throws Exception {
-        GameApplication application = new ObjenesisStd().newInstance(GameApplication.class);
-        Field field = GameApplication.class.getDeclaredField("directConnectPeer");
-        field.setAccessible(true);
-        field.set(application, peer);
-        return application;
+        return new GameApplication() {
+            @Override public DirectConnectPeer getDirectConnectPeer() { return peer; }
+        };
     }
 
     private static final class StubOverlay extends Overlay {

@@ -4080,6 +4080,18 @@ public class GlRenderer {
 		loadedLevel = null;
 	}
 
+    /** Release world ownership and return its meshes to pools, retaining renderer setup. */
+    public void releaseCampaign() {
+		freeLoadedLevel();
+		game = null;
+		cutsceneCamera = null;
+        if(chunks != null) for(WorldChunk chunk : chunks) chunk.refresh();
+        chunks = null;
+        triangleSpatialHash.Flush();
+        handLagRotation = null;
+        offhandLagRotation = null;
+    }
+
 	public static void bindTexture(Texture t) {
 		if(t == null || t != boundTexture) {
 			t.bind();

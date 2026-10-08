@@ -122,6 +122,7 @@ public final class CampaignLibraryScreen implements Screen {
         promptOpen = true;
         Gdx.input.getTextInput(new Input.TextInputListener() {
             @Override public void input(String text) {
+                if(disposed || application.getScreen() != CampaignLibraryScreen.this) return;
                 promptOpen = false;
                 try {
                     File exported = library.exportCampaign(id, new File(text.trim()), application.getCampaignCompatibility());
@@ -137,6 +138,7 @@ public final class CampaignLibraryScreen implements Screen {
         promptOpen = true;
         Gdx.input.getTextInput(new Input.TextInputListener() {
             @Override public void input(String text) {
+                if(disposed || application.getScreen() != CampaignLibraryScreen.this) return;
                 promptOpen = false;
                 try {
                     CampaignRoster imported = library.importCampaign(new File(text.trim()), application.getCampaignCompatibility());
@@ -153,6 +155,7 @@ public final class CampaignLibraryScreen implements Screen {
         promptOpen = true;
         Gdx.input.getTextInput(new Input.TextInputListener() {
             @Override public void input(String text) {
+                if(disposed || application.getScreen() != CampaignLibraryScreen.this) return;
                 promptOpen = false;
                 try { open(library.create(text == null ? "" : text.trim(), newCampaignCapacity)); }
                 catch(RuntimeException failure) { fail(failure); }
@@ -167,6 +170,7 @@ public final class CampaignLibraryScreen implements Screen {
         error = null;
         Gdx.app.postRunnable(new Runnable() {
             @Override public void run() {
+                if(disposed || application.getScreen() != CampaignLibraryScreen.this) return;
                 try { application.hostDirectConnectCampaign(roster); }
                 catch(RuntimeException failure) {
                     opening = false;
@@ -190,6 +194,8 @@ public final class CampaignLibraryScreen implements Screen {
         error = message == null || message.trim().isEmpty()
                 ? failure.getClass().getSimpleName() : message;
     }
+
+    public void showFailure(String message) { error = message; }
 
     static String campaignLine(CampaignLibrary.Entry entry) {
         return entry.getCampaignId() + "  |  "

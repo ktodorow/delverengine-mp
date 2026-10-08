@@ -454,7 +454,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         if(requestedPort == 0) {
             Throwable lastFailure = null;
             for(int attempt = 0; attempt < 16; attempt++) {
-                ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(0)).syncUninterruptibly();
+                ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(0)).awaitUninterruptibly();
                 requireSuccess(tcpBind, "Could not bind Direct Connect TCP listener");
                 Channel candidateTcp = tcpBind.channel();
                 int candidatePort = ((InetSocketAddress)candidateTcp.localAddress()).getPort();
@@ -477,12 +477,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
         }
         else {
-            ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(requestedPort)).syncUninterruptibly();
+            ChannelFuture tcpBind = tcp.bind(new InetSocketAddress(requestedPort)).awaitUninterruptibly();
             requireSuccess(tcpBind, "Could not bind Direct Connect TCP listener");
             tcpListener = tcpBind.channel();
             boundPort = ((InetSocketAddress)tcpListener.localAddress()).getPort();
 
-            ChannelFuture udpBind = udp.bind(new InetSocketAddress(boundPort)).syncUninterruptibly();
+            ChannelFuture udpBind = udp.bind(new InetSocketAddress(boundPort)).awaitUninterruptibly();
             requireSuccess(udpBind, "Could not bind Direct Connect UDP listener");
             udpListener = udpBind.channel();
         }

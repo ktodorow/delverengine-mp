@@ -1,5 +1,6 @@
 package com.interrupt.dungeoneer.overlays;
 
+import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.scenes.scene2d.InputEvent;
 import com.badlogic.gdx.scenes.scene2d.ui.Label;
 import com.badlogic.gdx.scenes.scene2d.ui.Table;
@@ -10,8 +11,12 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 
 /** Personal confirmation menu; shared world continues until Host commits shutdown. */
 public final class SessionQuitOverlay extends WindowOverlay {
+    private boolean leaving;
+
     @Override public Table makeContent() {
-        boolean host = GameApplication.instance.getDirectConnectPeer() instanceof DirectConnectHost;
+        final GameApplication application = GameApplication.instance;
+        final com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer expected = application.getDirectConnectPeer();
+        boolean host = expected instanceof DirectConnectHost;
         Table content = new Table();
         final Label message = new Label(host ? "Save Campaign and end session for everyone?"
                 : "Leave session? Your Campaign Slot stays with Host.", skin);
@@ -21,8 +26,15 @@ public final class SessionQuitOverlay extends WindowOverlay {
         TextButton confirm = new TextButton(host ? "Save and Quit" : "Leave Session", skin);
         confirm.addListener(new ClickListener() {
             @Override public void clicked(InputEvent event, float x, float y) {
-                try { GameApplication.instance.leaveDirectConnectSession(); }
-                catch(RuntimeException failure) { message.setText("Save failed; session continues. " + failure.getMessage()); }
+                if(leaving) return;
+                leaving = true;
+                Gdx.app.postRunnable(() -> {
+                    if(application.getDirectConnectPeer() != expected
+                            || OverlayManager.instance.current() != SessionQuitOverlay.this) return;
+                    try { application.leaveDirectConnectSession(); }
+                    catch(RuntimeException failure) { message.setText("Save failed; session continues. " + failure.getMessage()); }
+                    finally { leaving = false; }
+                });
             }
         });
         content.add(confirm).fillX(); content.row();

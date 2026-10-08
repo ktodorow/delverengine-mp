@@ -170,6 +170,19 @@ public class GameManager {
 	{
 		renderer.init();
 	}
+
+    /** Retire one campaign while retaining the application's initialized renderer. */
+    public void releaseCampaign() {
+        running = false;
+        time_since_last_tick = 0f;
+        gameHasStarted = false;
+        if(game != null) game.setInputHandler(null);
+        game = null;
+        Game.instance = null;
+        Game.ignoreEscape = false;
+        if(Game.ui != null) Game.ui.clear();
+        if(renderer != null) renderer.releaseCampaign();
+    }
 	
 	public static Game getGame()
 	{

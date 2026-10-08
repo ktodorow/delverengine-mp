@@ -36,6 +36,8 @@ public class WinScreen extends StatsScreen {
     private float finishedTime = 0f;
 
     private float fadeTiming = 6f;
+    private final Timer delayTimer = new Timer();
+    private boolean disposed;
 
     public WinScreen() { }
 
@@ -49,7 +51,11 @@ public class WinScreen extends StatsScreen {
 
 	@Override
 	public void dispose() {
-		// TODO Auto-generated method stub
+		disposed = true;
+		delayTimer.stop();
+		delayTimer.clear();
+		if(ui != null) { ui.dispose(); ui = null; }
+		super.dispose();
 	}
 
 	@Override
@@ -109,13 +115,14 @@ public class WinScreen extends StatsScreen {
         Timer.Task startFade = new Timer.Task() {
             @Override
             public void run() {
+                if(disposed) return;
                 doTick = true;
                 Audio.playMusic("win.mp3", false);
             }
         };
 
         // Schedule the music task
-        Timer delayTimer = new Timer();
+        delayTimer.clear();
         delayTimer.scheduleTask(startFade, 2.75f);
         delayTimer.start();
 
@@ -199,12 +206,12 @@ public class WinScreen extends StatsScreen {
             Timer.Task startFade = new Timer.Task() {
                 @Override
                 public void run() {
+                    if(disposed) return;
                     showStats(progress + 1);
                 }
             };
 
             // Schedule the music task
-            Timer delayTimer = new Timer();
             delayTimer.scheduleTask(startFade, 0.05f);
             delayTimer.start();
 
