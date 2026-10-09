@@ -130,6 +130,7 @@ final class DirectConnectWire {
     private static final int TRAVEL_READY = 66;
     private static final int LOBBY_SNAPSHOT = 67;
     private static final int LOBBY_RECEIVED = 68;
+    private static final int PLAYER_READY = 69;
     private static final int TRAVEL_INTENT = 63;
     private static final int TRAVEL_STATE = 64;
     private static final int MAX_MAPPING_MESSAGE_BYTES = com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.MAX_BYTES + 128;
@@ -158,7 +159,7 @@ final class DirectConnectWire {
 
     static ByteBuf encodeDatagram(ByteBufAllocator allocator, Message message)
             throws ProtocolException {
-        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived)
+        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived || message instanceof PlayerReady)
             throw new ProtocolException("Lobby messages require reliable TCP.");
         ByteBuf output = allocator.buffer(128);
         boolean successful = false;
@@ -180,7 +181,7 @@ final class DirectConnectWire {
             throw new ProtocolException("Datagram exceeded protocol size bound.");
         }
         Message message = decode(input);
-        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived)
+        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived || message instanceof PlayerReady)
             throw new ProtocolException("Lobby messages require reliable TCP.");
         return message;
     }
@@ -201,7 +202,8 @@ final class DirectConnectWire {
             for(com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot slot : lobby.getSlots()) {
                 output.writeByte(slot.getNumber());
                 int flags = (slot.isClaimed() ? 1 : 0) | (slot.isConnected() ? 2 : 0)
-                        | (slot.isAuthenticated() ? 4 : 0) | (slot.isSynchronized() ? 8 : 0);
+                        | (slot.isAuthenticated() ? 4 : 0) | (slot.isSynchronized() ? 8 : 0)
+                        | (slot.isPlayerReady() ? 16 : 0);
                 output.writeByte(flags);
                 if(slot.isClaimed()) {
                     writeString(output, slot.getPresentation().getNickname(), DirectConnectProtocol.MAX_NICKNAME_BYTES, "nickname");
@@ -214,6 +216,13 @@ final class DirectConnectWire {
             output.writeByte(LOBBY_RECEIVED);
             writeString(output, received.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
             output.writeLong(received.sequence);
+        }
+        else if(message instanceof PlayerReady) {
+            PlayerReady ready = (PlayerReady)message;
+            output.writeByte(PLAYER_READY);
+            writeString(output, ready.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeByte(ready.slot); output.writeLong(ready.connectionToken);
+            output.writeLong(ready.sequence); output.writeBoolean(ready.ready);
         }
         else if(message instanceof TravelDestination) {
             TravelDestination report = (TravelDestination)message;
@@ -1064,13 +1073,13 @@ final class DirectConnectWire {
                 for(int index = 0; index < slotCount; index++) {
                     requireReadable(input, 2, "lobby slot");
                     int number = input.readUnsignedByte(), flags = input.readUnsignedByte();
-                    if((flags & ~15) != 0) throw new ProtocolException("Invalid lobby flags.");
+                    if((flags & ~31) != 0) throw new ProtocolException("Invalid lobby flags.");
                     com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation presentation = (flags & 1) == 0 ? null
                             : new com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation(
                                     readString(input, DirectConnectProtocol.MAX_NICKNAME_BYTES, "nickname"),
                                     readString(input, DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar"));
                     lobbySlots.add(new com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot(number,
-                            presentation, (flags & 2) != 0, (flags & 4) != 0, (flags & 8) != 0));
+                            presentation, (flags & 2) != 0, (flags & 4) != 0, (flags & 8) != 0, (flags & 16) != 0));
                 }
                 message = new LobbySnapshotMessage(lobbySession,
                         new com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot(lobbySequence, campaignName,
@@ -1080,6 +1089,15 @@ final class DirectConnectWire {
                 String receivedSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
                 requireReadable(input, 8, "lobby receipt");
                 message = new LobbyReceived(receivedSession, input.readLong());
+                break;
+            case PLAYER_READY:
+                String playerReadySession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 18, "player Ready");
+                int readySlot = input.readUnsignedByte();
+                long readyToken = input.readLong(), readySequence = input.readLong();
+                int readyFlag = input.readUnsignedByte();
+                if(readyFlag > 1) throw new ProtocolException("Invalid player Ready flag.");
+                message = new PlayerReady(playerReadySession, readySlot, readyToken, readySequence, readyFlag == 1);
                 break;
             case TRAVEL_DESTINATION:
                 String destinationSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
@@ -3191,6 +3209,19 @@ final class DirectConnectWire {
             if(sessionId == null || sessionId.isEmpty() || sequence < 1L)
                 throw new IllegalArgumentException("Invalid lobby receipt.");
             this.sessionId = sessionId; this.sequence = sequence;
+        }
+    }
+
+    static final class PlayerReady implements Message {
+        final String sessionId;
+        final int slot;
+        final long connectionToken, sequence;
+        final boolean ready;
+        PlayerReady(String sessionId, int slot, long connectionToken, long sequence, boolean ready) {
+            if(sessionId == null || sessionId.isEmpty() || slot < 1 || slot > 4 || connectionToken == 0L || sequence < 1L)
+                throw new IllegalArgumentException("Invalid player Ready request.");
+            this.sessionId = sessionId; this.slot = slot; this.connectionToken = connectionToken;
+            this.sequence = sequence; this.ready = ready;
         }
     }
 

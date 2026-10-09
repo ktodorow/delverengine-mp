@@ -281,6 +281,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private long nextLifecycleSequence;
     private volatile com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot lobbySnapshot;
     private long nextLobbySequence;
+    private boolean hostPlayerReady;
+    private final Map<Integer, CampaignSlot> publishedLobbySlots = new LinkedHashMap<>();
     private long nextPartyStatusSequence;
     private long nextPartyChatSequence;
     private long nextPauseRequestSequence;
@@ -497,7 +499,20 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         publishLobby();
     }
 
-    @Override public com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot getLobbySnapshot() { return lobbySnapshot; }
+    /** Refreshes consent invalidated by accepted external roster edits before returning public view. */
+    @Override public synchronized com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot getLobbySnapshot() {
+        refreshLobbyConsent();
+        return lobbySnapshot;
+    }
+
+    /** Caller holds Host monitor, including Ready and Start action boundaries. */
+    private void refreshLobbyConsent() {
+        if(!sessionStarted && !closing.get() && lobbySnapshot != null) {
+            for(int number = 1; number <= roster.getCapacity(); number++) {
+                if(publishedLobbySlots.get(number) != roster.getSlot(number)) { publishLobby(); break; }
+            }
+        }
+    }
 
     /** Called under Host monitor; queue every report on TCP loop to retain cross-thread order. */
     private synchronized void publishLobby() {
@@ -506,11 +521,20 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         for(int number = 1; number <= roster.getCapacity(); number++) {
             CampaignSlot slot = roster.getSlot(number);
             RemoteConnection connection = slot == null ? null : findConnection(slot.getLauncherIdentity());
+            CampaignSlot previous = publishedLobbySlots.put(number, slot);
+            if(previous != null && previous != slot) {
+                if(number == 1) hostPlayerReady = false;
+                else if(connection != null) {
+                    connection.playerReady = false;
+                    connection.minimumReadySequence = nextLobbySequence + 1L;
+                }
+            }
             boolean connected = number == 1 || connection != null && connection.slot != null && !connection.kicked;
             boolean authenticated = number == 1 || connected && connection.udpAddress != null;
             boolean synchronizedState = number == 1 || authenticated && connection.lobbySynchronized;
             slots.add(new com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot(number,
-                    slot == null ? null : slot.getPresentation(), connected, authenticated, synchronizedState));
+                    slot == null ? null : slot.getPresentation(), connected, authenticated, synchronizedState,
+                    synchronizedState && (number == 1 ? hostPlayerReady : connection.playerReady)));
         }
         lobbySnapshot = new com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot(++nextLobbySequence,
                 roster.getCampaignName(), roster.getCapacity(), startingLives, 1, slots);
@@ -862,9 +886,43 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         return ready;
     }
 
+    @Override public synchronized boolean canSetPlayerReady() {
+        return !sessionStarted && !closing.get() && lobbySnapshot != null
+                && status.getPhase() != DirectConnectPhase.FAILED;
+    }
+
+    @Override public synchronized void setPlayerReady(boolean ready) {
+        if(!canSetPlayerReady()) throw new IllegalStateException("Player Ready requires an open pregame lobby.");
+        refreshLobbyConsent();
+        if(hostPlayerReady == ready) return;
+        hostPlayerReady = ready;
+        publishLobby();
+    }
+
+    private synchronized void playerReady(ChannelHandlerContext context, DirectConnectWire.PlayerReady request) {
+        refreshLobbyConsent();
+        RemoteConnection connection = connections.get(context.channel());
+        if(sessionStarted || closing.get() || connection == null || connection.kicked || connection.slot == null
+                || !connection.channel.isActive() || connection.udpAddress == null || !connection.lobbySynchronized
+                || !sessionId.equals(request.sessionId) || request.slot != connection.slot.getNumber()
+                || request.connectionToken != connection.udpToken
+                || request.sequence < connection.minimumReadySequence
+                || request.sequence < connection.lobbyAuthenticationSequence || request.sequence > connection.lastLobbySequence) return;
+        if(connection.playerReady == request.ready) return;
+        connection.playerReady = request.ready;
+        publishLobby();
+    }
+
     public synchronized boolean canStartSession() {
-        return !sessionStarted && (getUdpReadyParticipantCount() >= 2
-                || durableCampaign != null);
+        refreshLobbyConsent();
+        if(sessionStarted || closing.get() || status.getPhase() == DirectConnectPhase.FAILED || !hostPlayerReady) return false;
+        int connected = 1;
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.slot == null || connection.kicked || !connection.channel.isActive()) continue;
+            connected++;
+            if(connection.udpAddress == null || !connection.lobbySynchronized || !connection.playerReady) return false;
+        }
+        return connected >= 2 || durableCampaign != null;
     }
 
     /** True when this Active Floor was rebuilt from a durable Campaign Save. */
@@ -872,6 +930,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     public synchronized void startSession() {
         if(sessionStarted) return;
+        if(!canStartSession())
+            throw new IllegalStateException("Every connected Participant must finish synchronization and become Ready before Host starts.");
         int participantCount = getUdpReadyParticipantCount();
         if(participantCount < 2 && durableCampaign == null) {
             throw new IllegalStateException("At least one approved remote Participant must finish TCP and UDP lobby setup.");
@@ -4370,7 +4430,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         private boolean lateParticipant;
         private boolean spectatorReady;
         private boolean lobbySynchronized;
-        private long lastLobbySequence, lobbyAuthenticationSequence;
+        private boolean playerReady;
+        private long lastLobbySequence, lobbyAuthenticationSequence, minimumReadySequence;
         private long admissionId, admissionGeneration, admissionTick, admissionStartedNanos;
         private int admissionStage;
         private final java.util.ArrayDeque<Message> admissionChanges = new java.util.ArrayDeque<Message>();
@@ -4505,6 +4566,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             else if(message instanceof DirectConnectWire.LobbyReceived && helloAccepted) {
                 lobbyReceived(context, (DirectConnectWire.LobbyReceived)message);
+            }
+            else if(message instanceof DirectConnectWire.PlayerReady && helloAccepted) {
+                playerReady(context, (DirectConnectWire.PlayerReady)message);
             }
             else if(message instanceof SlotClaim && helloAccepted) {
                 claimSlot(context, (SlotClaim)message);

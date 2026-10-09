@@ -510,6 +510,12 @@ public class GameApplication extends Game {
 
     public String getMultiplayerConnectionProgress() { return sessionFlow.getClientProgress(); }
 
+    public boolean setMultiplayerPlayerReady(DirectConnectPeer expected, boolean ready) {
+        return sessionFlow.setPlayerReady(expected, ready);
+    }
+
+    public boolean startMultiplayerCampaign(DirectConnectPeer expected) { return sessionFlow.startCampaign(expected); }
+
     public void cancelMultiplayerConnect() {
         sessionFlow.cancelClient();
         showMultiplayerMenu();

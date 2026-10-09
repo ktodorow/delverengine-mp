@@ -20,6 +20,9 @@ import java.net.ServerSocket;
 import java.net.DatagramSocket;
 import java.security.SecureRandom;
 
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.readyClient;
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.startReadySession;
+
 import static org.junit.Assert.*;
 
 /** Actual TCP/UDP sessions behind the application's reusable launcher boundary. */
@@ -93,7 +96,7 @@ public class DirectConnectSessionFlowTest {
             assertFalse(flow.enter(first, () -> entered.add(first))); // Queued callback after Cancel.
             flow.retry();
             DirectConnectHost next = (DirectConnectHost)flow.getPeer();
-            next.startSession(); // Saved campaign permits Host-only resume.
+            startReadySession(next); // Saved campaign permits Host-only resume.
             assertFalse(flow.enter(first, () -> entered.add(first))); // Queued callback after replacement.
             assertTrue(flow.enter(next, () -> entered.add(next)));
             assertEquals(java.util.Arrays.asList(first, next), entered);
@@ -287,8 +290,8 @@ public class DirectConnectSessionFlowTest {
     }
 
     private static void admitAndStart(DirectConnectHost host, DirectConnectClient client) throws Exception {
-        awaitPhase(client, DirectConnectPhase.LOBBY);
-        host.startSession();
+        readyClient(client);
+        startReadySession(host);
         awaitPhase(client, DirectConnectPhase.READY);
     }
 

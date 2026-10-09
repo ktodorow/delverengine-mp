@@ -27,7 +27,7 @@ public final class DirectConnectSessionScreen extends BaseScreen {
     private final DirectConnectPeer peer;
     private final Table cards = new Table();
     private final Label title, settings, counts, progress, recovery;
-    private final TextButton start, leave, retry, keepOpen, relink, reject;
+    private final TextButton ready, start, leave, retry, keepOpen, relink, reject;
     private LobbySnapshot displayed;
     private boolean floorEntryRequested, navigationPending, confirmClose, disposed;
     private String entryError;
@@ -38,7 +38,7 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         this.peer = peer;
         screenName = "DirectConnectSessionScreen";
         splashLevel = splashScreenInfo.backgroundLevel;
-        viewport = new FitViewport(540, 460);
+        viewport = new FitViewport(540, 600);
         ui = new Stage(viewport);
         Table root = new Table();
         root.setFillParent(true);
@@ -61,11 +61,14 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         reject = action(recoveryActions, "Reject recovery (R)", () -> recoverClaim(false));
         panel.add(recoveryActions).height(24); panel.row();
         Table actions = new Table();
-        leave = action(actions, peer instanceof DirectConnectHost ? "Close lobby (Esc)" : "Leave (Esc)", this::leave);
-        keepOpen = action(actions, "Keep open", () -> confirmClose = false);
-        retry = action(actions, "Retry (T)", application::retryDirectConnectSession);
-        start = action(actions, "Start (Enter)", () -> ((DirectConnectHost)peer).startSession());
-        panel.add(actions).height(24).padTop(5);
+        ready = action(actions, "Ready (Space)", this::toggleReady);
+        start = action(actions, "Start (Enter)", () -> application.startMultiplayerCampaign(peer));
+        panel.add(actions).height(24).padTop(5); panel.row();
+        Table navigation = new Table();
+        leave = action(navigation, peer instanceof DirectConnectHost ? "Close lobby (Esc)" : "Leave (Esc)", this::leave);
+        keepOpen = action(navigation, "Keep open", () -> confirmClose = false);
+        retry = action(navigation, "Retry (T)", application::retryDirectConnectSession);
+        panel.add(navigation).height(24).padTop(5);
         root.add(panel);
         ui.addActor(root);
         updateLobby();
@@ -119,9 +122,10 @@ public final class DirectConnectSessionScreen extends BaseScreen {
                 detail.add(label(slot.getNumber() + ". " + name, 0.85f)).width(380).height(21).left(); detail.row();
                 String state = !slot.isClaimed() ? "Available to compatible friend" : !slot.isConnected() ? "Reserved / Offline"
                         : !slot.isAuthenticated() ? "Connected / Authenticating UDP"
-                        : !slot.isSynchronized() ? "Connected / Synchronizing lobby" : "Connected / Synchronized";
+                        : !slot.isSynchronized() ? "Connected / Synchronizing lobby"
+                        : slot.isPlayerReady() ? "Connected / Ready" : "Connected / Not ready";
                 Label status = label(state, 0.7f);
-                status.setColor(slot.isSynchronized() ? Color.GREEN : slot.isConnected() ? Color.ORANGE : Color.GRAY);
+                status.setColor(slot.isPlayerReady() ? Color.GREEN : slot.isConnected() ? Color.ORANGE : Color.GRAY);
                 detail.add(status).width(380).height(18).left();
                 card.add(detail).expandX().left();
                 cards.add(card).width(470).height(54).padBottom(3); cards.row();
@@ -136,6 +140,10 @@ public final class DirectConnectSessionScreen extends BaseScreen {
                 : application.getMultiplayerConnectionProgress()));
         progress.setColor(confirmClose || stopped || entryError != null ? Color.ORANGE : Color.WHITE);
         boolean host = peer instanceof DirectConnectHost;
+        ready.setVisible(!confirmClose && !stopped);
+        ready.setDisabled(peer == null || !peer.canSetPlayerReady());
+        LobbySnapshot.Slot local = lobby == null ? null : lobby.getSlot(host ? 1 : peer.getLocalCampaignSlot());
+        ready.setText(local != null && local.isPlayerReady() ? "Not ready (Space)" : "Ready (Space)");
         start.setVisible(host && !confirmClose && !stopped);
         start.setDisabled(!host || !((DirectConnectHost)peer).canStartSession());
         if(host) start.setText(((DirectConnectHost)peer).isResumedCampaign() ? "Resume (Enter)" : "Start (Enter)");
@@ -150,7 +158,13 @@ public final class DirectConnectSessionScreen extends BaseScreen {
             recovery.setText(text("Recovery: " + claim.getNickname() + " / Slot " + claim.getRequestedSlot()
                     + " / Identity fingerprint " + claim.getLauncherIdentity().getFingerprint() + ". Verify trusted friend before relink."));
         }
-        else recovery.setText("Compatible friends enter unused capacity automatically.");
+        else recovery.setText("Every connected player must be Ready. Host then chooses Start.");
+    }
+
+    private void toggleReady() {
+        LobbySnapshot lobby = peer.getLobbySnapshot();
+        LobbySnapshot.Slot local = lobby == null ? null : lobby.getSlot(peer instanceof DirectConnectHost ? 1 : peer.getLocalCampaignSlot());
+        if(local != null) application.setMultiplayerPlayerReady(peer, !local.isPlayerReady());
     }
 
     private void recoverClaim(boolean trusted) {
@@ -201,8 +215,9 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         else if(!confirmClose && retry.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.T)) navigate(application::retryDirectConnectSession);
         else if(!confirmClose && relink.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.L)) navigate(() -> recoverClaim(true));
         else if(!confirmClose && reject.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.R)) navigate(() -> recoverClaim(false));
+        else if(!confirmClose && ready.isVisible() && !ready.isDisabled() && Gdx.input.isKeyJustPressed(Input.Keys.SPACE)) navigate(this::toggleReady);
         else if(!confirmClose && peer instanceof DirectConnectHost && Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && !start.isDisabled())
-            navigate(() -> ((DirectConnectHost)peer).startSession());
+            navigate(() -> application.startMultiplayerCampaign(peer));
         if(peer == null || navigationPending || confirmClose || floorEntryRequested) return;
         DirectConnectPhase phase = peer.getStatus().getPhase();
         boolean spectator = peer.getPartyStatus() != null && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null

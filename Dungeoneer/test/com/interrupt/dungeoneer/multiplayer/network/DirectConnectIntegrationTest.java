@@ -65,6 +65,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.readyClient;
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.startReadySession;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -118,7 +121,18 @@ public class DirectConnectIntegrationTest {
             sendTravelDatagram(udp, fixture.host.getBoundPort(), new DirectConnectWire.UdpRegister(challenge.sessionId, accepted.udpToken));
             long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
             while(fixture.host.getUdpReadyParticipantCount() < 2 && System.currentTimeMillis() < deadline) Thread.sleep(10L);
-            fixture.host.startSession();
+            DirectConnectWire.LobbySnapshotMessage lobby;
+            do { lobby = (DirectConnectWire.LobbySnapshotMessage)readTcpMessage(raw); }
+            while(!lobby.snapshot.getSlot(accepted.slotNumber).isAuthenticated());
+            writeTcp(raw, new DirectConnectWire.LobbyReceived(challenge.sessionId, lobby.snapshot.getSequence()));
+            do { lobby = (DirectConnectWire.LobbySnapshotMessage)readTcpMessage(raw); }
+            while(!lobby.snapshot.getSlot(accepted.slotNumber).isSynchronized());
+            writeTcp(raw, new DirectConnectWire.PlayerReady(challenge.sessionId, accepted.slotNumber,
+                    accepted.udpToken, lobby.snapshot.getSequence(), true));
+            while(!fixture.host.getLobbySnapshot().getSlot(accepted.slotNumber).isPlayerReady()
+                    && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+            assertTrue(fixture.host.getLobbySnapshot().getSlot(accepted.slotNumber).isPlayerReady());
+            startReadySession(fixture.host);
             while(!(readTcp(raw) instanceof DirectConnectWire.SessionReady)) { }
             long sourceGeneration = fixture.host.getNativeWorldGeneration();
             fixture.host.setSessionPaused(true);
@@ -152,9 +166,9 @@ public class DirectConnectIntegrationTest {
     @Test public void destinationPauseNeedsEveryConnectedPeerAtCurrentGeneration() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("travel-all-ready");
         HostFixture fixture = host(compatibility, 2, "travel-all-ready");
-        DirectConnectClient friend = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient friend = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            startReadySession(fixture.host); awaitPhase(friend, DirectConnectPhase.READY);
             fixture.host.registerPartyPortal("stairs:down", 16.5f, 16.5f, 0.5f);
             friend.requestPartyTransition("stairs:down"); awaitTravel(friend, "LOADING");
             fixture.host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(
@@ -187,9 +201,9 @@ public class DirectConnectIntegrationTest {
     @Test public void loadingWaitsForGenerationReadinessAndCannotBeUnpaused() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("travel-readiness");
         HostFixture fixture = host(compatibility, 2, "travel-readiness");
-        DirectConnectClient friend = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient friend = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            startReadySession(fixture.host); awaitPhase(friend, DirectConnectPhase.READY);
             fixture.host.registerPartyPortal("stairs:down", 16.5f, 16.5f, 0.5f);
             friend.requestPartyTransition("stairs:down"); awaitTravel(friend, "LOADING");
             fixture.host.setSessionPaused(false);
@@ -201,9 +215,9 @@ public class DirectConnectIntegrationTest {
     @Test public void clientTravelWaitsForLivingPartyAndCancelsCountdown() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("party-travel");
         HostFixture fixture = host(compatibility, 2, "party-travel");
-        DirectConnectClient friend = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient friend = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            startReadySession(fixture.host); awaitPhase(friend, DirectConnectPhase.READY);
             fixture.host.registerPartyPortal("stairs:down", 16.5f, 16.5f, 0.5f);
             fixture.host.setNativeParticipantPosition(new ParticipantId("campaign-slot-1"), 23f, 16.5f, 0.5f);
             friend.requestPartyTransition("stairs:down");
@@ -231,12 +245,12 @@ public class DirectConnectIntegrationTest {
         DirectConnectCompatibility compatibility = compatibility("late-reservation-recovery");
         File root = temporaryFolder.newFolder("late-reservation-recovery-store");
         HostFixture fixture = host(compatibility, 3, "late-reservation-recovery", root);
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         MemoryReconnectTokens tokens = new MemoryReconnectTokens();
         DirectConnectClient late = null;
         HostFixture resumed = null;
         try {
-            fixture.host.startSession(); awaitPhase(existing, DirectConnectPhase.READY);
+            startReadySession(fixture.host); awaitPhase(existing, DirectConnectPhase.READY);
             late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, tokens, compatibility);
             awaitPhase(late, DirectConnectPhase.READY);
@@ -248,8 +262,8 @@ public class DirectConnectIntegrationTest {
             resumed = host(compatibility, 3, "late-reservation-recovery", root);
             late = client(resumed.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, tokens, compatibility);
-            awaitPhase(late, DirectConnectPhase.LOBBY);
-            resumed.host.startSession();
+            readyClient(late);
+            startReadySession(resumed.host);
             awaitPhase(late, DirectConnectPhase.READY);
             assertEquals(3, late.getCampaignSlot());
             assertNull(late.getLocalMovementEntityId());
@@ -269,10 +283,10 @@ public class DirectConnectIntegrationTest {
     @Test public void lateSpectatorWorldRequestsCannotCreateOwnershipOrProgress() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("spectator-world-actions");
         HostFixture fixture = host(compatibility, 3, "spectator-world-actions");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession(); awaitPhase(existing, DirectConnectPhase.READY);
+            startReadySession(fixture.host); awaitPhase(existing, DirectConnectPhase.READY);
             late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, new MemoryReconnectTokens(), compatibility);
             awaitPhase(late, DirectConnectPhase.READY);
@@ -300,11 +314,11 @@ public class DirectConnectIntegrationTest {
     @Test public void lateNativeMovementReconstructsLivingAvatarsBeforeCheckpointAck() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("late-native-avatars");
         HostFixture fixture = host(compatibility, 3, "late-native-avatars");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
         try {
-            fixture.host.startSession(); awaitPhase(existing, DirectConnectPhase.READY);
+            startReadySession(fixture.host); awaitPhase(existing, DirectConnectPhase.READY);
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
                     3, new MemoryReconnectTokens(), compatibility);
@@ -333,10 +347,10 @@ public class DirectConnectIntegrationTest {
     @Test public void malformedLateConnectionDoesNotStopHostGameplay() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("malformed-late");
         HostFixture fixture = host(compatibility, 3, "malformed-late");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         try(Socket raw = new Socket("127.0.0.1", fixture.host.getBoundPort())) {
             raw.setSoTimeout((int)TIMEOUT_MILLIS);
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             writeTcp(raw, new DirectConnectWire.ClientHello(DirectConnectProtocol.VERSION,
                     compatibility.getBuildId(), compatibility.getContentFormat(),
@@ -369,8 +383,8 @@ public class DirectConnectIntegrationTest {
                 2, tokens, compatibility);
         DirectConnectClient late = null;
         try {
-            awaitPhase(friend, DirectConnectPhase.LOBBY);
-            fixture.host.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            readyClient(friend);
+            startReadySession(fixture.host); awaitPhase(friend, DirectConnectPhase.READY);
             late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, new MemoryReconnectTokens(), compatibility);
             awaitPhase(late, DirectConnectPhase.READY);
@@ -391,10 +405,10 @@ public class DirectConnectIntegrationTest {
     @Test public void repeatedLiveClaimReturnsSameAdmissionCredentials() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("duplicate-late-claim");
         HostFixture fixture = host(compatibility, 3, "duplicate-late-claim");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         try(Socket raw = new Socket("127.0.0.1", fixture.host.getBoundPort())) {
             raw.setSoTimeout((int)TIMEOUT_MILLIS);
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             writeTcp(raw, new DirectConnectWire.ClientHello(DirectConnectProtocol.VERSION,
                     compatibility.getBuildId(), compatibility.getContentFormat(),
@@ -423,10 +437,10 @@ public class DirectConnectIntegrationTest {
     @Test public void fourSlotsJoinDuringCombatProtectOccupantsAndRejectFullCapacity() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("four-slots-live-combat");
         HostFixture fixture = host(compatibility, 4, "four-slots-live-combat");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         DirectConnectClient third = null, fourth = null, extra = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             ParticipantId friend = new ParticipantId("campaign-slot-2");
             fixture.host.applyNativeParticipantDamage("native-world", friend, 1, 16.5f, 16.5f, 0.5f);
@@ -461,12 +475,12 @@ public class DirectConnectIntegrationTest {
     @Test public void lateBaselineRestoresOngoingEffectPhaseWithoutStartCue() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("late-current-effects");
         HostFixture fixture = host(compatibility, 3, "late-current-effects");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<String, LocalizedString>();
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             String actorId = AuthoritativeCombatEncounter.participantTargetId(new ParticipantId("campaign-slot-1"));
             NativeStatusEffectState poison = new NativeStatusEffectState(81L,
@@ -497,14 +511,14 @@ public class DirectConnectIntegrationTest {
     @Test public void freshReturnCreatesLateCharacterOnceWithNativeStarterRules() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("late-fresh-return");
         HostFixture fixture = host(compatibility, 3, "late-fresh-return");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         com.interrupt.dungeoneer.game.Game previous = com.interrupt.dungeoneer.game.Game.instance;
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<String, LocalizedString>();
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             game.player.inventory.add(new com.interrupt.dungeoneer.entities.Item());
@@ -559,12 +573,12 @@ public class DirectConnectIntegrationTest {
     @Test public void timedOutNativeAdmissionCanRetrySameSlotWithoutHalfCharacter() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("late-timeout-retry");
         HostFixture fixture = host(compatibility, 3, "late-timeout-retry");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         MemoryReconnectTokens tokens = new MemoryReconnectTokens();
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3), 3, tokens, compatibility);
@@ -596,13 +610,13 @@ public class DirectConnectIntegrationTest {
         DirectConnectCompatibility compatibility = compatibility("late-cold-resume");
         File root = temporaryFolder.newFolder("late-resume-store");
         HostFixture fixture = host(compatibility, 3, "late-cold-resume", root);
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         MemoryReconnectTokens tokens = new MemoryReconnectTokens();
         DirectConnectClient late = null;
         HostFixture resumed = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, tokens, compatibility);
@@ -613,8 +627,8 @@ public class DirectConnectIntegrationTest {
             resumed = host(compatibility, 3, "late-cold-resume", root);
             late = client(resumed.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, tokens, compatibility);
-            awaitPhase(late, DirectConnectPhase.LOBBY);
-            resumed.host.startSession();
+            readyClient(late);
+            startReadySession(resumed.host);
             awaitPhase(late, DirectConnectPhase.READY);
             assertNull("Cold resume cannot mint a Late Participant body", late.getLocalMovementEntityId());
             assertEquals(1, resumed.host.getMovementEntities().size());
@@ -632,11 +646,11 @@ public class DirectConnectIntegrationTest {
     @Test public void loadingFloorDefersAdmissionAndReplacementInvalidatesOldCheckpoint() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("late-generation-edge");
         HostFixture fixture = host(compatibility, 3, "late-generation-edge");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             fixture.host.beginNativeWorld();
             long loadingGeneration = fixture.host.getNativeWorldGeneration();
@@ -679,12 +693,12 @@ public class DirectConnectIntegrationTest {
     @Test public void lateSpectatorCanChatAndReconnectWithoutHostInterruption() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("late-spectator-reconnect");
         HostFixture fixture = host(compatibility, 3, "late-spectator-reconnect");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         MemoryReconnectTokens tokens = new MemoryReconnectTokens();
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, tokens, compatibility);
@@ -717,11 +731,11 @@ public class DirectConnectIntegrationTest {
     @Test public void changesAfterCatchUpFenceReachJoinerBeforeActivation() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("admission-mutation-gap");
         HostFixture fixture = host(compatibility, 3, "admission-mutation-gap");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
@@ -756,11 +770,11 @@ public class DirectConnectIntegrationTest {
     @Test public void nativeLateAdmissionWaitsForBothReconstructionCheckpoints() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("native-admission-checkpoints");
         HostFixture fixture = host(compatibility, 3, "native-admission-checkpoints");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
@@ -795,11 +809,11 @@ public class DirectConnectIntegrationTest {
     @Test public void lateSpectatorCanAttachNativeFloorWithoutReceivingStarterItems() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("late-native-floor");
         HostFixture fixture = host(compatibility, 3, "late-native-floor");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, new MemoryReconnectTokens(), compatibility);
@@ -827,11 +841,11 @@ public class DirectConnectIntegrationTest {
     @Test public void lateParticipantStaysInactiveUntilBaselineIsAcknowledged() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("late-baseline-barrier");
         HostFixture fixture = host(compatibility, 3, "late-baseline-barrier");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try(Socket late = new Socket("127.0.0.1", fixture.host.getBoundPort());
                 java.net.DatagramSocket udp = new java.net.DatagramSocket()) {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             late.setSoTimeout((int)TIMEOUT_MILLIS);
             writeTcp(late, new DirectConnectWire.ClientHello(DirectConnectProtocol.VERSION,
@@ -868,10 +882,10 @@ public class DirectConnectIntegrationTest {
     @Test public void firstArrivalFreshReturnsConnectedBodylessLateSpectator() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("travel-bodyless-fresh");
         HostFixture fixture = host(compatibility, 3, "travel-bodyless-fresh");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession(); awaitPhase(existing, DirectConnectPhase.READY);
+            startReadySession(fixture.host); awaitPhase(existing, DirectConnectPhase.READY);
             late = client(fixture.host.getBoundPort(), '3', "Late", AvatarCatalog.HUMANOID_3,
                     3, new MemoryReconnectTokens(), compatibility);
             awaitPhase(late, DirectConnectPhase.READY); awaitPartyState(late, 3, PartyMemberState.SPECTATING);
@@ -895,11 +909,11 @@ public class DirectConnectIntegrationTest {
             throws Exception {
         DirectConnectCompatibility compatibility = compatibility("live-late-spectator");
         HostFixture fixture = host(compatibility, 3, "live-late-spectator");
-        DirectConnectClient existing = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient existing = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         DirectConnectClient late = null;
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(existing, DirectConnectPhase.READY);
             awaitMovementSnapshots(existing, 1);
             long before = existing.getMovementSnapshots().get(0).getHostTick();
@@ -940,9 +954,9 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient owner = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
         DirectConnectClient observer = null, returning = null;
         try {
-            awaitPhase(owner, DirectConnectPhase.LOBBY);
-            observer = admittedClient(fixture, compatibility, '3', "Observer", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession(); awaitPhase(owner, DirectConnectPhase.READY); awaitPhase(observer, DirectConnectPhase.READY);
+            readyClient(owner);
+            observer = readyParticipant(fixture, compatibility, '3', "Observer", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host); awaitPhase(owner, DirectConnectPhase.READY); awaitPhase(observer, DirectConnectPhase.READY);
             String floor = fixture.host.getStatus().getFloorId();
             java.util.BitSet bits = new java.util.BitSet(); bits.set(15);
             com.interrupt.dungeoneer.multiplayer.knowledge.PersonalKnowledge facts =
@@ -978,8 +992,8 @@ public class DirectConnectIntegrationTest {
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<>();
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.setStartingLives(1); fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            fixture.host.setStartingLives(1); startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             ParticipantId local = new ParticipantId("campaign-slot-1"), remote = new ParticipantId("campaign-slot-2");
             fixture.host.setNativeParticipantPosition(local, 8.5f, 8.5f, .5f);
             fixture.host.setNativeParticipantPosition(remote, 24.5f, 24.5f, .5f);
@@ -1017,8 +1031,8 @@ public class DirectConnectIntegrationTest {
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<>();
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             ParticipantId local = new ParticipantId("campaign-slot-1"), remote = new ParticipantId("campaign-slot-2");
             fixture.host.setNativeParticipantPosition(local, 8.5f, 8.5f, .5f);
             fixture.host.setNativeParticipantPosition(remote, 24.5f, 24.5f, .5f);
@@ -1046,8 +1060,8 @@ public class DirectConnectIntegrationTest {
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<>();
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame(); game.itemManager = potionCatalogue();
             new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host).prepare(game);
             com.badlogic.gdx.math.MathUtils.random.setSeed(10); com.interrupt.dungeoneer.game.Game.rand.setSeed(10);
@@ -1057,8 +1071,8 @@ public class DirectConnectIntegrationTest {
             resumed = DirectConnectHost.start(0, compatibility, fixture.roster, fixture.store);
             MemoryReconnectTokens tokens = new MemoryReconnectTokens(); tokens.save("potion-mapping", fixture.roster.getSlot(2).getReconnectToken());
             client = client(resumed.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2, 2, tokens, compatibility);
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            resumed.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            readyClient(client);
+            startReadySession(resumed); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game restored = nativePartyGame(); restored.itemManager = potionCatalogue();
             new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(resumed).prepare(restored);
             com.badlogic.gdx.math.MathUtils.random.setSeed(999); com.interrupt.dungeoneer.game.Game.rand.setSeed(999);
@@ -1104,8 +1118,8 @@ public class DirectConnectIntegrationTest {
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<>();
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             ParticipantId local = new ParticipantId("campaign-slot-1"), remote = new ParticipantId("campaign-slot-2");
             fixture.host.setNativeParticipantPosition(local, 8.5f, 8.5f, .5f);
             fixture.host.setNativeParticipantPosition(remote, 24.5f, 24.5f, .5f);
@@ -1138,8 +1152,8 @@ public class DirectConnectIntegrationTest {
         DirectConnectHost subset = null, resumed = null;
         ParticipantId owner = new ParticipantId("campaign-slot-2");
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.entities.Player learned = new com.interrupt.dungeoneer.entities.Player();
             learned.discoveredPotions.add(com.interrupt.dungeoneer.entities.items.Potion.PotionType.restore);
             String floor = fixture.host.getStatus().getFloorId();
@@ -1151,7 +1165,7 @@ public class DirectConnectIntegrationTest {
                     new com.interrupt.dungeoneer.multiplayer.knowledge.MapKnowledge(4, 4, hostBits)));
             fixture.host.persistCampaign(); client.close(); client = null; fixture.close();
             subset = DirectConnectHost.start(0, compatibility, fixture.roster, fixture.store);
-            subset.startSession();
+            startReadySession(subset);
             assertEquals("Cold resume keeps absent Slot's potion knowledge", 16, subset.getPersonalKnowledge(owner).potionMask);
             assertEquals(0, subset.getPersonalKnowledge().potionMask);
             assertTrue(subset.getPersonalKnowledge(owner).map(floor, 4, 4).isExplored(3, 3));
@@ -1161,8 +1175,8 @@ public class DirectConnectIntegrationTest {
             MemoryReconnectTokens tokens = new MemoryReconnectTokens();
             tokens.save("personal-save", fixture.roster.getSlot(2).getReconnectToken());
             client = client(resumed.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2, 2, tokens, compatibility);
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            resumed.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            readyClient(client);
+            startReadySession(resumed); awaitPhase(client, DirectConnectPhase.READY);
             assertEquals("Returning Slot gets personal baseline before READY", 16, client.getPersonalKnowledge().potionMask);
             assertEquals(0, resumed.getPersonalKnowledge().potionMask);
             assertTrue(client.getPersonalKnowledge().map(floor, 4, 4).isExplored(3, 3));
@@ -1187,8 +1201,8 @@ public class DirectConnectIntegrationTest {
                 getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
                 (proxy, method, args) -> null);
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
                     new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(fixture.host);
@@ -1231,8 +1245,8 @@ public class DirectConnectIntegrationTest {
                 getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
                 (proxy, method, args) -> null);
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             com.interrupt.dungeoneer.entities.items.Potion potion = new com.interrupt.dungeoneer.entities.items.Potion();
             potion.potionType = com.interrupt.dungeoneer.entities.items.Potion.PotionType.poison;
@@ -1316,8 +1330,8 @@ public class DirectConnectIntegrationTest {
                 getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
                 (proxy, method, args) -> null);
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             game.level = knowledgeLevel(4, 4);
             com.interrupt.dungeoneer.entities.items.Potion potion = new com.interrupt.dungeoneer.entities.items.Potion();
@@ -1390,8 +1404,8 @@ public class DirectConnectIntegrationTest {
                 getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
                 (proxy, method, args) -> null);
         try {
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             com.interrupt.dungeoneer.entities.items.Potion potion = new com.interrupt.dungeoneer.entities.items.Potion();
             potion.potionType = com.interrupt.dungeoneer.entities.items.Potion.PotionType.restore;
@@ -1452,8 +1466,8 @@ public class DirectConnectIntegrationTest {
         try {
             client = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
                     0, tokens, compatibility);
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             for(int i = 1; i <= CombatSnapshot.MAX_MONSTERS; i++) {
                 fixture.host.bindNativeMonster(i == 1 ? AuthoritativeCombatEncounter.SHARED_MONSTER_ID
@@ -1513,9 +1527,9 @@ public class DirectConnectIntegrationTest {
         HostFixture fixture = host(compatibility, 3, "native-participant");
         DirectConnectClient first = null, second = null;
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
             DirectConnectCombatController controller = new DirectConnectCombatController(fixture.host, false);
             for(MovementEntityDescriptor descriptor : fixture.host.getMovementEntities()) {
@@ -1592,9 +1606,9 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient first = null, second = null;
         DirectConnectCombatController controller = new DirectConnectCombatController(fixture.host, false);
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = new org.objenesis.ObjenesisStd().newInstance(com.interrupt.dungeoneer.game.Game.class);
             com.interrupt.dungeoneer.game.Game.instance = game;
@@ -1694,9 +1708,9 @@ public class DirectConnectIntegrationTest {
         HostFixture fixture = host(compatibility, 3, "native-projectile-travel");
         DirectConnectClient first = null, second = null;
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
 
             com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile projectile =
@@ -1823,9 +1837,9 @@ public class DirectConnectIntegrationTest {
         HostFixture fixture = host(compatibility, 3, "native-cast-presentation");
         DirectConnectClient first = null, second = null;
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
 
             com.interrupt.dungeoneer.entities.spells.Beam spell =
@@ -1983,9 +1997,9 @@ public class DirectConnectIntegrationTest {
                 com.interrupt.managers.StringManager.localizedStrings;
         com.interrupt.managers.StringManager.localizedStrings = new HashMap<>();
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY);
             awaitPhase(second, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game hostGame = nativePartyGame();
@@ -2039,8 +2053,8 @@ public class DirectConnectIntegrationTest {
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<>();
         try {
-            client = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger gate =
                     new com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger();
@@ -2081,8 +2095,8 @@ public class DirectConnectIntegrationTest {
                 getClass().getClassLoader(), new Class<?>[] { com.badlogic.gdx.Application.class },
                 (proxy, method, args) -> null);
         try {
-            client = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            client = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host); awaitPhase(client, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             com.interrupt.dungeoneer.entities.triggers.Trigger secret =
                     new com.interrupt.dungeoneer.entities.triggers.Trigger();
@@ -2116,9 +2130,9 @@ public class DirectConnectIntegrationTest {
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<>();
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             com.interrupt.dungeoneer.entities.triggers.ProgressionTrigger gate =
@@ -2163,9 +2177,9 @@ public class DirectConnectIntegrationTest {
         HashMap<String, LocalizedString> strings = StringManager.localizedStrings;
         StringManager.localizedStrings = new HashMap<>();
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             com.interrupt.dungeoneer.entities.triggers.ButtonModel button =
@@ -2212,9 +2226,9 @@ public class DirectConnectIntegrationTest {
         StringManager.localizedStrings = new HashMap<>();
         try {
             fixture.host.useOwnedFloor(GameApplication.OWNED_TUTORIAL_FLOOR);
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             game.progression.gold = 97;
@@ -2257,9 +2271,9 @@ public class DirectConnectIntegrationTest {
         HostFixture fixture = host(compatibility, 3, "door-feedback");
         DirectConnectClient first = null, second = null;
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController controller =
                     new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(fixture.host);
@@ -2325,9 +2339,9 @@ public class DirectConnectIntegrationTest {
                 AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
         DirectConnectClient second = null, returning = null;
         try {
-            awaitPhase(first, DirectConnectPhase.LOBBY);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            readyClient(first);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
             Monster hostMonster = new Monster(); hostMonster.hp = hostMonster.maxHp = 20;
             hostMonster.takeDamage(1, DamageType.ICE, null);
@@ -2394,9 +2408,9 @@ public class DirectConnectIntegrationTest {
         HostFixture fixture = host(compatibility, 3, "native-status-pulse");
         DirectConnectClient first = null, second = null;
         try {
-            first = admittedClient(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
-            second = admittedClient(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            first = readyParticipant(fixture, compatibility, '2', "Two", AvatarCatalog.HUMANOID_2);
+            second = readyParticipant(fixture, compatibility, '3', "Three", AvatarCatalog.HUMANOID_3);
+            startReadySession(fixture.host);
             awaitPhase(first, DirectConnectPhase.READY); awaitPhase(second, DirectConnectPhase.READY);
             Monster hostMonster = new Monster(); hostMonster.hp = hostMonster.maxHp = 20;
             com.interrupt.dungeoneer.statuseffects.PoisonEffect poison =
@@ -2479,8 +2493,8 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
                 AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             AuthoritativeItemWorld world = fixture.host.getItemWorld();
             ParticipantId remote = null;
@@ -2574,8 +2588,8 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
                 AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
 
             client.submitItemAction(1L, ItemAction.CONSUME, 41L, 2, 1,
@@ -2597,8 +2611,8 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
                 AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             ParticipantId local = new ParticipantId("campaign-slot-1");
             ParticipantId remote = new ParticipantId("campaign-slot-2");
@@ -2680,8 +2694,8 @@ public class DirectConnectIntegrationTest {
                         @Override public void refreshEquipLocations() { }
                     };
             StringManager.localizedStrings = new HashMap<String, LocalizedString>();
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession();
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitMovementSnapshots(fixture.host, 1);
 
@@ -2846,8 +2860,8 @@ public class DirectConnectIntegrationTest {
                         @Override public void refreshEquipLocations() { }
                     };
             StringManager.localizedStrings = new HashMap<String, LocalizedString>();
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession();
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitMovementSnapshots(fixture.host, 1);
             com.interrupt.dungeoneer.game.Game hostGame = economyGame(nativeWeaponShop());
@@ -2951,8 +2965,8 @@ public class DirectConnectIntegrationTest {
                         @Override public void refreshEquipLocations() { }
                     };
             StringManager.localizedStrings = new HashMap<String, LocalizedString>();
-            client = admittedClient(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
-            fixture.host.startSession();
+            client = readyParticipant(fixture, compatibility, '2', "Friend", AvatarCatalog.HUMANOID_2);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitMovementSnapshots(fixture.host, 1);
             PresentedGold.presented = 0;
@@ -3212,14 +3226,14 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
                 AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
+            readyClient(client);
             assertTrue(fixture.host.getPendingClaims().isEmpty());
             awaitPhase(fixture.host, DirectConnectPhase.LOBBY);
             assertEquals(2, fixture.roster.getSlots().size());
             assertEquals(identity('2'), fixture.roster.getSlot(2).getLauncherIdentity());
             assertTrue(tokens.load("approval") != null);
 
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitPhase(fixture.host, DirectConnectPhase.READY);
             assertEquals(GameApplication.OPEN_SOURCE_TEST_LEVEL,
@@ -3241,9 +3255,9 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient client = client(fixture.host.getBoundPort(), '2', "Friend",
                 AvatarCatalog.HUMANOID_2, 0, new MemoryReconnectTokens(), compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
+            readyClient(client);
 
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             assertEquals("owned-game-copy-tutorial", client.getStatus().getFloorId());
         }
@@ -3275,16 +3289,16 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient third = null;
         DirectConnectClient fourth = null;
         try {
-            second = admittedClient(fixture, compatibility, '2', "Two",
+            second = readyParticipant(fixture, compatibility, '2', "Two",
                     AvatarCatalog.HUMANOID_2);
-            third = admittedClient(fixture, compatibility, '3', "Three",
+            third = readyParticipant(fixture, compatibility, '3', "Three",
                     AvatarCatalog.HUMANOID_3);
-            fourth = admittedClient(fixture, compatibility, '4', "Four",
+            fourth = readyParticipant(fixture, compatibility, '4', "Four",
                     AvatarCatalog.HUMANOID_4);
 
             assertEquals(4, fixture.host.getConnectedParticipantCount());
             assertEquals(4, fixture.host.getUdpReadyParticipantCount());
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPhase(third, DirectConnectPhase.READY);
             awaitPhase(fourth, DirectConnectPhase.READY);
@@ -3306,10 +3320,10 @@ public class DirectConnectIntegrationTest {
             throws Exception {
         DirectConnectCompatibility compatibility = compatibility("movement-floor");
         HostFixture fixture = host(compatibility, 2, "movement");
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitMovementSnapshots(client, 3);
             assertEquals(new NetworkEntityId(1L), fixture.host.getLocalMovementEntityId());
@@ -3348,10 +3362,10 @@ public class DirectConnectIntegrationTest {
     public void twoParticipantsObserveOneHostPublishedNativeCombatResult() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("combat-floor");
         HostFixture fixture = host(compatibility, 2, "combat");
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitCombatSnapshot(client);
             assertEquals(24, combatHealth(client, AuthoritativeCombatEncounter.SHARED_MONSTER_ID));
@@ -3405,14 +3419,14 @@ public class DirectConnectIntegrationTest {
     public void twoClientsConvergeOnFriendlyFireBenefitsHazardsAndDeath() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("combat-policy-floor");
         HostFixture fixture = host(compatibility, 3, "combat-policy");
-        DirectConnectClient second = admittedClient(fixture, compatibility, '2', "Two",
+        DirectConnectClient second = readyParticipant(fixture, compatibility, '2', "Two",
                 AvatarCatalog.HUMANOID_2);
-        DirectConnectClient third = admittedClient(fixture, compatibility, '3', "Three",
+        DirectConnectClient third = readyParticipant(fixture, compatibility, '3', "Three",
                 AvatarCatalog.HUMANOID_3);
         String secondTarget = AuthoritativeCombatEncounter.participantTargetId(
                 new ParticipantId("campaign-slot-2"));
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPhase(third, DirectConnectPhase.READY);
             awaitCombatSnapshot(second);
@@ -3488,16 +3502,16 @@ public class DirectConnectIntegrationTest {
     public void downedParticipantCannotActAndIsRevivedOnlyByUninterruptedTeammate() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("revival-floor");
         HostFixture fixture = host(compatibility, 3, "revival");
-        DirectConnectClient second = admittedClient(fixture, compatibility, '2', "Two",
+        DirectConnectClient second = readyParticipant(fixture, compatibility, '2', "Two",
                 AvatarCatalog.HUMANOID_2);
-        DirectConnectClient third = admittedClient(fixture, compatibility, '3', "Three",
+        DirectConnectClient third = readyParticipant(fixture, compatibility, '3', "Three",
                 AvatarCatalog.HUMANOID_3);
         ParticipantId secondId = new ParticipantId("campaign-slot-2");
         ParticipantId thirdId = new ParticipantId("campaign-slot-3");
         String thirdTarget = AuthoritativeCombatEncounter.participantTargetId(thirdId);
         try {
             fixture.host.setStartingLives(2);
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             try {
                 fixture.host.setStartingLives(5);
                 fail("Starting Lives must lock once campaign play begins.");
@@ -3547,11 +3561,11 @@ public class DirectConnectIntegrationTest {
             throws Exception {
         DirectConnectCompatibility compatibility = compatibility("bleedout-floor");
         HostFixture fixture = host(compatibility, 2, "bleedout");
-        DirectConnectClient second = admittedClient(fixture, compatibility, '2', "Two",
+        DirectConnectClient second = readyParticipant(fixture, compatibility, '2', "Two",
                 AvatarCatalog.HUMANOID_2);
         ParticipantId secondId = new ParticipantId("campaign-slot-2");
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPartyState(second, 2, PartyMemberState.CONNECTED);
             assertEquals(3, second.getPartyStatus().getMember(2).getRemainingLives());
@@ -3589,12 +3603,12 @@ public class DirectConnectIntegrationTest {
         DirectConnectCompatibility compatibility = compatibility("left-wipe-floor");
         HostFixture fixture = host(compatibility, 2, "left-wipe",
                 temporaryFolder.newFolder("campaign-store-left-wipe"), 6L);
-        DirectConnectClient second = admittedClient(fixture, compatibility, '2', "Two",
+        DirectConnectClient second = readyParticipant(fixture, compatibility, '2', "Two",
                 AvatarCatalog.HUMANOID_2);
         ParticipantId hostId = new ParticipantId("campaign-slot-1");
         try {
             fixture.host.setStartingLives(1);
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             second.close();
             long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
@@ -3621,13 +3635,13 @@ public class DirectConnectIntegrationTest {
     public void simultaneousDowningRespawnsTogetherAndLastLivesEndInPartyWipe() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("wipe-floor");
         HostFixture fixture = host(compatibility, 2, "wipe");
-        DirectConnectClient second = admittedClient(fixture, compatibility, '2', "Two",
+        DirectConnectClient second = readyParticipant(fixture, compatibility, '2', "Two",
                 AvatarCatalog.HUMANOID_2);
         ParticipantId hostId = new ParticipantId("campaign-slot-1");
         ParticipantId secondId = new ParticipantId("campaign-slot-2");
         try {
             fixture.host.setStartingLives(2);
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPartyState(second, 2, PartyMemberState.CONNECTED);
 
@@ -3667,14 +3681,14 @@ public class DirectConnectIntegrationTest {
             throws Exception {
         DirectConnectCompatibility compatibility = compatibility("death-drop-floor");
         HostFixture fixture = host(compatibility, 2, "death-drop");
-        DirectConnectClient second = admittedClient(fixture, compatibility, '2', "Two",
+        DirectConnectClient second = readyParticipant(fixture, compatibility, '2', "Two",
                 AvatarCatalog.HUMANOID_2);
         ParticipantId hostId = new ParticipantId("campaign-slot-1");
         ParticipantId secondId = new ParticipantId("campaign-slot-2");
         try {
             fixture.host.setStartingLives(1);
             fixture.host.setExhaustedDropTicks(180L);
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPartyState(second, 2, PartyMemberState.CONNECTED);
             AuthoritativeItemWorld world = fixture.host.getItemWorld();
@@ -3819,10 +3833,10 @@ public class DirectConnectIntegrationTest {
     public void directedClientAttackIsTracedAndReplicatedByHost() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("directed-combat-floor");
         HostFixture fixture = host(compatibility, 2, "directed-combat");
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitCombatSnapshot(client);
             awaitMovementSnapshots(client, 1);
@@ -3879,12 +3893,12 @@ public class DirectConnectIntegrationTest {
     public void reliablePartyStatusPreservesFrozenReconnectGrace() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("party-status-floor");
         HostFixture fixture = host(compatibility, 3, "party-status");
-        DirectConnectClient second = admittedClient(fixture, compatibility, '2', "Two",
+        DirectConnectClient second = readyParticipant(fixture, compatibility, '2', "Two",
                 AvatarCatalog.HUMANOID_2);
-        DirectConnectClient third = admittedClient(fixture, compatibility, '3', "Three",
+        DirectConnectClient third = readyParticipant(fixture, compatibility, '3', "Three",
                 AvatarCatalog.HUMANOID_3);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPhase(third, DirectConnectPhase.READY);
             assertEquals(3, third.getPartyStatus().getMembers().size());
@@ -3916,10 +3930,10 @@ public class DirectConnectIntegrationTest {
             throws Exception {
         DirectConnectCompatibility compatibility = compatibility("communication-floor");
         HostFixture fixture = host(compatibility, 2, "communication");
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitMovementSnapshots(client, 2);
 
@@ -3980,8 +3994,8 @@ public class DirectConnectIntegrationTest {
                     }
                 });
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitMovementSnapshots(client, 2);
 
@@ -4045,10 +4059,10 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient third = null;
         DirectConnectClient returning = null;
         try {
-            awaitPhase(second, DirectConnectPhase.LOBBY);
-            third = admittedClient(fixture, compatibility, '3', "Three",
+            readyClient(second);
+            third = readyParticipant(fixture, compatibility, '3', "Three",
                     AvatarCatalog.HUMANOID_3);
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPhase(third, DirectConnectPhase.READY);
             NetworkEntityId preservedEntity = second.getLocalMovementEntityId();
@@ -4107,11 +4121,11 @@ public class DirectConnectIntegrationTest {
         DirectConnectClient third = null;
         DirectConnectClient returning = null;
         try {
-            awaitPhase(second, DirectConnectPhase.LOBBY);
-            third = admittedClient(fixture, compatibility, '3', "Three",
+            readyClient(second);
+            third = readyParticipant(fixture, compatibility, '3', "Three",
                     AvatarCatalog.HUMANOID_3);
 
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(second, DirectConnectPhase.READY);
             awaitPhase(third, DirectConnectPhase.READY);
             awaitChatCount(fixture.host, 2);
@@ -4155,8 +4169,8 @@ public class DirectConnectIntegrationTest {
         String clientTarget = AuthoritativeCombatEncounter.participantTargetId(
                 new ParticipantId("campaign-slot-2"));
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             awaitCombatSnapshot(client);
 
@@ -4193,8 +4207,8 @@ public class DirectConnectIntegrationTest {
                 AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
         DirectConnectClient returning = null;
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
 
             com.interrupt.dungeoneer.entities.projectiles.MagicMissileProjectile liveProjectile =
@@ -4243,10 +4257,10 @@ public class DirectConnectIntegrationTest {
         DirectConnectCompatibility compatibility = compatibility("reconnect-expiry-floor");
         HostFixture fixture = host(compatibility, 2, "reconnect-expiry",
                 temporaryFolder.newFolder("reconnect-expiry-store"), 8L);
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             String reconnectToken = fixture.roster.getSlot(2).getReconnectToken();
             client.close();
@@ -4277,8 +4291,8 @@ public class DirectConnectIntegrationTest {
                 AvatarCatalog.HUMANOID_2, 0, tokens, compatibility);
         Socket reconnecting = null;
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             client.close();
             awaitPartyState(fixture.host, 2, PartyMemberState.RECONNECTING);
@@ -4318,10 +4332,10 @@ public class DirectConnectIntegrationTest {
             throws Exception {
         DirectConnectCompatibility compatibility = compatibility("kick-floor");
         HostFixture fixture = host(compatibility, 2, "kick");
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             String reconnectToken = fixture.roster.getSlot(2).getReconnectToken();
 
@@ -4424,8 +4438,8 @@ public class DirectConnectIntegrationTest {
         try {
             client = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
                     0, tokens, compatibility);
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            fixture.host.startSession();
+            readyClient(client);
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             NetworkEntityId preservedEntity = client.getLocalMovementEntityId();
             client.close();
@@ -4545,10 +4559,10 @@ public class DirectConnectIntegrationTest {
     public void clientWhoseSharedFloorDiffersIsRemovedWithReasonAndKeepsSlot() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("shared-floor-mismatch");
         HostFixture fixture = host(compatibility, 2, "floor-mismatch");
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
             assertTrue(fixture.host.getSharedFloorSeed() != 0L);
             assertEquals(fixture.host.getSharedFloorSeed(), client.getSharedFloorSeed());
@@ -4579,10 +4593,10 @@ public class DirectConnectIntegrationTest {
     public void clientWithIdenticalSharedFloorStaysInSession() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("shared-floor-match");
         HostFixture fixture = host(compatibility, 2, "floor-match");
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
-            fixture.host.startSession();
+            startReadySession(fixture.host);
             awaitPhase(client, DirectConnectPhase.READY);
 
             fixture.host.recordSharedFloorFingerprint(floorWithWorldObjects(57));
@@ -4612,7 +4626,7 @@ public class DirectConnectIntegrationTest {
     public void hostCanDisconnectApprovedClientCleanly() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("disconnect-floor");
         HostFixture fixture = host(compatibility, 2, "disconnect");
-        DirectConnectClient client = admittedClient(fixture, compatibility, '2', "Friend",
+        DirectConnectClient client = readyParticipant(fixture, compatibility, '2', "Friend",
                 AvatarCatalog.HUMANOID_2);
         try {
             fixture.host.close();
@@ -4625,12 +4639,12 @@ public class DirectConnectIntegrationTest {
         }
     }
 
-    private DirectConnectClient admittedClient(HostFixture fixture,
+    private DirectConnectClient readyParticipant(HostFixture fixture,
             DirectConnectCompatibility compatibility, char identity, String nickname,
             String avatar) throws Exception {
         DirectConnectClient client = client(fixture.host.getBoundPort(), identity, nickname,
                 avatar, 0, new MemoryReconnectTokens(), compatibility);
-        awaitPhase(client, DirectConnectPhase.LOBBY);
+        readyClient(client);
         return client;
     }
 

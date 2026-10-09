@@ -10,12 +10,18 @@ public final class LobbySnapshot {
     public static final class Slot {
         private final int number;
         private final SlotPresentation presentation;
-        private final boolean connected, authenticated, synchronizedState;
+        private final boolean connected, authenticated, synchronizedState, playerReady;
 
         public Slot(int number, SlotPresentation presentation, boolean connected,
                 boolean authenticated, boolean synchronizedState) {
+            this(number, presentation, connected, authenticated, synchronizedState, false);
+        }
+
+        public Slot(int number, SlotPresentation presentation, boolean connected,
+                boolean authenticated, boolean synchronizedState, boolean playerReady) {
             if(number < 1 || number > 4 || connected && presentation == null
-                    || authenticated && !connected || synchronizedState && !authenticated)
+                    || authenticated && !connected || synchronizedState && !authenticated
+                    || playerReady && !synchronizedState)
                 throw new IllegalArgumentException("Invalid lobby slot state.");
             if(presentation != null && !AvatarCatalog.ownedV108Humanoids().contains(presentation.getAvatarId()))
                 throw new IllegalArgumentException("Unknown lobby Avatar.");
@@ -24,6 +30,7 @@ public final class LobbySnapshot {
             this.connected = connected;
             this.authenticated = authenticated;
             this.synchronizedState = synchronizedState;
+            this.playerReady = playerReady;
         }
 
         public int getNumber() { return number; }
@@ -32,14 +39,15 @@ public final class LobbySnapshot {
         public boolean isConnected() { return connected; }
         public boolean isAuthenticated() { return authenticated; }
         public boolean isSynchronized() { return synchronizedState; }
+        public boolean isPlayerReady() { return playerReady; }
         @Override public boolean equals(Object other) {
             if(!(other instanceof Slot)) return false;
             Slot slot = (Slot)other;
             return number == slot.number && Objects.equals(presentation, slot.presentation)
                     && connected == slot.connected && authenticated == slot.authenticated
-                    && synchronizedState == slot.synchronizedState;
+                    && synchronizedState == slot.synchronizedState && playerReady == slot.playerReady;
         }
-        @Override public int hashCode() { return Objects.hash(number, presentation, connected, authenticated, synchronizedState); }
+        @Override public int hashCode() { return Objects.hash(number, presentation, connected, authenticated, synchronizedState, playerReady); }
     }
 
     private final long sequence;

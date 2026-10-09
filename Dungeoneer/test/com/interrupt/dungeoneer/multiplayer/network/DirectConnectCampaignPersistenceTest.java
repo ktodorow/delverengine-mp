@@ -56,6 +56,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.readyClient;
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.startReadySession;
+
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -78,8 +81,8 @@ public class DirectConnectCampaignPersistenceTest {
                     public void save(String campaign, String token) { }
                 }, compatibility());
         try {
-            awaitPhase(friend, DirectConnectPhase.LOBBY);
-            host.startSession(); awaitPhase(friend, DirectConnectPhase.READY); host.setSessionPaused(true);
+            readyClient(friend);
+            startReadySession(host); awaitPhase(friend, DirectConnectPhase.READY); host.setSessionPaused(true);
             final Level[] active = { nativeDormancyFloor() };
             host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
             host.activatePartyDestination("dungeon:2", "levels/second.bin", 123L, null,
@@ -125,7 +128,7 @@ public class DirectConnectCampaignPersistenceTest {
                         public void save(String campaign, String token) { }
                     }, compatibility());
             try {
-                awaitPhase(friend, DirectConnectPhase.LOBBY); host.startSession(); awaitPhase(friend, DirectConnectPhase.READY); host.setSessionPaused(true);
+                readyClient(friend); startReadySession(host); awaitPhase(friend, DirectConnectPhase.READY); host.setSessionPaused(true);
                 host.activatePartyDestination("visited", source.getFloorId(), 101L, null,
                         () -> { throw new AssertionError("Visited destination must restore"); }, level -> { },
                         slot -> { throw new AssertionError("Visited destination must not roll Fresh Return"); });
@@ -153,7 +156,7 @@ public class DirectConnectCampaignPersistenceTest {
         DirectConnectClient friend = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
                 roster.getSlot(2).getPresentation(), 2, tokens, compatibility());
         try {
-            awaitPhase(friend, DirectConnectPhase.LOBBY); host.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            readyClient(friend); startReadySession(host); awaitPhase(friend, DirectConnectPhase.READY);
             host.setSessionPaused(true); friend.close();
             long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
             while(host.getPartyStatus().getMember(2).getState() != PartyMemberState.RECONNECTING
@@ -213,7 +216,7 @@ public class DirectConnectCampaignPersistenceTest {
                 Collections.emptyList(), Collections.emptyList(), Collections.emptyList()));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             final Level[] active = { nativeDormancyFloor() };
             host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
             ParticipantId friend = new ParticipantId("campaign-slot-2");
@@ -273,7 +276,7 @@ public class DirectConnectCampaignPersistenceTest {
         assertEquals("Ownership survives cold save", owners, store.campaignSaves().load("friends", compatibility()).getScatterOwners());
         DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(nativeDormancyFloor()));
             host.activatePartyDestination("new", "levels/new.bin", 101L, null,
                     DirectConnectCampaignPersistenceTest::nativeDormancyFloor, level -> { }, slot ->
@@ -302,7 +305,7 @@ public class DirectConnectCampaignPersistenceTest {
                     public void save(String campaign, String token) { }
                 }, compatibility());
         try {
-            awaitPhase(friend, DirectConnectPhase.LOBBY); resumed.startSession(); awaitPhase(friend, DirectConnectPhase.READY);
+            readyClient(friend); startReadySession(resumed); awaitPhase(friend, DirectConnectPhase.READY);
             assertEquals(3, friend.getPartyStatus().getMember(2).getRemainingLives());
             assertEquals(8, friend.getPartyStatus().getMember(2).getHealth());
             assertEquals(0, resumed.getEconomy().get(new ParticipantId("campaign-slot-2")).gold);
@@ -318,7 +321,7 @@ public class DirectConnectCampaignPersistenceTest {
         store.campaignSaves().save(save(compatibility, roster));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             final Level[] active = { nativeDormancyFloor() };
             Door door = new Door(); door.multiplayerIdentity = "object:4141";
             door.doorState = Door.DoorState.OPEN; active[0].entities.add(door);
@@ -370,7 +373,7 @@ public class DirectConnectCampaignPersistenceTest {
                         com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.restore(
                                 store.campaignSaves().load("friends", compatibility).getNativeFloor())));
         try {
-            resumed.startSession(); resumed.setSessionPaused(true);
+            startReadySession(resumed); resumed.setSessionPaused(true);
             CampaignSave recovered = resumed.persistCampaign();
             assertEquals(1, recovered.getDormantFloors().size());
             assertEquals("dungeon:2", recovered.getDormantFloors().get(0).getAreaKey());
@@ -391,7 +394,7 @@ public class DirectConnectCampaignPersistenceTest {
         com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController combat =
                 new com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController(host, false);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             Level nativeFloor = nativeDormancyFloor();
             com.interrupt.dungeoneer.entities.Monster monster = new com.interrupt.dungeoneer.entities.Monster();
             monster.multiplayerIdentity = "monster:9";
@@ -437,8 +440,8 @@ public class DirectConnectCampaignPersistenceTest {
         DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
                 identity('2'), roster.getSlot(2).getPresentation(), 2, tokens, compatibility());
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession(); awaitPhase(client, DirectConnectPhase.READY); host.setSessionPaused(true);
+            readyClient(client);
+            startReadySession(host); awaitPhase(client, DirectConnectPhase.READY); host.setSessionPaused(true);
             Game game = partyStoryGame(); game.level = nativeDormancyFloor();
             com.interrupt.dungeoneer.entities.items.Gold gold = new com.interrupt.dungeoneer.entities.items.Gold(6);
             gold.x = gold.y = 2.5f; gold.z = 0.5f;
@@ -493,7 +496,7 @@ public class DirectConnectCampaignPersistenceTest {
         DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store,
                 new com.interrupt.dungeoneer.multiplayer.movement.LevelMovementCollisionWorld(pristine));
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             CampaignSave saved = host.persistCampaign();
             assertEquals(16.5f, saved.getParticipant(1).getMovement().getX(), 0f);
             assertEquals(0.5f, saved.getParticipant(1).getMovement().getZ(), 0f);
@@ -515,7 +518,7 @@ public class DirectConnectCampaignPersistenceTest {
         com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController combat =
                 new com.interrupt.dungeoneer.multiplayer.combat.DirectConnectCombatController(host, false);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             Game game = partyStoryGame(); game.level = nativeDormancyFloor();
             String actor = "participant:campaign-slot-1";
             host.synchronizeNativeActorEffects(ActorEffectsSnapshot.capture(actor, 1L, game.player));
@@ -549,8 +552,8 @@ public class DirectConnectCampaignPersistenceTest {
         DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
                 identity('2'), roster.getSlot(2).getPresentation(), 2, tokens, compatibility());
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession(); awaitPhase(client, DirectConnectPhase.READY); host.setSessionPaused(true);
+            readyClient(client);
+            startReadySession(host); awaitPhase(client, DirectConnectPhase.READY); host.setSessionPaused(true);
             final Level[] active = { nativeDormancyFloor() };
             host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
             PhysicalItemState dropped = host.getItemWorld().spawn("dormant-drop", null, 2f, 2f, 0f);
@@ -602,7 +605,7 @@ public class DirectConnectCampaignPersistenceTest {
                 Collections.singletonMap(19L, 120L)));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             final Level[] active = { nativeDormancyFloor() };
             host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
             long remaining = host.persistCampaign().getDropTimers().get(19L);
@@ -665,7 +668,7 @@ public class DirectConnectCampaignPersistenceTest {
         store.campaignSaves().save(save(compatibility(), roster));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             final Level[] active = { nativeDormancyFloor() };
             host.setNativeFloorCapture(() -> com.interrupt.dungeoneer.multiplayer.floor.NativeFloorSave.capture(active[0]));
             java.lang.reflect.Field field = DirectConnectHost.class.getDeclaredField("movementSession");
@@ -704,7 +707,7 @@ public class DirectConnectCampaignPersistenceTest {
         store.campaignSaves().save(save(compatibility, roster));
         DirectConnectHost first = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            first.startSession();
+            startReadySession(first);
             first.getItemWorld().initializePartyKeys(3);
             assertTrue(first.getItemWorld().spendPartyKey());
             assertEquals(2, first.getPartyKeys());
@@ -713,7 +716,7 @@ public class DirectConnectCampaignPersistenceTest {
         finally { first.close(); }
         DirectConnectHost resumed = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            resumed.startSession();
+            startReadySession(resumed);
             assertEquals("Absent collector does not lose Party's remaining keys", 2,
                     resumed.getPartyKeys());
         }
@@ -734,7 +737,7 @@ public class DirectConnectCampaignPersistenceTest {
                 new HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
         DirectConnectHost first = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            first.startSession();
+            startReadySession(first);
             Game game = partyStoryGame();
             DirectConnectItemController items = new DirectConnectItemController(first);
             items.prepare(game);
@@ -752,7 +755,7 @@ public class DirectConnectCampaignPersistenceTest {
         finally { first.close(); }
         DirectConnectHost resumed = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            resumed.startSession();
+            startReadySession(resumed);
             Game game = partyStoryGame();
             game.progression.gold = 97;
             game.progression.inventoryUpgrades = 3;
@@ -795,7 +798,7 @@ public class DirectConnectCampaignPersistenceTest {
         store.campaignSaves().save(save(compatibility, roster));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            host.startSession();
+            startReadySession(host);
             com.interrupt.dungeoneer.game.Progression nativeState = new com.interrupt.dungeoneer.game.Progression();
             nativeState.won = true;
             nativeState.sawTutorial = true;
@@ -837,8 +840,9 @@ public class DirectConnectCampaignPersistenceTest {
 
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
+            host.setPlayerReady(true);
             assertTrue(host.canStartSession());
-            host.startSession();
+            startReadySession(host);
 
             assertEquals(DirectConnectPhase.READY, host.getStatus().getPhase());
             assertEquals(1, host.getConnectedParticipantCount());
@@ -898,8 +902,8 @@ public class DirectConnectCampaignPersistenceTest {
                 host.getBoundPort(), identity('2'), friend.getPresentation(), 2,
                 tokens, compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(client);
+            startReadySession(host);
             awaitPhase(client, DirectConnectPhase.READY);
 
             assertEquals(4L, host.getNativeWorldGeneration());
@@ -959,8 +963,8 @@ public class DirectConnectCampaignPersistenceTest {
                 host.getBoundPort(), identity('2'), friend.getPresentation(), 2,
                 tokens, compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(client);
+            startReadySession(host);
             awaitPhase(client, DirectConnectPhase.READY);
 
             assertEquals(Arrays.asList("monster:1"),
@@ -1016,7 +1020,7 @@ public class DirectConnectCampaignPersistenceTest {
         try {
             com.interrupt.managers.StringManager.localizedStrings =
                     new HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
-            host.startSession();
+            startReadySession(host);
             Game game = new org.objenesis.ObjenesisStd().newInstance(Game.class);
             game.player = new Player();
             game.player.inventory.clear();
@@ -1059,7 +1063,7 @@ public class DirectConnectCampaignPersistenceTest {
 
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            host.startSession();
+            startReadySession(host);
 
             assertArrayEquals(oldFloor, host.takeRestoredNativeFloor());
             assertNull("Saved floor loads once", host.takeRestoredNativeFloor());
@@ -1106,7 +1110,7 @@ public class DirectConnectCampaignPersistenceTest {
         try {
             com.interrupt.managers.StringManager.localizedStrings =
                     new HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
-            host.startSession();
+            startReadySession(host);
             Game game = new org.objenesis.ObjenesisStd().newInstance(Game.class);
             game.player = new Player();
             game.player.inventory.clear();
@@ -1151,7 +1155,7 @@ public class DirectConnectCampaignPersistenceTest {
         store.campaignSaves().save(save(compatibility, roster));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            host.startSession();
+            startReadySession(host);
             // The tutorial finale: a Monster Host saw burning had no combat slot left.
             host.synchronizeNativeActorEffects(new ActorEffectsSnapshot("monster:300", 1L, false,
                     Collections.singletonList(new NativeStatusEffectState(4L,
@@ -1183,7 +1187,7 @@ public class DirectConnectCampaignPersistenceTest {
         store.campaignSaves().save(save(compatibility, roster));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            host.startSession();
+            startReadySession(host);
             for(int index = 1; index <= DirectConnectProtocol.MAX_MONSTERS + 8; index++) {
                 host.synchronizeNativeActorEffects(new ActorEffectsSnapshot("monster:" + index, 1L,
                         false, Collections.<NativeStatusEffectState>emptyList()));
@@ -1231,8 +1235,8 @@ public class DirectConnectCampaignPersistenceTest {
                 host.getBoundPort(), identity('2'), friend.getPresentation(), 2,
                 tokens, compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(client);
+            startReadySession(host);
             awaitPhase(client, DirectConnectPhase.READY);
 
             PartyMemberStatus returned = host.getPartyStatus().getMember(2);
@@ -1272,7 +1276,7 @@ public class DirectConnectCampaignPersistenceTest {
         try {
             com.interrupt.managers.StringManager.localizedStrings =
                     new HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
-            host.startSession();
+            startReadySession(host);
             Game game = new org.objenesis.ObjenesisStd().newInstance(Game.class);
             game.player = new Player();
             game.player.inventory.clear();
@@ -1369,7 +1373,7 @@ public class DirectConnectCampaignPersistenceTest {
         try {
             com.interrupt.managers.StringManager.localizedStrings =
                     new HashMap<String, com.interrupt.dungeoneer.game.LocalizedString>();
-            host.startSession();
+            startReadySession(host);
             Game game = new org.objenesis.ObjenesisStd().newInstance(Game.class);
             game.player = new Player();
             game.player.inventory.clear();
@@ -1472,8 +1476,8 @@ public class DirectConnectCampaignPersistenceTest {
                 host.getBoundPort(), identity('2'), friend.getPresentation(), 2,
                 tokens, compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(client);
+            startReadySession(host);
             awaitPhase(client, DirectConnectPhase.READY);
 
             List<com.interrupt.dungeoneer.multiplayer.combat.NativeDecalState> marks =
@@ -1551,7 +1555,7 @@ public class DirectConnectCampaignPersistenceTest {
                 @Override public void refresh() { }
                 @Override public void refreshEquipLocations() { }
             };
-            host.startSession();
+            startReadySession(host);
             awaitMovementSnapshot(host);
             Game game = new org.objenesis.ObjenesisStd().newInstance(Game.class);
             game.player = new Player();
@@ -1589,8 +1593,8 @@ public class DirectConnectCampaignPersistenceTest {
         DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(),
                 identity('2'), friend.getPresentation(), 2, tokens, compatibility);
         try {
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession(); awaitPhase(client, DirectConnectPhase.READY);
+            readyClient(client);
+            startReadySession(host); awaitPhase(client, DirectConnectPhase.READY);
             host.setNativeFloorCapture(() -> new byte[] { 7, 8 });
             host.saveAndQuit();
             awaitPhase(client, DirectConnectPhase.DISCONNECTED);
@@ -1611,7 +1615,7 @@ public class DirectConnectCampaignPersistenceTest {
         store.campaignSaves().save(save(compatibility, roster));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             host.setNativeFloorCapture(() -> new byte[] { 1 }); host.persistCampaign();
             host.setSessionPaused(false);
             host.setNativeFloorCapture(() -> { throw new IllegalStateException("Injected native capture failure"); });
@@ -1633,7 +1637,7 @@ public class DirectConnectCampaignPersistenceTest {
         store.campaignSaves().save(save(compatibility, roster));
         DirectConnectHost host = DirectConnectHost.start(0, compatibility, roster, store);
         try {
-            host.startSession(); host.setSessionPaused(true);
+            startReadySession(host); host.setSessionPaused(true);
             host.setNativeFloorCapture(() -> new byte[] { 1 });
             host.updateCampaignRecovery(0L);
             long first = newestRecoveryTimestamp(root);

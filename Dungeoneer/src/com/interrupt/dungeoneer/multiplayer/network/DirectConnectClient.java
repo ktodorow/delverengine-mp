@@ -1446,6 +1446,19 @@ public final class DirectConnectClient implements DirectConnectPeer {
     private volatile com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot lobbySnapshot;
     @Override public com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot getLobbySnapshot() { return lobbySnapshot; }
 
+    @Override public synchronized boolean canSetPlayerReady() {
+        com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot local = lobbySnapshot == null ? null : lobbySnapshot.getSlot(campaignSlot);
+        return !closing.get() && status.getPhase() == DirectConnectPhase.LOBBY
+                && tcpChannel != null && tcpChannel.isActive() && udpRegistered
+                && local != null && local.isSynchronized();
+    }
+
+    @Override public synchronized void setPlayerReady(boolean ready) {
+        if(!canSetPlayerReady()) throw new IllegalStateException("Player Ready requires authenticated, synchronized pregame connection.");
+        tcpChannel.writeAndFlush(new DirectConnectWire.PlayerReady(sessionId, campaignSlot, udpToken,
+                lobbySnapshot.getSequence(), ready));
+    }
+
     private synchronized void lobbySnapshot(DirectConnectWire.LobbySnapshotMessage report) {
         if(!java.util.Objects.equals(sessionId, report.sessionId) || campaignSlot == 0
                 || report.snapshot.getCapacity() != campaignCapacity

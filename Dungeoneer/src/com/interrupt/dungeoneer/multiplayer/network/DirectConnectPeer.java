@@ -35,6 +35,9 @@ import java.util.List;
 public interface DirectConnectPeer extends AutoCloseable {
     /** Same Host-owned public lobby facts on every admitted peer. */
     default com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot getLobbySnapshot() { return null; }
+    /** Ephemeral pregame consent; distinct from network or destination readiness. */
+    default boolean canSetPlayerReady() { return false; }
+    default void setPlayerReady(boolean ready) { throw new IllegalStateException("Player Ready is unavailable."); }
     default com.interrupt.dungeoneer.multiplayer.floor.PartyDestination getPartyDestination() { return null; }
     default void acknowledgePartyDestination(long generation) { }
     default com.interrupt.dungeoneer.multiplayer.floor.PartyTransition getPartyTransition() {

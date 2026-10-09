@@ -7,6 +7,9 @@ import org.junit.*;
 import org.junit.rules.TemporaryFolder;
 import java.io.File;
 import java.security.SecureRandom;
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.readyClient;
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.startReadySession;
+
 import static org.junit.Assert.*;
 
 /** Native Connect actions through actual TCP/UDP sessions and durable profile. */
@@ -38,10 +41,10 @@ public class NativeConnectSetupTest {
                     LauncherIdentityStore.loadOrCreate(), request.getPresentation(), 0,
                     new ProfileReconnectTokenStore(), compatibility()));
             DirectConnectClient client = (DirectConnectClient)flow.getPeer();
-            awaitPhase(client, DirectConnectPhase.LOBBY);
+            readyClient(client);
             assertEquals(2, host.getConnectedParticipantCount());
             assertEquals(new SlotPresentation("Friend", "humanoid-2"), host.getRoster().getSlot(2).getPresentation());
-            host.startSession();
+            startReadySession(host);
             awaitPhase(client, DirectConnectPhase.READY);
             assertTrue(flow.enter(client, () -> { }));
             flow.leave();
@@ -115,8 +118,8 @@ public class NativeConnectSetupTest {
             assertFalse(flow.enter(nicknameRejected, () -> fail("Rejected nickname attempt entered retry")));
             open(flow, host.getBoundPort(), "Friend", "humanoid-2");
             DirectConnectPeer accepted = flow.getPeer();
-            awaitPhase(accepted, DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(accepted);
+            startReadySession(host);
             awaitPhase(accepted, DirectConnectPhase.READY);
             assertTrue(flow.enter(accepted, () -> { }));
             assertFalse(flow.enter(avatarRejected, () -> fail("Rejected Avatar attempt entered retry")));
@@ -156,7 +159,7 @@ public class NativeConnectSetupTest {
         try {
             open(flow, host.getBoundPort(), "Friend", "humanoid-2");
             DirectConnectPeer cancelledConnection = flow.getPeer();
-            awaitPhase(cancelledConnection, DirectConnectPhase.LOBBY);
+            readyClient(cancelledConnection);
             flow.cancelClient();
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
             while(host.getConnectedParticipantCount() != 1 && System.nanoTime() < deadline) Thread.sleep(10L);
@@ -165,9 +168,9 @@ public class NativeConnectSetupTest {
             assertEquals(2, host.getRoster().getSlots().size());
             open(flow, host.getBoundPort(), "Friend", "humanoid-2");
             DirectConnectPeer current = flow.getPeer();
-            awaitPhase(current, DirectConnectPhase.LOBBY);
+            readyClient(current);
             assertEquals("Connected. Waiting for Host to start.", flow.getClientProgress());
-            host.startSession();
+            startReadySession(host);
             awaitPhase(current, DirectConnectPhase.READY);
             assertFalse(flow.enter(cancelledConnection, () -> fail("Cancelled claim entered replacement")));
             assertTrue(flow.enter(current, () -> { }));
@@ -183,8 +186,8 @@ public class NativeConnectSetupTest {
         try {
             open(flow, host.getBoundPort(), "Friend", "humanoid-2");
             DirectConnectPeer first = flow.getPeer();
-            awaitPhase(first, DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(first);
+            startReadySession(host);
             awaitPhase(first, DirectConnectPhase.READY);
             com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId originalEntity = first.getLocalMovementEntityId();
             String credential = new ProfileReconnectTokenStore().load("friends");

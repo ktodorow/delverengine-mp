@@ -41,6 +41,9 @@ import org.objenesis.ObjenesisStd;
 import java.io.File;
 import java.util.Collections;
 
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.readyClient;
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.startReadySession;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -157,8 +160,8 @@ public class OwnedSharedFloorBuildTest {
                     public String load(String campaign) { return null; } public void save(String campaign, String token) { }
                 }, com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility.forOpenSourceTestFloor(new byte[] { 27 }));
         try {
-            awaitNativePhase(friend, com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(friend);
+            startReadySession(host);
             awaitNativePhase(friend, com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY);
             host.setNativeFloorCapture(() -> NativeFloorSave.capture(game.level));
             host.setSessionPaused(true);

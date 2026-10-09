@@ -22,6 +22,7 @@ public final class CampaignSlot {
     }
 
     CampaignSlot withPresentation(SlotPresentation updatedPresentation) {
+        if(presentation.equals(updatedPresentation)) return this;
         return new CampaignSlot(number, launcherIdentity, reconnectToken, updatedPresentation);
     }
 

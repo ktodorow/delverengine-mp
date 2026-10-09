@@ -247,6 +247,19 @@ public final class DirectConnectSessionFlow {
         open(request);
     }
 
+    /** Queued consent belongs only to current pregame connection. */
+    public boolean setPlayerReady(DirectConnectPeer expected, boolean ready) {
+        if(expected == null || peer != expected || entered || !expected.canSetPlayerReady()) return false;
+        expected.setPlayerReady(ready);
+        return true;
+    }
+
+    public boolean startCampaign(DirectConnectPeer expected) {
+        if(expected == null || peer != expected || entered || !(expected instanceof DirectConnectHost)) return false;
+        ((DirectConnectHost)expected).startSession();
+        return true;
+    }
+
     /** Queued native entry belongs to exactly one current, started session. */
     public boolean enter(DirectConnectPeer expected, Runnable installWorld) {
         if(expected == null || peer != expected || entered) return false;

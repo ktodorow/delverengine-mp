@@ -13,6 +13,61 @@ import static org.junit.Assert.*;
 
 /** External reliable wire boundary; assertions follow independent launcher contract. */
 public class LobbyWireTest {
+    @Test public void playerConsentRequiresReliableTcpInBothDirections() throws Exception {
+        DirectConnectWire.PlayerReady request = new DirectConnectWire.PlayerReady("session", 2, 123L, 7L, true);
+        try {
+            ByteBuf datagram = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT, request);
+            datagram.release();
+            fail("Player consent must use reliable TCP");
+        }
+        catch(DirectConnectWire.ProtocolException expected) { assertTrue(expected.getMessage().contains("reliable")); }
+        ByteBuf payload = payload(request);
+        try {
+            DirectConnectWire.PlayerReady decoded = (DirectConnectWire.PlayerReady)decode(payload.copy());
+            assertEquals("session", decoded.sessionId);
+            assertEquals(2, decoded.slot);
+            assertEquals(123L, decoded.connectionToken);
+            assertEquals(7L, decoded.sequence);
+            assertTrue(decoded.ready);
+            ByteBuf datagram = payload.copy();
+            try { DirectConnectWire.decodeDatagram(datagram); fail("UDP cannot deliver consent"); }
+            catch(DirectConnectWire.ProtocolException expected) { assertTrue(expected.getMessage().contains("reliable")); }
+            finally { datagram.release(); }
+        }
+        finally { payload.release(); }
+    }
+
+    @Test public void malformedConsentSlotTokenSequenceFlagAndFramingAreRejected() throws Exception {
+        ByteBuf valid = payload(new DirectConnectWire.PlayerReady("session", 2, 123L, 7L, true));
+        try {
+            ByteBuf cursor = valid.duplicate(); cursor.skipBytes(5); skipString(cursor);
+            int slot = cursor.readerIndex();
+            for(int[] mutation : new int[][] {{slot, 0}, {slot, 5}, {slot + 17, 2}, {slot + 17, 255}}) {
+                ByteBuf malformed = valid.copy(); malformed.setByte(mutation[0], mutation[1]); rejects(malformed);
+            }
+            ByteBuf zeroToken = valid.copy(); zeroToken.setLong(slot + 1, 0L); rejects(zeroToken);
+            ByteBuf zeroSequence = valid.copy(); zeroSequence.setLong(slot + 9, 0L); rejects(zeroSequence);
+            ByteBuf negativeSequence = valid.copy(); negativeSequence.setLong(slot + 9, -1L); rejects(negativeSequence);
+            for(int length : new int[] {0, 4, slot, valid.readableBytes() - 1}) rejects(valid.copy(0, length));
+            ByteBuf trailing = valid.copy(); trailing.writeByte(0); rejects(trailing);
+            ByteBuf withdraw = payload(new DirectConnectWire.PlayerReady("session", 4, -123L, Long.MAX_VALUE, false));
+            try { assertFalse(((DirectConnectWire.PlayerReady)decode(withdraw.copy())).ready); }
+            finally { withdraw.release(); }
+        }
+        finally { valid.release(); }
+    }
+
+    @Test public void authoritativeProjectionRoundTripsReadyDistinctFromNetworkSynchronization() throws Exception {
+        LobbySnapshot expected = new LobbySnapshot(5L, "Friday Delver", 2, 3, 1, Arrays.asList(
+                new LobbySnapshot.Slot(1, new SlotPresentation("Host", "humanoid-1"), true, true, true, true),
+                new LobbySnapshot.Slot(2, new SlotPresentation("Friend", "humanoid-2"), true, true, true, false)));
+        ByteBuf payload = payload(new DirectConnectWire.LobbySnapshotMessage("session", expected));
+        try { assertEquals(expected, ((DirectConnectWire.LobbySnapshotMessage)decode(payload.copy())).snapshot); }
+        finally { payload.release(); }
+        try { new LobbySnapshot.Slot(2, new SlotPresentation("Friend", "humanoid-2"), true, true, false, true); fail("Unsynchronized consent is invalid"); }
+        catch(IllegalArgumentException expectedFailure) { assertTrue(expectedFailure.getMessage().contains("state")); }
+    }
+
     @Test public void lobbyReportsAndReceiptsCannotUseUnreliableDatagrams() throws Exception {
         for(DirectConnectWire.Message message : Arrays.asList(
                 new DirectConnectWire.LobbySnapshotMessage("session", lobby()),

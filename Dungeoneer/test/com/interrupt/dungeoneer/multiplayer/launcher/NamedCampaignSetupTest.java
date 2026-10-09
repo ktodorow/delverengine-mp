@@ -13,6 +13,9 @@ import java.security.SecureRandom;
 import java.io.File;
 import com.interrupt.dungeoneer.owned.MultiplayerProfile;
 
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.readyClient;
+import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.startReadySession;
+
 import static org.junit.Assert.*;
 
 /** Native setup actions through real application flow, listeners and temporary Campaign Library. */
@@ -157,7 +160,7 @@ public class NamedCampaignSetupTest {
             assertEquals(original.getSlot(2).getReconnectToken(), host.getRoster().getSlot(2).getReconnectToken());
             assertEquals(original.getSlot(2).getPresentation(), host.getRoster().getSlot(2).getPresentation());
             assertEquals(host.getRoster().getSlot(1).getPresentation(), LauncherPresentationStore.load());
-            host.startSession();
+            startReadySession(host);
             flow.leave();
             assertEquals(new SlotPresentation("Scout", "humanoid-4"), library.resume(original.getCampaignId()).getSlot(1).getPresentation());
         }
@@ -195,7 +198,7 @@ public class NamedCampaignSetupTest {
             assertEquals(5, host.getStartingLives());
             assertEquals(2, host.getRoster().getSlots().size());
             assertEquals(original.getSlot(2).getReconnectToken(), host.getRoster().getSlot(2).getReconnectToken());
-            host.startSession();
+            startReadySession(host);
             assertEquals(DirectConnectPhase.READY, host.getStatus().getPhase());
             CampaignSave subset = host.persistCampaign();
             assertEquals(before.getParticipant(2).getParty().getHealth(), subset.getParticipant(2).getParty().getHealth());
@@ -439,8 +442,8 @@ public class NamedCampaignSetupTest {
             token = host.getRoster().getSlot(1).getReconnectToken();
             client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
                     new SlotPresentation("Friend", "humanoid-2"), 0, new ProfileReconnectTokenStore(), compatibility());
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(client);
+            startReadySession(host);
             awaitPhase(client, DirectConnectPhase.READY);
             assertEquals(name, host.persistCampaign().getCampaignName());
             flow.leave();
@@ -505,7 +508,7 @@ public class NamedCampaignSetupTest {
                 hostFlow.openSavedCampaign(setup, library, store,
                         (request, roster) -> DirectConnectHost.start(request.getPort(), compatibility(), roster, store));
                 DirectConnectHost host = (DirectConnectHost)hostFlow.getPeer();
-                host.startSession();
+                startReadySession(host);
                 host.persistCampaign();
                 ProfileReconnectTokenStore tokens = new ProfileReconnectTokenStore();
                 tokens.save(original.getCampaignId(), identity('f').getValue());
@@ -550,8 +553,8 @@ public class NamedCampaignSetupTest {
             DirectConnectHost host = (DirectConnectHost)flow.getPeer();
             client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
                     new SlotPresentation("Friend", "humanoid-2"), 0, new ProfileReconnectTokenStore(), compatibility());
-            awaitPhase(client, DirectConnectPhase.LOBBY);
-            host.startSession();
+            readyClient(client);
+            startReadySession(host);
             awaitPhase(client, DirectConnectPhase.READY);
             if(wounded) {
                 com.interrupt.dungeoneer.multiplayer.participant.ParticipantId friend =
