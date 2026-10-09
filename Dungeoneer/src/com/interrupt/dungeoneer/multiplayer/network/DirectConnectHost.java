@@ -218,7 +218,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private boolean nativeWorldStable = true;
     private volatile long authoritativeHostTick;
     private long floorActivationTickFence = -1L;
-    private volatile CombatSnapshot publishedCombatSnapshot;
+    private final java.util.concurrent.atomic.AtomicReference<CombatSnapshot> publishedCombatSnapshot =
+            new java.util.concurrent.atomic.AtomicReference<CombatSnapshot>();
     private final Set<LauncherIdentity> freshReturnsPending = new LinkedHashSet<LauncherIdentity>();
 
     private volatile DirectConnectStatus status;
@@ -885,7 +886,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
         }
         partyStatus = createPartyStatus(descriptors);
-        publishedCombatSnapshot = combatEncounter.getSnapshot(currentHostTick());
+        publishedCombatSnapshot.set(combatEncounter.getSnapshot(currentHostTick()));
         for(RemoteConnection connection : connections.values()) {
             if(connection.slot != null && connection.udpAddress != null
                     && connection.channel.isActive()) {
@@ -1809,7 +1810,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private void deliverCurrentState(RemoteConnection connection, Message message) {
         if(!connection.channel.isActive()) return;
         if(connection.movementDescriptor != null || connection.spectatorReady) {
-            connection.channel.writeAndFlush(message);
+            enqueueCurrentState(connection, message);
             return;
         }
         if(!connection.lateParticipant || connection.admissionId == 0L) return;
@@ -1838,7 +1839,15 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             connection.admissionChanges.addLast(message);
         }
-        else connection.channel.writeAndFlush(message);
+        else enqueueCurrentState(connection, message);
+    }
+
+    private void enqueueCurrentState(RemoteConnection connection, Message message) {
+        // Even on TCP's event loop, queue behind baseline writes submitted by UDP return.
+        // An immediate tick write can otherwise overtake its already-queued entity spawns.
+        connection.channel.eventLoop().execute(() -> {
+            if(connection.channel.isActive()) connection.channel.writeAndFlush(message);
+        });
     }
 
     private void broadcastCombatState(CombatSnapshot snapshot) {
@@ -2677,7 +2686,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         if(!committed) { combatEncounter.removeUnactivatedParticipant(participant); return false; }
         combatEncounter.setParticipantCombatEligible(participant, true);
         CombatSnapshot combat = combatEncounter.getSnapshot(currentHostTick());
-        synchronized(this) { publishedCombatSnapshot = combat; broadcastCombatState(combat); }
+        synchronized(this) { publishedCombatSnapshot.set(combat); broadcastCombatState(combat); }
         return true;
     }
 
@@ -2834,7 +2843,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                         ? withLateSpectator(connection, partyStatus) : partyStatus));
         AuthoritativeCombatEncounter encounter = combatEncounter;
         if(encounter != null) {
-            connection.channel.write(new CombatStateMessage(sessionId, publishedCombatSnapshot));
+            connection.channel.write(new CombatStateMessage(sessionId, publishedCombatSnapshot.get()));
         }
         connection.channel.write(new DirectConnectWire.NativeWorldGenerationMessage(sessionId, nativeWorldGeneration));
         if(partyDestination != null) connection.channel.write(new DirectConnectWire.TravelDestination(sessionId, partyDestination));
@@ -3419,10 +3428,19 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
 
     private void publishCombatEvent(HostSessionEvent event) {
         // Encounter can emit while holding its monitor; never make admission acquire it back.
-        if(event instanceof CombatStateEvent) publishedCombatSnapshot = ((CombatStateEvent)event).getSnapshot();
+        if(event instanceof CombatStateEvent) {
+            CombatSnapshot incoming = ((CombatStateEvent)event).getSnapshot();
+            CombatSnapshot previous;
+            do {
+                previous = publishedCombatSnapshot.get();
+                // Tick output is buffered; a newer native damage event may publish first.
+                if(previous != null && incoming.getSequence() < previous.getSequence()) return;
+            } while(!publishedCombatSnapshot.compareAndSet(previous, incoming));
+        }
         synchronized(this) {
             if(event instanceof CombatStateEvent) {
                 CombatSnapshot snapshot = ((CombatStateEvent)event).getSnapshot();
+                if(snapshot.getSequence() < publishedCombatSnapshot.get().getSequence()) return;
                 synchronizePartyHealth(snapshot);
                 broadcastCombatState(snapshot);
             }
@@ -3559,7 +3577,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             participants.add(new CampaignSave.ParticipantState(slot.getNumber(), party,
                     movement, progress, holdingOrb, getPersonalKnowledge(participantId(slot))));
         }
-        CombatSnapshot combat = mergeAbsentCombat(publishedCombatSnapshot);
+        CombatSnapshot combat = mergeAbsentCombat(publishedCombatSnapshot.get());
         CampaignSave saved = new CampaignSave(compatibility, roster.getCampaignId(),
                 roster.getCapacity(), startingLives, partyWiped
                         ? CampaignSave.Outcome.DEFEATED : partyProgression.victory
@@ -4021,7 +4039,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         for(Map.Entry<Long, Long> timer : destination.getDropTimers().entrySet())
             expiringDrops.put(timer.getKey(), currentHostTick() + timer.getValue());
         combatEncounter.activateFloor(collision, combat);
-        publishedCombatSnapshot = combatEncounter.getSnapshot(currentHostTick());
+        publishedCombatSnapshot.set(combatEncounter.getSnapshot(currentHostTick()));
         itemWorld.activateFloor(destination.getWorldItems(), nextItemId);
         publishedItemRevisions.clear();
         durableCampaign = candidate; lastCapturedCampaign = candidate;

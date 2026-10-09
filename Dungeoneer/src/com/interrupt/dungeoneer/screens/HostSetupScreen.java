@@ -147,7 +147,7 @@ public final class HostSetupScreen extends BaseScreen {
     }
 
     /** Same entity, DrawableSprite update, atlas lookup/fallback and tint used during gameplay. */
-    private static DrawableSprite resolvedPortrait(String avatarId) {
+    static DrawableSprite resolvedPortrait(String avatarId) {
         RemoteAvatar actor = new RemoteAvatar(new MovementEntityDescriptor(1L, new NetworkEntityId(1L),
                 new ParticipantId("campaign-slot-1"), 1, "Preview", avatarId));
         actor.updateDrawable();

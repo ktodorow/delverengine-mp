@@ -488,6 +488,54 @@ public class NamedCampaignSetupTest {
         finally { flow.leave(); }
     }
 
+    @Test public void repeatedColdSlotReturnKeepsEntityBaselineAheadOfLivePartyUpdates() throws Exception {
+        // Fresh save/store and event loops preserve the original failed cold-return scenario.
+        // Repetition covers scheduler assignments without production timing hooks.
+        for(int attempt = 0; attempt < 128; attempt++) {
+            File root = temporary.newFolder("ordered-return-" + attempt);
+            CampaignRosterStore firstStore = new CampaignRosterStore(root, new SecureRandom());
+            CampaignRoster original = saveCampaign(firstStore, "Returning friends", 4, 5, true);
+            CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+            CampaignSave before = store.campaignSaves().load(original.getCampaignId(), compatibility());
+            assertEquals("Fresh save Party health at return " + attempt, 3, before.getParticipant(2).getParty().getHealth());
+            assertEquals("Fresh save combat health at return " + attempt, 3,
+                    before.getCombat().getCombatant("participant:campaign-slot-2").getHealth());
+            DirectConnectSessionFlow hostFlow = new DirectConnectSessionFlow();
+            DirectConnectSessionFlow clientFlow = new DirectConnectSessionFlow();
+            try {
+                CampaignLibrary library = new CampaignLibrary(store, AvatarCatalog.ownedV108Humanoids(),
+                        identity('1'), new SlotPresentation("Explorer", "humanoid-3"));
+                DirectConnectSessionFlow.HostSetup setup = hostFlow.prepareCampaign(library, original.getCampaignId(), freePort());
+                hostFlow.openSavedCampaign(setup, library, store,
+                        (request, roster) -> DirectConnectHost.start(request.getPort(), compatibility(), roster, store));
+                DirectConnectHost host = (DirectConnectHost)hostFlow.getPeer();
+                host.startSession();
+                host.persistCampaign();
+                ProfileReconnectTokenStore tokens = new ProfileReconnectTokenStore();
+                tokens.save(original.getCampaignId(), identity('f').getValue());
+                DirectConnectClient denied = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
+                        new SlotPresentation("Provisional", "humanoid-4"), 2, tokens, compatibility());
+                try { awaitPhase(denied, DirectConnectPhase.REJECTED); }
+                finally { denied.close(); }
+                tokens.save(original.getCampaignId(), original.getSlot(2).getReconnectToken());
+                clientFlow.openClient(new DirectConnectSessionFlow.ConnectSetup("127.0.0.1", host.getBoundPort(),
+                        "Provisional", "humanoid-4"), request -> DirectConnectClient.connect(request.getAddress(), request.getPort(),
+                        identity('2'), request.getPresentation(), 0, tokens, compatibility()));
+                DirectConnectClient client = (DirectConnectClient)clientFlow.getPeer();
+                awaitPhase(client, DirectConnectPhase.READY);
+                assertNotNull("Return " + attempt + " needs local entity before Party READY", client.getLocalMovementEntityId());
+                assertEquals("Friend", client.getPartyStatus().getMember(2).getNickname());
+                assertEquals("humanoid-2", client.getPartyStatus().getMember(2).getAvatarId());
+                assertEquals("Return " + attempt + " Host health=" + host.getPartyStatus().getMember(2).getHealth()
+                        + " Host combat=" + host.getCombatSnapshot().getCombatant("participant:campaign-slot-2").getHealth()
+                        + " Host sequence=" + host.getCombatSnapshot().getSequence(),
+                        3, client.getPartyStatus().getMember(2).getHealth());
+                assertEquals(4, client.getPartyStatus().getMember(2).getRemainingLives());
+            }
+            finally { clientFlow.leave(); hostFlow.leave(); }
+        }
+    }
+
     private static int freePort() throws Exception {
         return SocketTestPorts.availableTcpAndUdp();
     }
@@ -528,6 +576,7 @@ public class NamedCampaignSetupTest {
                 assertEquals(lives - 1, host.getPartyStatus().getMembers().get(1).getRemainingLives());
                 assertEquals(4, host.getPartyStatus().getMembers().get(1).getHealth());
                 host.applyNativeParticipantDamage("test-trap", friend, 1, 0f, 0f, 0f);
+
             }
             CampaignRoster roster = host.getRoster();
             flow.leave();

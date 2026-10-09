@@ -14,12 +14,12 @@ public final class LauncherPresentationStore {
         if(!MultiplayerProfile.isInitialized()) return defaults;
         File file = MultiplayerProfile.resolveWritableFile(PATH).file();
         if(!file.isFile()) return defaults;
-        Properties values = AtomicProperties.load(file, "multiplayer presentation defaults");
         try {
+            Properties values = AtomicProperties.load(file, "multiplayer presentation defaults");
             SlotPresentation presentation = new SlotPresentation(values.getProperty("nickname"), values.getProperty("avatar"));
             return AvatarCatalog.ownedV108Humanoids().contains(presentation.getAvatarId()) ? presentation : defaults;
         }
-        catch(IllegalArgumentException invalid) { return defaults; }
+        catch(IllegalArgumentException | IllegalStateException invalid) { return defaults; }
     }
 
     public static void save(SlotPresentation presentation) {

@@ -2,22 +2,42 @@ package com.interrupt.dungeoneer.multiplayer.launcher;
 
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectClient;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
 
 import java.util.function.Supplier;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignLibrary;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherPresentationStore;
+import com.interrupt.dungeoneer.multiplayer.lobby.LauncherEndpointStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
 import java.security.SecureRandom;
 import java.util.UUID;
 
 /** Application-owned session boundary. All operations run on the application thread. */
 public final class DirectConnectSessionFlow {
+    /** Provisional typed Client preferences; Host decides Campaign Slot presentation. */
+    public static final class ConnectSetup {
+        private final LauncherEndpointStore.Endpoint endpoint;
+        private final SlotPresentation presentation;
+
+        public ConnectSetup(String address, int port, String nickname, String avatar) {
+            endpoint = new LauncherEndpointStore.Endpoint(address, port);
+            presentation = new SlotPresentation(nickname, avatar);
+            if(!AvatarCatalog.ownedV108Humanoids().contains(avatar))
+                throw new IllegalArgumentException("Choose an available Avatar.");
+        }
+
+        public String getAddress() { return endpoint.getAddress(); }
+        public int getPort() { return endpoint.getPort(); }
+        public SlotPresentation getPresentation() { return presentation; }
+    }
+
     /** Typed native form request. Display names never supply paths or ownership credentials. */
     public static final class HostSetup {
         private final String campaignId;
@@ -74,6 +94,77 @@ public final class DirectConnectSessionFlow {
     }
 
     public DirectConnectPeer getPeer() { return peer; }
+
+    /** Editable profile defaults; reading form opens no network resources. */
+    public ConnectSetup prepareConnect() {
+        LauncherEndpointStore.Endpoint endpoint = LauncherEndpointStore.load();
+        SlotPresentation presentation = LauncherPresentationStore.load();
+        return new ConnectSetup(endpoint.getAddress(), endpoint.getPort(),
+                presentation.getNickname(), presentation.getAvatarId());
+    }
+
+    /** Keep native form installed while connecting; validated attempts become editable defaults. */
+    public void openClient(ConnectSetup setup, Function<ConnectSetup, DirectConnectClient> connect) {
+        if(setup == null || connect == null) throw new IllegalArgumentException("Connect setup and network entry are required.");
+        if(peer != null) {
+            DirectConnectPhase phase = peer.getStatus().getPhase();
+            if(!(peer instanceof DirectConnectClient) || entered
+                    || (phase != DirectConnectPhase.REJECTED && phase != DirectConnectPhase.FAILED
+                    && phase != DirectConnectPhase.DISCONNECTED && phase != DirectConnectPhase.CLOSED))
+                throw new IllegalStateException("Cancel current attempt before connecting.");
+            peer.close();
+            peer = null;
+        }
+        request = () -> {
+            DirectConnectClient client = connect.apply(setup);
+            try {
+                LauncherEndpointStore.save(setup.getAddress(), setup.getPort());
+                LauncherPresentationStore.save(setup.getPresentation());
+                return client;
+            }
+            catch(RuntimeException failure) {
+                try { client.close(); } catch(RuntimeException closeFailure) { failure.addSuppressed(closeFailure); }
+                throw failure;
+            }
+        };
+        try { peer = request.get(); }
+        catch(RuntimeException failure) { throw failure; }
+        catch(Exception failure) { throw new IllegalStateException("Connection could not open: " + failure.getMessage(), failure); }
+    }
+
+    /** Back/Cancel ends only this pre-entry Client attempt; current native form owns navigation. */
+    public void cancelClient() {
+        if(peer != null) {
+            if(!(peer instanceof DirectConnectClient) || entered)
+                throw new IllegalStateException("Leave gameplay through session controls.");
+            peer.close();
+            peer = null;
+        }
+        entered = false;
+        request = null;
+    }
+
+    /** Participant-facing progress comes from actual TCP/UDP/session status. */
+    public String getClientProgress() {
+        if(peer == null) return "Enter Host address and presentation.";
+        switch(peer.getStatus().getPhase()) {
+            case STARTING:
+            case CONNECTING: return "Connecting to Host...";
+            case HANDSHAKING:
+            case CLAIMING_SLOT: return "Authenticating with Host...";
+            case AWAITING_APPROVAL: return "Waiting for Host admission...";
+            case REGISTERING_UDP: return "Authenticating UDP...";
+            case LOBBY: return "Connected. Waiting for Host to start.";
+            case SYNCHRONIZING: return "Synchronizing campaign...";
+            case READY: return "Connection ready.";
+            case REJECTED: return "Connection rejected: " + peer.getStatus().getMessage();
+            case FAILED:
+            case DISCONNECTED: return "Connection failed: " + peer.getStatus().getMessage()
+                    + " Check Host address and TCP/UDP port; edit and retry.";
+            case CLOSED: return "Connection cancelled.";
+            default: return peer.getStatus().getMessage();
+        }
+    }
 
     /** Selection restores campaign defaults but opens no listener. Same request feeds native form. */
     public HostSetup prepareCampaign(CampaignLibrary library, String campaignId, int port) {

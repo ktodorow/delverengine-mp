@@ -1,0 +1,252 @@
+package com.interrupt.dungeoneer.screens;
+
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.Input;
+import com.badlogic.gdx.graphics.Color;
+import com.badlogic.gdx.graphics.g2d.NinePatch;
+import com.badlogic.gdx.graphics.g2d.TextureRegion;
+import com.badlogic.gdx.scenes.scene2d.InputEvent;
+import com.badlogic.gdx.scenes.scene2d.Stage;
+import com.badlogic.gdx.scenes.scene2d.ui.*;
+import com.badlogic.gdx.scenes.scene2d.utils.ClickListener;
+import com.badlogic.gdx.scenes.scene2d.utils.NinePatchDrawable;
+import com.badlogic.gdx.scenes.scene2d.utils.TextureRegionDrawable;
+import com.badlogic.gdx.utils.Scaling;
+import com.badlogic.gdx.utils.viewport.FitViewport;
+import com.interrupt.dungeoneer.GameApplication;
+import com.interrupt.dungeoneer.GameManager;
+import com.interrupt.dungeoneer.gfx.drawables.DrawableSprite;
+import com.interrupt.dungeoneer.multiplayer.launcher.DirectConnectSessionFlow.ConnectSetup;
+import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
+
+/** Native Connect view consumes the same real application flow used by session tests. */
+public final class ConnectSetupScreen extends BaseScreen {
+    private final GameApplication application;
+    private final TextField address, port, nickname;
+    private final ButtonGroup<TextButton> avatars = new ButtonGroup<>();
+    private final Image selectedPortrait = new Image();
+    private final Label message;
+    private final TextButton connect, back;
+    private boolean pending, navigationPending, entryRequested, disposed;
+    private String localFailure;
+
+    public ConnectSetupScreen(GameApplication application, ConnectSetup defaults) {
+        this.application = application;
+        screenName = "ConnectSetupScreen";
+        splashLevel = splashScreenInfo.backgroundLevel;
+        viewport = new FitViewport(520, 400);
+        ui = new Stage(viewport);
+        Table root = new Table();
+        root.setFillParent(true);
+        Table panel = new Table(skin);
+        panel.setBackground(new NinePatchDrawable(new NinePatch(skin.getRegion("window"), 8, 8, 8, 8)));
+        panel.pad(12);
+        panel.add(new Label("Connect to Co-op Campaign", skin)).colspan(2).padBottom(8);
+        panel.row();
+        address = field(defaults.getAddress(), 253);
+        address.setMessageText("Host address");
+        row(panel, "Host address", address);
+        port = field(Integer.toString(defaults.getPort()), 5);
+        port.setTextFieldFilter((textField, character) -> character >= '0' && character <= '9');
+        row(panel, "Port", port);
+        nickname = field(defaults.getPresentation().getNickname(), 64);
+        row(panel, "Nickname", nickname);
+        Table choices = new Table();
+        int number = 1;
+        for(String id : AvatarCatalog.ownedV108Humanoids().getAvatarIds()) {
+            DrawableSprite sprite = HostSetupScreen.resolvedPortrait(id);
+            TextButton button = new TextButton("Avatar " + number++, com.interrupt.dungeoneer.ui.UiSkin.createChoiceButtonStyle(skin));
+            button.setUserObject(id);
+            Label label = button.getLabel();
+            label.setFontScale(0.65f);
+            button.clearChildren();
+            Image portrait = new Image(new TextureRegionDrawable(sprite.atlas.getSprite(sprite.tex)), Scaling.fit);
+            portrait.setColor(sprite.color);
+            button.add(portrait).size(28).pad(2);
+            button.row();
+            button.add(label).padBottom(2);
+            avatars.add(button);
+            button.setChecked(id.equals(defaults.getPresentation().getAvatarId()));
+            button.addListener(new ClickListener() {
+                @Override public void clicked(InputEvent event, float x, float y) {
+                    if(!pending && !button.isDisabled()) selectPortrait(sprite);
+                }
+            });
+            choices.add(button).width(51).height(50).padRight(3);
+            if(id.equals(defaults.getPresentation().getAvatarId())) selectPortrait(sprite);
+        }
+        row(panel, "Avatar (F1-F4)", choices);
+        panel.getCell(choices).height(50);
+        selectedPortrait.setScaling(Scaling.fit);
+        panel.add(new Label("Selected Avatar", skin)).left();
+        panel.add(selectedPortrait).size(56).padBottom(4);
+        panel.row();
+        Label help = new Label("Use Host LAN or reachable internet address. TCP and UDP use same port.\n"
+                + "Choices are provisional; saved characters keep campaign Nickname and Avatar.", skin);
+        help.setFontScale(0.65f);
+        help.setWrap(true);
+        panel.add(help).colspan(2).width(390).height(36).padTop(3);
+        panel.row();
+        message = new Label("Enter Host address and presentation.", skin);
+        message.setFontScale(0.7f);
+        message.setWrap(true);
+        panel.add(message).colspan(2).width(390).height(48).padTop(3);
+        panel.row();
+        Table actions = new Table();
+        back = action(actions, "Back", application::cancelMultiplayerConnect);
+        connect = action(actions, "Connect", this::connect);
+        panel.add(actions).colspan(2).padTop(4);
+        root.add(panel);
+        ui.addActor(root);
+    }
+
+    private TextField field(String value, int maxLength) {
+        TextField.TextFieldStyle style = com.interrupt.dungeoneer.ui.UiSkin.createTextFieldStyle(skin);
+        style.cursor = new TextureRegionDrawable(new TextureRegion(skin.getRegion("knob"), 8, 8, 1, 1));
+        TextField field = new TextField(value, style);
+        field.setMaxLength(maxLength);
+        field.setOnlyFontChars(false);
+        return field;
+    }
+
+    private void row(Table panel, String label, com.badlogic.gdx.scenes.scene2d.Actor control) {
+        Label title = new Label(label, skin);
+        title.setFontScale(0.8f);
+        panel.add(title).width(125).left().padBottom(4);
+        panel.add(control).width(250).height(24).padBottom(4);
+        panel.row();
+    }
+
+    private void selectPortrait(DrawableSprite sprite) {
+        selectedPortrait.setDrawable(new TextureRegionDrawable(sprite.atlas.getSprite(sprite.tex)));
+        selectedPortrait.setColor(sprite.color);
+    }
+
+    private TextButton action(Table parent, String label, Runnable action) {
+        TextButton button = new TextButton(label, skin);
+        button.addListener(new ClickListener() {
+            @Override public void clicked(InputEvent event, float x, float y) {
+                if(!button.isDisabled()) navigate(action);
+            }
+        });
+        parent.add(button).width(145).height(24).padRight(6);
+        return button;
+    }
+
+    private void navigate(Runnable action) {
+        if(navigationPending || disposed) return;
+        navigationPending = true;
+        Gdx.app.postRunnable(() -> {
+            if(disposed || application.getScreen() != this) return;
+            try { action.run(); }
+            catch(RuntimeException failure) { showFailure(failure.getMessage()); }
+            finally { navigationPending = false; }
+        });
+    }
+
+    private void connect() {
+        if(pending) return;
+        int selectedPort;
+        try { selectedPort = Integer.parseInt(port.getText()); }
+        catch(NumberFormatException invalid) { throw new IllegalArgumentException("Port must be 1-65535."); }
+        ConnectSetup setup = new ConnectSetup(address.getText(), selectedPort, nickname.getText(),
+                (String)avatars.getChecked().getUserObject());
+        localFailure = null;
+        entryRequested = false;
+        application.openMultiplayerConnection(setup);
+        setPending(true);
+    }
+
+    public void showFailure(String reason) {
+        localFailure = reason == null ? "Connection failed. Edit fields and retry." : reason;
+        message.setText(localFailure.replace("[", "[["));
+        message.setColor(Color.ORANGE);
+    }
+
+    private void setPending(boolean value) {
+        pending = value;
+        address.setDisabled(value);
+        port.setDisabled(value);
+        nickname.setDisabled(value);
+        connect.setDisabled(value);
+        for(TextButton button : avatars.getButtons()) button.setDisabled(value);
+        back.setText(value ? "Cancel" : "Back");
+    }
+
+    @Override public void show() {
+        super.show();
+        Gdx.input.setCursorCatched(false);
+        Gdx.input.setInputProcessor(ui);
+        ui.setKeyboardFocus(address);
+    }
+
+    @Override protected void tick(float delta) {
+        super.tick(delta);
+        ui.act(delta);
+        DirectConnectPeer peer = application.getDirectConnectPeer();
+        if(peer != null) {
+            DirectConnectPhase phase = peer.getStatus().getPhase();
+            boolean stopped = phase == DirectConnectPhase.FAILED || phase == DirectConnectPhase.REJECTED
+                    || phase == DirectConnectPhase.DISCONNECTED || phase == DirectConnectPhase.CLOSED;
+            setPending(!stopped);
+            if(localFailure == null) {
+                message.setText(application.getMultiplayerConnectionProgress().replace("[", "[["));
+                message.setColor(stopped ? Color.ORANGE : Color.WHITE);
+            }
+        }
+        if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) navigate(application::cancelMultiplayerConnect);
+        else if(!pending && Gdx.input.isKeyJustPressed(Input.Keys.ENTER)) navigate(this::connect);
+        if(!pending) {
+            for(int i = 0; i < avatars.getButtons().size; i++) {
+                if(Gdx.input.isKeyJustPressed(Input.Keys.F1 + i)) {
+                    TextButton button = avatars.getButtons().get(i);
+                    button.setChecked(true);
+                    selectPortrait(HostSetupScreen.resolvedPortrait((String)button.getUserObject()));
+                }
+            }
+        }
+        boolean spectator = peer != null && peer.getPartyStatus() != null
+                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null
+                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()).getState() == PartyMemberState.SPECTATING;
+        if(peer != null && !navigationPending && !entryRequested
+                && (DirectConnectSessionScreen.isFloorEntryReady(peer.getStatus().getPhase(),
+                        peer.getLocalMovementEntityId(), peer.getMovementSnapshots())
+                || spectator && (peer.getStatus().getPhase() == DirectConnectPhase.READY
+                        || peer.getStatus().getPhase() == DirectConnectPhase.SYNCHRONIZING)
+                        && !peer.getMovementSnapshots().isEmpty())) {
+            entryRequested = true;
+            Gdx.app.postRunnable(() -> {
+                if(disposed || navigationPending || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;
+                try { if(!application.enterDirectConnectFloor(peer)) entryRequested = false; }
+                catch(RuntimeException failure) {
+                    peer.close();
+                    application.returnToDirectConnectSession();
+                    application.showDirectConnectFailure(failure.getMessage());
+                }
+            });
+        }
+    }
+
+    @Override protected void draw(float delta) {
+        Gdx.gl.glViewport(0, 0, curWidth, curHeight);
+        super.draw(delta);
+        viewport.apply();
+        ui.draw();
+    }
+
+    @Override public void resize(int width, int height) {
+        curWidth = width; curHeight = height;
+        viewport.update(width, height, true);
+        GameManager.renderer.setSize(width, height);
+    }
+
+    @Override public void dispose() {
+        if(disposed) return;
+        disposed = true;
+        if(Gdx.input.getInputProcessor() == ui) Gdx.input.setInputProcessor(null);
+        ui.dispose();
+    }
+}
