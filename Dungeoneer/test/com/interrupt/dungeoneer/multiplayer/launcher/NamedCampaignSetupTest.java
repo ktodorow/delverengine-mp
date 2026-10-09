@@ -363,8 +363,6 @@ public class NamedCampaignSetupTest {
                     LauncherIdentityStore.loadOrCreate(), LauncherPresentationStore.load(), 0,
                     new ProfileReconnectTokenStore(), compatibility());
             try {
-                awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
-                host.approve(identity.getValue());
                 awaitPhase(client, DirectConnectPhase.LOBBY);
                 assertEquals(chosen, other.getSlot(2).getPresentation());
                 assertEquals(identity, other.getSlot(2).getLauncherIdentity());
@@ -441,8 +439,6 @@ public class NamedCampaignSetupTest {
             token = host.getRoster().getSlot(1).getReconnectToken();
             client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
                     new SlotPresentation("Friend", "humanoid-2"), 0, new ProfileReconnectTokenStore(), compatibility());
-            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
-            host.approve(identity('2').getValue());
             awaitPhase(client, DirectConnectPhase.LOBBY);
             host.startSession();
             awaitPhase(client, DirectConnectPhase.READY);
@@ -554,8 +550,6 @@ public class NamedCampaignSetupTest {
             DirectConnectHost host = (DirectConnectHost)flow.getPeer();
             client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
                     new SlotPresentation("Friend", "humanoid-2"), 0, new ProfileReconnectTokenStore(), compatibility());
-            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
-            host.approve(identity('2').getValue());
             awaitPhase(client, DirectConnectPhase.LOBBY);
             host.startSession();
             awaitPhase(client, DirectConnectPhase.READY);

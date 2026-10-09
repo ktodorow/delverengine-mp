@@ -202,21 +202,25 @@ public class DirectConnectSessionFlowTest {
         finally { flow.leave(); if(host != null) host.close(); }
     }
 
-    @Test public void cancelledClaimCannotOccupyOrEnterRetriedClientSession() throws Exception {
+    @Test public void cancelledAdmittedClientRetainsSlotButCannotEnterRetriedSession() throws Exception {
         CampaignRosterStore store = new CampaignRosterStore(temporary.newFolder("cancelled-claim"), new SecureRandom());
         CampaignRoster roster = roster(store);
         DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
         int port = host.getBoundPort();
         DirectConnectSessionFlow flow = new DirectConnectSessionFlow();
+        ReconnectTokenStore tokens = new ReconnectTokenStore() {
+            private volatile String token;
+            public String load(String campaign) { return token; }
+            public void save(String campaign, String value) { token = value; }
+        };
         try {
-            flow.open(() -> client(port));
+            flow.open(() -> client(port, tokens));
             DirectConnectPeer cancelled = flow.getPeer();
-            awaitPhase(cancelled, DirectConnectPhase.AWAITING_APPROVAL);
+            awaitPhase(cancelled, DirectConnectPhase.LOBBY);
             flow.leave();
             assertEquals(DirectConnectPhase.CLOSED, cancelled.getStatus().getPhase());
-            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
-            while(!host.getPendingClaims().isEmpty() && System.nanoTime() < deadline) Thread.sleep(10L);
-            assertTrue("Cancelled claim must release Host pending slot", host.getPendingClaims().isEmpty());
+            awaitConnected(host, 1);
+            assertEquals(2, host.getRoster().getSlots().size());
             flow.retry();
             DirectConnectClient joined = (DirectConnectClient)flow.getPeer();
             admitAndStart(host, joined);
@@ -283,8 +287,6 @@ public class DirectConnectSessionFlowTest {
     }
 
     private static void admitAndStart(DirectConnectHost host, DirectConnectClient client) throws Exception {
-        awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
-        host.approve(identity('2').getValue());
         awaitPhase(client, DirectConnectPhase.LOBBY);
         host.startSession();
         awaitPhase(client, DirectConnectPhase.READY);

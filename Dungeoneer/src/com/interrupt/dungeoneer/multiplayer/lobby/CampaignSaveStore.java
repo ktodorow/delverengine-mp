@@ -447,10 +447,19 @@ public final class CampaignSaveStore {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }
-        if(expected != null && format <= 7 && protocol <= 50 && expected.getBuildId().equals("mp-v108-prototype-named-campaigns-56")
+        if(expected != null && format <= 7 && protocol <= 50
+                && (expected.getBuildId().equals("mp-v108-prototype-named-campaigns-56")
+                    || expected.getBuildId().equals("mp-v108-prototype-shared-lobby-57"))
                 && (compatibility.getBuildId().equals("mp-v108-prototype-party-travel-55")
                     || format <= 6 && compatibility.getBuildId().equals("mp-v108-prototype-dormant-floors-54")
                     || format <= 5 && compatibility.getBuildId().equals("mp-v108-prototype-late-admission-53"))) {
+            compatibility = new DirectConnectCompatibility(expected.getBuildId(),
+                    compatibility.getContentFormat(), compatibility.getContentSha256());
+        }
+        // Shared lobby changes wire only; named-campaign save layout and gameplay remain identical.
+        if(expected != null && format == 8 && protocol <= 50
+                && compatibility.getBuildId().equals("mp-v108-prototype-named-campaigns-56")
+                && expected.getBuildId().equals("mp-v108-prototype-shared-lobby-57")) {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }

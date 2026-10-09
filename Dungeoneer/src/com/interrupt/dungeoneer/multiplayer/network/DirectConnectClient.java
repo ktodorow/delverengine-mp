@@ -1443,6 +1443,24 @@ public final class DirectConnectClient implements DirectConnectPeer {
         }
     }
 
+    private volatile com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot lobbySnapshot;
+    @Override public com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot getLobbySnapshot() { return lobbySnapshot; }
+
+    private synchronized void lobbySnapshot(DirectConnectWire.LobbySnapshotMessage report) {
+        if(!java.util.Objects.equals(sessionId, report.sessionId) || campaignSlot == 0
+                || report.snapshot.getCapacity() != campaignCapacity
+                || report.snapshot.getSlot(campaignSlot) == null
+                || !report.snapshot.getSlot(campaignSlot).isConnected()) {
+            fail("Host returned invalid lobby ownership state.");
+            return;
+        }
+        if(lobbySnapshot != null && report.snapshot.getSequence() <= lobbySnapshot.getSequence()) return;
+        lobbySnapshot = report.snapshot;
+        com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot local = lobbySnapshot.getSlot(campaignSlot);
+        if(local.isAuthenticated() && !local.isSynchronized())
+            tcpChannel.writeAndFlush(new DirectConnectWire.LobbyReceived(sessionId, lobbySnapshot.getSequence()));
+    }
+
     @Override
     public DirectConnectStatus getStatus() {
         return status;
@@ -1513,6 +1531,9 @@ public final class DirectConnectClient implements DirectConnectPeer {
             else if(message instanceof ServerAccepted && sessionId != null
                     && campaignSlot == 0) {
                 accepted((ServerAccepted)message);
+            }
+            else if(message instanceof DirectConnectWire.LobbySnapshotMessage) {
+                lobbySnapshot((DirectConnectWire.LobbySnapshotMessage)message);
             }
             else if(message instanceof ServerRejected) {
                 rejected((ServerRejected)message);

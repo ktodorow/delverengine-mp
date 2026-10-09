@@ -359,6 +359,15 @@ public class GameApplication extends Game {
         }
     }
 
+    /** Switch an admitted native Connect attempt to the same shared lobby as Host setup. */
+    public boolean showDirectConnectLobby(DirectConnectPeer expectedPeer) {
+        if(expectedPeer == null || expectedPeer != sessionFlow.getPeer()
+                || expectedPeer.getStatus().getPhase() != DirectConnectPhase.LOBBY
+                || expectedPeer.getLobbySnapshot() == null) return false;
+        showDirectConnectSession(expectedPeer);
+        return true;
+    }
+
     private void showDirectConnectSession(DirectConnectPeer peer) {
         Screen completedMenu = getScreen() instanceof MultiplayerMenuScreen ? getScreen() : null;
         CampaignLibraryScreen completedLibrary = campaignLibraryScreen;

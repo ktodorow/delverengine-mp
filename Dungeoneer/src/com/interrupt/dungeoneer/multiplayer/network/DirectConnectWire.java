@@ -128,6 +128,8 @@ final class DirectConnectWire {
     private static final int ADMISSION_SYNC = 62;
     private static final int TRAVEL_DESTINATION = 65;
     private static final int TRAVEL_READY = 66;
+    private static final int LOBBY_SNAPSHOT = 67;
+    private static final int LOBBY_RECEIVED = 68;
     private static final int TRAVEL_INTENT = 63;
     private static final int TRAVEL_STATE = 64;
     private static final int MAX_MAPPING_MESSAGE_BYTES = com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.MAX_BYTES + 128;
@@ -156,6 +158,8 @@ final class DirectConnectWire {
 
     static ByteBuf encodeDatagram(ByteBufAllocator allocator, Message message)
             throws ProtocolException {
+        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived)
+            throw new ProtocolException("Lobby messages require reliable TCP.");
         ByteBuf output = allocator.buffer(128);
         boolean successful = false;
         try {
@@ -175,14 +179,43 @@ final class DirectConnectWire {
         if(input.readableBytes() > DirectConnectProtocol.MAX_UDP_DATAGRAM_BYTES) {
             throw new ProtocolException("Datagram exceeded protocol size bound.");
         }
-        return decode(input);
+        Message message = decode(input);
+        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived)
+            throw new ProtocolException("Lobby messages require reliable TCP.");
+        return message;
     }
 
     private static void encode(Message message, ByteBuf output) throws ProtocolException {
         if(message == null) throw new ProtocolException("Wire message cannot be null.");
         output.writeInt(DirectConnectProtocol.MAGIC);
 
-        if(message instanceof TravelDestination) {
+        if(message instanceof LobbySnapshotMessage) {
+            LobbySnapshotMessage report = (LobbySnapshotMessage)message;
+            com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot lobby = report.snapshot;
+            output.writeByte(LOBBY_SNAPSHOT);
+            writeString(output, report.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(lobby.getSequence());
+            writeString(output, lobby.getCampaignName(), 256, "campaign name");
+            output.writeByte(lobby.getCapacity()); output.writeByte(lobby.getStartingLives());
+            output.writeByte(lobby.getHostSlot()); output.writeByte(lobby.getSlots().size());
+            for(com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot slot : lobby.getSlots()) {
+                output.writeByte(slot.getNumber());
+                int flags = (slot.isClaimed() ? 1 : 0) | (slot.isConnected() ? 2 : 0)
+                        | (slot.isAuthenticated() ? 4 : 0) | (slot.isSynchronized() ? 8 : 0);
+                output.writeByte(flags);
+                if(slot.isClaimed()) {
+                    writeString(output, slot.getPresentation().getNickname(), DirectConnectProtocol.MAX_NICKNAME_BYTES, "nickname");
+                    writeString(output, slot.getPresentation().getAvatarId(), DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar");
+                }
+            }
+        }
+        else if(message instanceof LobbyReceived) {
+            LobbyReceived received = (LobbyReceived)message;
+            output.writeByte(LOBBY_RECEIVED);
+            writeString(output, received.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(received.sequence);
+        }
+        else if(message instanceof TravelDestination) {
             TravelDestination report = (TravelDestination)message;
             output.writeByte(TRAVEL_DESTINATION);
             writeString(output, report.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
@@ -1017,6 +1050,37 @@ final class DirectConnectWire {
         int type = input.readUnsignedByte();
         Message message;
         switch(type) {
+            case LOBBY_SNAPSHOT:
+                String lobbySession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 8, "lobby sequence");
+                long lobbySequence = input.readLong();
+                String campaignName = readString(input, 256, "campaign name");
+                requireReadable(input, 4, "lobby settings");
+                int lobbyCapacity = input.readUnsignedByte(), startingLives = input.readUnsignedByte();
+                int hostSlot = input.readUnsignedByte(), slotCount = input.readUnsignedByte();
+                if(lobbyCapacity < 2 || lobbyCapacity > 4 || slotCount != lobbyCapacity)
+                    throw new ProtocolException("Lobby capacity/count outside bounds.");
+                List<com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot> lobbySlots = new ArrayList<>();
+                for(int index = 0; index < slotCount; index++) {
+                    requireReadable(input, 2, "lobby slot");
+                    int number = input.readUnsignedByte(), flags = input.readUnsignedByte();
+                    if((flags & ~15) != 0) throw new ProtocolException("Invalid lobby flags.");
+                    com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation presentation = (flags & 1) == 0 ? null
+                            : new com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation(
+                                    readString(input, DirectConnectProtocol.MAX_NICKNAME_BYTES, "nickname"),
+                                    readString(input, DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar"));
+                    lobbySlots.add(new com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot(number,
+                            presentation, (flags & 2) != 0, (flags & 4) != 0, (flags & 8) != 0));
+                }
+                message = new LobbySnapshotMessage(lobbySession,
+                        new com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot(lobbySequence, campaignName,
+                                lobbyCapacity, startingLives, hostSlot, lobbySlots));
+                break;
+            case LOBBY_RECEIVED:
+                String receivedSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 8, "lobby receipt");
+                message = new LobbyReceived(receivedSession, input.readLong());
+                break;
             case TRAVEL_DESTINATION:
                 String destinationSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
                 requireReadable(input, 16, "destination generation/seed");
@@ -3107,6 +3171,26 @@ final class DirectConnectWire {
 
         ProtocolException(String message, Throwable cause) {
             super(message, cause);
+        }
+    }
+
+    static final class LobbySnapshotMessage implements Message {
+        final String sessionId;
+        final com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot snapshot;
+        LobbySnapshotMessage(String sessionId, com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot snapshot) {
+            if(sessionId == null || sessionId.isEmpty() || snapshot == null)
+                throw new IllegalArgumentException("Lobby report requires session and snapshot.");
+            this.sessionId = sessionId; this.snapshot = snapshot;
+        }
+    }
+
+    static final class LobbyReceived implements Message {
+        final String sessionId;
+        final long sequence;
+        LobbyReceived(String sessionId, long sequence) {
+            if(sessionId == null || sessionId.isEmpty() || sequence < 1L)
+                throw new IllegalArgumentException("Invalid lobby receipt.");
+            this.sessionId = sessionId; this.sequence = sequence;
         }
     }
 

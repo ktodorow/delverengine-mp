@@ -157,8 +157,6 @@ public class OwnedSharedFloorBuildTest {
                     public String load(String campaign) { return null; } public void save(String campaign, String token) { }
                 }, com.interrupt.dungeoneer.multiplayer.network.DirectConnectCompatibility.forOpenSourceTestFloor(new byte[] { 27 }));
         try {
-            awaitNativePhase(friend, com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.AWAITING_APPROVAL);
-            host.approve(identity.toString().replace('1', '2'));
             awaitNativePhase(friend, com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.LOBBY);
             host.startSession();
             awaitNativePhase(friend, com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase.READY);

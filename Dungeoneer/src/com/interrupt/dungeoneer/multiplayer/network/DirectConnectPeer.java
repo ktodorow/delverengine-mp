@@ -33,6 +33,8 @@ import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
 import java.util.List;
 
 public interface DirectConnectPeer extends AutoCloseable {
+    /** Same Host-owned public lobby facts on every admitted peer. */
+    default com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot getLobbySnapshot() { return null; }
     default com.interrupt.dungeoneer.multiplayer.floor.PartyDestination getPartyDestination() { return null; }
     default void acknowledgePartyDestination(long generation) { }
     default com.interrupt.dungeoneer.multiplayer.floor.PartyTransition getPartyTransition() {

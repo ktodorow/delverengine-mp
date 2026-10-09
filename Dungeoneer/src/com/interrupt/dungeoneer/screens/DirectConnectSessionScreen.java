@@ -2,251 +2,256 @@ package com.interrupt.dungeoneer.screens;
 
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Input;
-import com.badlogic.gdx.Screen;
-import com.badlogic.gdx.graphics.GL20;
-import com.badlogic.gdx.graphics.OrthographicCamera;
-import com.badlogic.gdx.graphics.g2d.BitmapFont;
-import com.badlogic.gdx.graphics.g2d.SpriteBatch;
-import com.badlogic.gdx.utils.Align;
+import com.badlogic.gdx.graphics.Color;
+import com.badlogic.gdx.graphics.g2d.NinePatch;
+import com.badlogic.gdx.scenes.scene2d.InputEvent;
+import com.badlogic.gdx.scenes.scene2d.Stage;
+import com.badlogic.gdx.scenes.scene2d.ui.*;
+import com.badlogic.gdx.scenes.scene2d.utils.ClickListener;
+import com.badlogic.gdx.scenes.scene2d.utils.NinePatchDrawable;
+import com.badlogic.gdx.scenes.scene2d.utils.TextureRegionDrawable;
+import com.badlogic.gdx.utils.Scaling;
+import com.badlogic.gdx.utils.viewport.FitViewport;
 import com.interrupt.dungeoneer.GameApplication;
+import com.interrupt.dungeoneer.GameManager;
+import com.interrupt.dungeoneer.gfx.drawables.DrawableSprite;
+import com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
-import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
-import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
-import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
-import com.interrupt.dungeoneer.multiplayer.network.DirectConnectStatus;
-import com.interrupt.dungeoneer.multiplayer.network.PendingSlotClaim;
-
+import com.interrupt.dungeoneer.multiplayer.network.*;
 import java.util.List;
 
-/** Minimal shared session screen used before Participants enter the shared floor. */
-public final class DirectConnectSessionScreen implements Screen {
+/** Native view of the same authoritative public lobby used by real-session tests. */
+public final class DirectConnectSessionScreen extends BaseScreen {
     private final GameApplication application;
     private final DirectConnectPeer peer;
-    private final SpriteBatch batch = new SpriteBatch();
-    private final BitmapFont font = new BitmapFont();
-    private final OrthographicCamera camera = new OrthographicCamera();
-    private boolean floorEntryRequested = false;
-    private boolean disposed = false;
+    private final Table cards = new Table();
+    private final Label title, settings, counts, progress, recovery;
+    private final TextButton start, leave, retry, keepOpen, relink, reject;
+    private LobbySnapshot displayed;
+    private boolean floorEntryRequested, navigationPending, confirmClose, disposed;
     private String entryError;
-    private boolean navigationPending;
-    private boolean confirmClose;
 
     public DirectConnectSessionScreen(GameApplication application, DirectConnectPeer peer) {
         if(application == null) throw new IllegalArgumentException("Game application cannot be null.");
         this.application = application;
         this.peer = peer;
+        screenName = "DirectConnectSessionScreen";
+        splashLevel = splashScreenInfo.backgroundLevel;
+        viewport = new FitViewport(540, 460);
+        ui = new Stage(viewport);
+        Table root = new Table();
+        root.setFillParent(true);
+        Table panel = new Table(skin);
+        panel.setBackground(new NinePatchDrawable(new NinePatch(skin.getRegion("window"), 8, 8, 8, 8)));
+        panel.pad(12);
+        title = label("Co-op Campaign Lobby", 1f);
+        panel.add(title).width(470).height(24); panel.row();
+        settings = label("Receiving campaign settings...", 0.8f);
+        panel.add(settings).width(470).height(22); panel.row();
+        counts = label("", 0.75f);
+        panel.add(counts).width(470).height(20).padBottom(5); panel.row();
+        panel.add(cards).width(470); panel.row();
+        progress = label("Connecting...", 0.75f);
+        panel.add(progress).width(470).height(44).padTop(5); panel.row();
+        recovery = label("Compatible friends enter unused capacity automatically.", 0.65f);
+        panel.add(recovery).width(470).height(32); panel.row();
+        Table recoveryActions = new Table();
+        relink = action(recoveryActions, "Relink trusted (L)", () -> recoverClaim(true));
+        reject = action(recoveryActions, "Reject recovery (R)", () -> recoverClaim(false));
+        panel.add(recoveryActions).height(24); panel.row();
+        Table actions = new Table();
+        leave = action(actions, peer instanceof DirectConnectHost ? "Close lobby (Esc)" : "Leave (Esc)", this::leave);
+        keepOpen = action(actions, "Keep open", () -> confirmClose = false);
+        retry = action(actions, "Retry (T)", application::retryDirectConnectSession);
+        start = action(actions, "Start (Enter)", () -> ((DirectConnectHost)peer).startSession());
+        panel.add(actions).height(24).padTop(5);
+        root.add(panel);
+        ui.addActor(root);
+        updateLobby();
     }
 
-    @Override
-    public void show() {
-        Gdx.input.setInputProcessor(null);
-        Gdx.input.setCursorCatched(false);
+    private Label label(String text, float scale) {
+        Label label = new Label(text, skin);
+        label.setFontScale(scale);
+        label.setWrap(true);
+        return label;
     }
 
-    @Override
-    public void render(float delta) {
-        if(disposed) return;
-        handleNavigation();
-        handleHostControls();
-        DirectConnectStatus status = peer == null ? null : peer.getStatus();
-        DirectConnectPhase phase = status == null ? DirectConnectPhase.FAILED : status.getPhase();
-        boolean spectator = peer != null && peer.getPartyStatus() != null
-                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null
-                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()).getState()
-                        == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING;
-        if(peer != null && !navigationPending && !confirmClose && (isFloorEntryReady(phase, peer.getLocalMovementEntityId(),
-                peer.getMovementSnapshots()) || spectator && (phase == DirectConnectPhase.READY
-                        || phase == DirectConnectPhase.SYNCHRONIZING)
-                        && !peer.getMovementSnapshots().isEmpty()) && !floorEntryRequested) {
-            floorEntryRequested = true;
-            Gdx.app.postRunnable(new Runnable() {
-                @Override
-                public void run() {
-                    if(disposed || application.getScreen() != DirectConnectSessionScreen.this
-                            || application.getDirectConnectPeer() != peer) return;
-                    try { application.enterDirectConnectFloor(peer); }
-                    catch(RuntimeException failure) {
-                        entryError = failure.getMessage();
-                        try {
-                            if(peer instanceof DirectConnectHost) ((DirectConnectHost)peer).abortCampaignRecovery(entryError);
-                            else peer.close();
-                        }
-                        catch(RuntimeException ignored) { }
-                        application.returnToDirectConnectSession();
-                        application.showDirectConnectFailure(entryError);
-                    }
+    private TextButton action(Table table, String text, Runnable action) {
+        TextButton button = new TextButton(text, skin);
+        button.getLabel().setFontScale(0.75f);
+        button.addListener(new ClickListener() {
+            @Override public void clicked(InputEvent event, float x, float y) {
+                if(!button.isDisabled()) navigate(action);
+            }
+        });
+        table.add(button).width(113).height(24).padRight(4);
+        return button;
+    }
+
+    private static String text(String value) { return value == null ? "" : value.replace("[", "[["); }
+
+    private void updateLobby() {
+        LobbySnapshot lobby = peer == null ? null : peer.getLobbySnapshot();
+        if(lobby != null && lobby != displayed) {
+            displayed = lobby;
+            title.setText(text(lobby.getCampaignName()));
+            settings.setText("Capacity " + lobby.getCapacity() + " / Starting Lives " + lobby.getStartingLives() + " (locked)");
+            counts.setText("Connected " + lobby.getConnectedCount() + " / Claimed " + lobby.getClaimedCount()
+                    + " / Reserved " + lobby.getReservedCount() + " / Empty " + lobby.getEmptyCount());
+            cards.clearChildren();
+            for(LobbySnapshot.Slot slot : lobby.getSlots()) {
+                Table card = new Table(skin);
+                card.setBackground(new NinePatchDrawable(new NinePatch(skin.getRegion("window"), 8, 8, 8, 8)));
+                card.pad(4);
+                if(slot.isClaimed()) {
+                    DrawableSprite sprite = HostSetupScreen.resolvedPortrait(slot.getPresentation().getAvatarId());
+                    Image portrait = new Image(new TextureRegionDrawable(sprite.atlas.getSprite(sprite.tex)), Scaling.fit);
+                    portrait.setColor(sprite.color);
+                    card.add(portrait).size(44).padRight(9);
                 }
-            });
-        }
-
-        Gdx.gl.glClearColor(0.035f, 0.045f, 0.06f, 1f);
-        Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT | GL20.GL_DEPTH_BUFFER_BIT);
-        camera.update();
-        batch.setProjectionMatrix(camera.combined);
-
-        float width = camera.viewportWidth;
-        float y = camera.viewportHeight * 0.82f;
-        batch.begin();
-        font.getData().setScale(1.35f);
-        font.draw(batch, "Delver Multiplayer - Direct Connect", textLeft(width, 0.9f), y,
-                width * 0.9f, Align.center, false);
-        font.getData().setScale(1f);
-        y -= 42f;
-        font.draw(batch, peer == null ? "Connection attempt" : peer.getRole() + "  |  " + peer.getEndpoint(),
-                textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
-        y -= 34f;
-        font.draw(batch, phase.name(), textLeft(width, 0.9f), y,
-                width * 0.9f, Align.center, false);
-        y -= 30f;
-        font.draw(batch, entryError != null ? entryError : status == null ? "Session could not open." : status.getMessage(), textLeft(width, 0.8f), y,
-                width * 0.8f, Align.center, true);
-        if(status != null && status.getSessionId() != null) {
-            y -= 40f;
-            font.draw(batch, "Private Session " + status.getSessionId(),
-                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, false);
-        }
-        if(peer instanceof DirectConnectHost) {
-            DirectConnectHost host = (DirectConnectHost)peer;
-            y -= 32f;
-            font.draw(batch, "Campaign " + host.getRoster().getCampaignName() + "  |  Capacity "
-                            + host.getRoster().getCapacity() + "  |  Connected "
-                            + host.getConnectedParticipantCount()
-                            + "  |  Starting Lives " + host.getStartingLives()
-                            + (host.isStartingLivesLocked() ? " (locked)" : " [1-5]"),
-                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, false);
-            List<PendingSlotClaim> pending = host.getPendingClaims();
-            y -= 30f;
-            if(!pending.isEmpty()) {
-                PendingSlotClaim claim = pending.get(0);
-                boolean relink = claim.getRequestedSlot() > 1
-                        && host.getRoster().getSlot(claim.getRequestedSlot()) != null;
-                font.draw(batch, "Pending: " + claim.getNickname() + " / "
-                                + claim.getAvatarId() + " / Identity "
-                                + claim.getLauncherIdentity().getFingerprint()
-                                + (relink ? "   [L] Relink trusted slot   [R] Reject"
-                                        : "   [A] Approve   [R] Reject"),
-                        textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
+                else card.add(label("?", 1f)).size(44).padRight(9);
+                Table detail = new Table();
+                String name = slot.isClaimed() ? text(slot.getPresentation().getNickname()) : "Empty capacity";
+                if(slot.getNumber() == lobby.getHostSlot()) name += " / Host";
+                if(slot.getNumber() == peer.getLocalCampaignSlot() || peer instanceof DirectConnectHost && slot.getNumber() == 1) name += " / You";
+                detail.add(label(slot.getNumber() + ". " + name, 0.85f)).width(380).height(21).left(); detail.row();
+                String state = !slot.isClaimed() ? "Available to compatible friend" : !slot.isConnected() ? "Reserved / Offline"
+                        : !slot.isAuthenticated() ? "Connected / Authenticating UDP"
+                        : !slot.isSynchronized() ? "Connected / Synchronizing lobby" : "Connected / Synchronized";
+                Label status = label(state, 0.7f);
+                status.setColor(slot.isSynchronized() ? Color.GREEN : slot.isConnected() ? Color.ORANGE : Color.GRAY);
+                detail.add(status).width(380).height(18).left();
+                card.add(detail).expandX().left();
+                cards.add(card).width(470).height(54).padBottom(3); cards.row();
             }
-            else if(host.canStartSession()) {
-                font.draw(batch, "[ENTER] Start with approved TCP/UDP-ready Participants",
-                        textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
-            }
-        }
-        if(confirmClose) {
-            y -= 36f;
-            font.draw(batch, "Close Host lobby and disconnect Participants? [Y] Close   [N] Keep open",
-                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
-        }
-        else if(phase == DirectConnectPhase.CLOSED
-                || phase == DirectConnectPhase.DISCONNECTED
-                || phase == DirectConnectPhase.FAILED
-                || phase == DirectConnectPhase.REJECTED) {
-            y -= 36f;
-            font.draw(batch, "Session stopped. [T] Retry   [ESC] Back / Cancel",
-                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
-        }
-        else {
-            y -= 36f;
-            font.draw(batch, peer instanceof DirectConnectHost ? "[ESC] Close lobby" : "[ESC] Cancel / Leave",
-                    textLeft(width, 0.9f), y, width * 0.9f, Align.center, true);
-        }
-        batch.end();
-    }
-
-    public void showFailure(String error) { entryError = error; }
-
-    private void handleNavigation() {
-        if(navigationPending) return;
-        if(confirmClose) {
-            if(Gdx.input.isKeyJustPressed(Input.Keys.Y)) navigate(application::leaveDirectConnectSession);
-            else if(Gdx.input.isKeyJustPressed(Input.Keys.N) || Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) confirmClose = false;
-            return;
         }
         DirectConnectPhase phase = peer == null ? DirectConnectPhase.FAILED : peer.getStatus().getPhase();
         boolean stopped = phase == DirectConnectPhase.CLOSED || phase == DirectConnectPhase.FAILED
-                || phase == DirectConnectPhase.REJECTED || phase == DirectConnectPhase.DISCONNECTED;
-        if(stopped && Gdx.input.isKeyJustPressed(Input.Keys.T)) navigate(application::retryDirectConnectSession);
-        else if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) {
-            if(!stopped && peer instanceof DirectConnectHost) confirmClose = true;
-            else navigate(application::leaveDirectConnectSession);
+                || phase == DirectConnectPhase.REJECTED || phase == DirectConnectPhase.DISCONNECTED && !(peer instanceof DirectConnectHost);
+        progress.setText(text(confirmClose ? "Close Host lobby? Connected Participants will disconnect."
+                : entryError != null ? entryError : peer == null ? "Connection could not open."
+                : stopped ? peer.getStatus().getMessage() : peer instanceof DirectConnectHost ? "Lobby open / " + peer.getEndpoint()
+                : application.getMultiplayerConnectionProgress()));
+        progress.setColor(confirmClose || stopped || entryError != null ? Color.ORANGE : Color.WHITE);
+        boolean host = peer instanceof DirectConnectHost;
+        start.setVisible(host && !confirmClose && !stopped);
+        start.setDisabled(!host || !((DirectConnectHost)peer).canStartSession());
+        if(host) start.setText(((DirectConnectHost)peer).isResumedCampaign() ? "Resume (Enter)" : "Start (Enter)");
+        retry.setVisible(stopped && !confirmClose);
+        keepOpen.setVisible(confirmClose);
+        leave.setText(confirmClose ? "Confirm close" : host ? "Close lobby (Esc)" : stopped ? "Edit / Back (Esc)" : "Leave (Esc)");
+        List<PendingSlotClaim> pending = host ? ((DirectConnectHost)peer).getPendingClaims() : java.util.Collections.emptyList();
+        relink.setVisible(!pending.isEmpty() && !confirmClose && !stopped);
+        reject.setVisible(relink.isVisible());
+        if(!pending.isEmpty()) {
+            PendingSlotClaim claim = pending.get(0);
+            recovery.setText(text("Recovery: " + claim.getNickname() + " / Slot " + claim.getRequestedSlot()
+                    + " / Identity fingerprint " + claim.getLauncherIdentity().getFingerprint() + ". Verify trusted friend before relink."));
         }
+        else recovery.setText("Compatible friends enter unused capacity automatically.");
     }
 
-    private void navigate(final Runnable action) {
+    private void recoverClaim(boolean trusted) {
+        List<PendingSlotClaim> pending = ((DirectConnectHost)peer).getPendingClaims();
+        if(pending.isEmpty()) return;
+        String identity = pending.get(0).getLauncherIdentity().getValue();
+        if(trusted) ((DirectConnectHost)peer).relinkTrustedParticipant(identity);
+        else ((DirectConnectHost)peer).decline(identity);
+    }
+
+    private void leave() {
+        if(peer instanceof DirectConnectHost && !confirmClose
+                && peer.getStatus().getPhase() != DirectConnectPhase.CLOSED
+                && peer.getStatus().getPhase() != DirectConnectPhase.FAILED) confirmClose = true;
+        else application.leaveDirectConnectSession();
+    }
+
+    private void navigate(Runnable action) {
+        if(navigationPending || disposed) return;
         navigationPending = true;
         Gdx.app.postRunnable(() -> {
-            if(disposed || application.getScreen() != this) return;
+            if(disposed || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;
             try { action.run(); }
-            catch(RuntimeException failure) { application.showDirectConnectFailure(failure.getMessage()); }
+            catch(RuntimeException failure) { showFailure(failure.getMessage()); }
             finally { navigationPending = false; }
         });
     }
 
-    private void handleHostControls() {
-        if(navigationPending || confirmClose || !(peer instanceof DirectConnectHost)) return;
+    public void showFailure(String error) { entryError = error; }
+
+    @Override public void show() {
+        super.show();
+        Gdx.input.setCursorCatched(false);
+        Gdx.input.setInputProcessor(ui);
+        ui.setKeyboardFocus(leave);
+    }
+
+    @Override protected void tick(float delta) {
+        super.tick(delta);
+        ui.act(delta);
+        updateLobby();
+        if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) {
+            if(confirmClose) confirmClose = false;
+            else navigate(this::leave);
+        }
+        else if(confirmClose && Gdx.input.isKeyJustPressed(Input.Keys.Y)) navigate(application::leaveDirectConnectSession);
+        else if(confirmClose && Gdx.input.isKeyJustPressed(Input.Keys.N)) confirmClose = false;
+        else if(!confirmClose && retry.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.T)) navigate(application::retryDirectConnectSession);
+        else if(!confirmClose && relink.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.L)) navigate(() -> recoverClaim(true));
+        else if(!confirmClose && reject.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.R)) navigate(() -> recoverClaim(false));
+        else if(!confirmClose && peer instanceof DirectConnectHost && Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && !start.isDisabled())
+            navigate(() -> ((DirectConnectHost)peer).startSession());
+        if(peer == null || navigationPending || confirmClose || floorEntryRequested) return;
         DirectConnectPhase phase = peer.getStatus().getPhase();
-        if(phase == DirectConnectPhase.CLOSED || phase == DirectConnectPhase.FAILED) return;
-        DirectConnectHost host = (DirectConnectHost)peer;
-        List<PendingSlotClaim> pending = host.getPendingClaims();
-        if(!pending.isEmpty()) {
-            PendingSlotClaim claim = pending.get(0);
-            String identity = claim.getLauncherIdentity().getValue();
-            if(Gdx.input.isKeyJustPressed(Input.Keys.L)
-                    && claim.getRequestedSlot() > 1
-                    && host.getRoster().getSlot(claim.getRequestedSlot()) != null) {
-                host.relinkTrustedParticipant(identity);
-            }
-            else if(Gdx.input.isKeyJustPressed(Input.Keys.A)) host.approve(identity);
-            else if(Gdx.input.isKeyJustPressed(Input.Keys.R)) host.decline(identity);
-        }
-        // Campaign-wide risk is the Host's choice until play begins; Host locks it at start.
-        for(int startingLives = 1; startingLives <= 5; startingLives++) {
-            if(!host.isStartingLivesLocked()
-                    && (Gdx.input.isKeyJustPressed(Input.Keys.NUM_0 + startingLives)
-                    || Gdx.input.isKeyJustPressed(Input.Keys.NUMPAD_0 + startingLives))) {
-                host.setStartingLives(startingLives);
-            }
-        }
-        if(Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && host.canStartSession()) {
-            host.startSession();
+        boolean spectator = peer.getPartyStatus() != null && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null
+                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()).getState()
+                == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING;
+        if(isFloorEntryReady(phase, peer.getLocalMovementEntityId(), peer.getMovementSnapshots())
+                || spectator && (phase == DirectConnectPhase.READY || phase == DirectConnectPhase.SYNCHRONIZING)
+                && !peer.getMovementSnapshots().isEmpty()) {
+            floorEntryRequested = true;
+            Gdx.app.postRunnable(() -> {
+                if(disposed || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;
+                if(navigationPending || confirmClose) { floorEntryRequested = false; return; }
+                try { if(!application.enterDirectConnectFloor(peer)) floorEntryRequested = false; }
+                catch(RuntimeException failure) {
+                    entryError = failure.getMessage();
+                    try {
+                        if(peer instanceof DirectConnectHost) ((DirectConnectHost)peer).abortCampaignRecovery(entryError);
+                        else peer.close();
+                    }
+                    catch(RuntimeException cleanupFailure) { failure.addSuppressed(cleanupFailure); }
+                    application.returnToDirectConnectSession();
+                    application.showDirectConnectFailure(entryError);
+                }
+            });
         }
     }
 
-    static float textLeft(float viewportWidth, float textWidthFraction) {
-        return viewportWidth * (1f - textWidthFraction) * 0.5f;
-    }
-
-    static float lowestHostTextBaseline(float viewportHeight) {
-        return viewportHeight * 0.82f - 42f - 34f - 30f - 40f - 32f - 30f;
-    }
-
-    static boolean isFloorEntryReady(DirectConnectPhase phase,
-            NetworkEntityId localEntityId, List<MovementSnapshot> snapshots) {
-        if(phase != DirectConnectPhase.READY || localEntityId == null
-                || snapshots == null || snapshots.isEmpty()) return false;
+    static boolean isFloorEntryReady(DirectConnectPhase phase, NetworkEntityId localEntityId, List<MovementSnapshot> snapshots) {
+        if(phase != DirectConnectPhase.READY || localEntityId == null || snapshots == null || snapshots.isEmpty()) return false;
         return snapshots.get(snapshots.size() - 1).getEntity(localEntityId) != null;
     }
 
-    @Override
-    public void resize(int width, int height) {
-        camera.setToOrtho(false, Math.max(1, width), Math.max(1, height));
+    @Override protected void draw(float delta) {
+        Gdx.gl.glViewport(0, 0, curWidth, curHeight);
+        super.draw(delta);
+        viewport.apply();
+        ui.draw();
     }
 
-    @Override
-    public void pause() { }
+    @Override public void resize(int width, int height) {
+        curWidth = width; curHeight = height;
+        viewport.update(width, height, true);
+        GameManager.renderer.setSize(width, height);
+    }
 
-    @Override
-    public void resume() { }
-
-    @Override
-    public void hide() { }
-
-    @Override
-    public void dispose() {
+    @Override public void dispose() {
         if(disposed) return;
         disposed = true;
-        batch.dispose();
-        font.dispose();
+        if(Gdx.input.getInputProcessor() == ui) Gdx.input.setInputProcessor(null);
+        ui.dispose();
     }
 }

@@ -208,6 +208,15 @@ public final class ConnectSetupScreen extends BaseScreen {
                 }
             }
         }
+        if(peer != null && !navigationPending && !entryRequested
+                && peer.getStatus().getPhase() == DirectConnectPhase.LOBBY && peer.getLobbySnapshot() != null) {
+            entryRequested = true;
+            Gdx.app.postRunnable(() -> {
+                if(disposed || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;
+                if(navigationPending) { entryRequested = false; return; }
+                if(!application.showDirectConnectLobby(peer)) entryRequested = false;
+            });
+        }
         boolean spectator = peer != null && peer.getPartyStatus() != null
                 && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null
                 && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()).getState() == PartyMemberState.SPECTATING;
@@ -219,7 +228,8 @@ public final class ConnectSetupScreen extends BaseScreen {
                         && !peer.getMovementSnapshots().isEmpty())) {
             entryRequested = true;
             Gdx.app.postRunnable(() -> {
-                if(disposed || navigationPending || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;
+                if(disposed || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;
+                if(navigationPending) { entryRequested = false; return; }
                 try { if(!application.enterDirectConnectFloor(peer)) entryRequested = false; }
                 catch(RuntimeException failure) {
                     peer.close();

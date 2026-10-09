@@ -279,6 +279,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private final Map<Long, BreakableSnapshot> breakableSnapshots =
             new LinkedHashMap<Long, BreakableSnapshot>();
     private long nextLifecycleSequence;
+    private volatile com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot lobbySnapshot;
+    private long nextLobbySequence;
     private long nextPartyStatusSequence;
     private long nextPartyChatSequence;
     private long nextPauseRequestSequence;
@@ -492,6 +494,46 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 "Campaign " + roster.getCampaignId() + " has " + roster.getSlots().size()
                         + "/" + roster.getCapacity() + " claimed slots. Waiting on TCP and UDP port "
                         + boundPort + ".", null, null);
+        publishLobby();
+    }
+
+    @Override public com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot getLobbySnapshot() { return lobbySnapshot; }
+
+    /** Called under Host monitor; queue every report on TCP loop to retain cross-thread order. */
+    private synchronized void publishLobby() {
+        if(closing.get()) return;
+        List<com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot> slots = new ArrayList<>();
+        for(int number = 1; number <= roster.getCapacity(); number++) {
+            CampaignSlot slot = roster.getSlot(number);
+            RemoteConnection connection = slot == null ? null : findConnection(slot.getLauncherIdentity());
+            boolean connected = number == 1 || connection != null && connection.slot != null && !connection.kicked;
+            boolean authenticated = number == 1 || connected && connection.udpAddress != null;
+            boolean synchronizedState = number == 1 || authenticated && connection.lobbySynchronized;
+            slots.add(new com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot(number,
+                    slot == null ? null : slot.getPresentation(), connected, authenticated, synchronizedState));
+        }
+        lobbySnapshot = new com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot(++nextLobbySequence,
+                roster.getCampaignName(), roster.getCapacity(), startingLives, 1, slots);
+        DirectConnectWire.LobbySnapshotMessage message = new DirectConnectWire.LobbySnapshotMessage(sessionId, lobbySnapshot);
+        for(RemoteConnection connection : connections.values()) {
+            if(connection.slot == null || connection.kicked || !connection.channel.isActive()) continue;
+            connection.lastLobbySequence = nextLobbySequence;
+            if(connection.udpAddress != null && connection.lobbyAuthenticationSequence == 0L)
+                connection.lobbyAuthenticationSequence = nextLobbySequence;
+            connection.channel.eventLoop().execute(() -> {
+                if(connection.channel.isActive()) connection.channel.writeAndFlush(message);
+            });
+        }
+    }
+
+    private synchronized void lobbyReceived(ChannelHandlerContext context, DirectConnectWire.LobbyReceived receipt) {
+        RemoteConnection connection = connections.get(context.channel());
+        if(connection == null || connection.kicked || connection.slot == null || connection.udpAddress == null
+                || !sessionId.equals(receipt.sessionId) || connection.lobbyAuthenticationSequence == 0L
+                || receipt.sequence < connection.lobbyAuthenticationSequence
+                || receipt.sequence > connection.lastLobbySequence || connection.lobbySynchronized) return;
+        connection.lobbySynchronized = true;
+        publishLobby();
     }
 
     private static void requireSuccess(ChannelFuture future, String message) {
@@ -653,7 +695,12 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             outcome = roster.submit(reclaim);
         }
         else {
-            outcome = roster.submit(request);
+            CampaignSlot existing = roster.findSlot(connection.launcherIdentity);
+            // Setup preferences are provisional; authenticated return keeps campaign presentation.
+            SlotClaimRequest pregame = existing == null ? request : new SlotClaimRequest(
+                    connection.launcherIdentity, existing.getPresentation(), request.getRequestedSlot(),
+                    request.getReconnectToken());
+            outcome = roster.approve(pregame, random);
         }
         if(outcome.getStatus() == ClaimStatus.ADMITTED) {
             if((!sessionStarted || connection.lateParticipant)
@@ -1933,6 +1980,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
                 sessionStarted && previous != null ? previous.getRemoteParticipantId()
                         : connection.launcherIdentity.getFingerprint(),
                 sessionStarted ? sharedFloorId() : null);
+        publishLobby();
     }
 
     private synchronized void handleUdp(DatagramPacket packet) {
@@ -1956,11 +2004,13 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             if(connection == null || !sameAddress(connection.tcpAddress, packet.sender())) return;
             if(sessionStarted && connection.reconnectGrace == null
                     && connection.returnedParticipant == null && !connection.lateParticipant) return;
+            boolean firstRegistration = connection.udpAddress == null;
             connection.udpAddress = packet.sender();
             try {
                 ByteBuf response = DirectConnectWire.encodeDatagram(udpListener.alloc(),
                         new UdpRegistered(sessionId, connection.udpToken));
                 udpListener.writeAndFlush(new DatagramPacket(response, connection.udpAddress));
+                if(firstRegistration) publishLobby();
                 if(connection.reconnectGrace != null) completeReconnect(connection);
                 else if(connection.returnedParticipant != null) {
                     completeReturnedParticipant(connection);
@@ -2029,6 +2079,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private synchronized void channelClosed(Channel channel) {
         RemoteConnection connection = connections.remove(channel);
         if(connection == null || closing.get()) return;
+        publishLobby();
         if(sessionStarted && connection.lateParticipant && connection.movementDescriptor == null) {
             connection.admissionChanges.clear();
             if(connection.spectatorReady) markPartyMemberDisconnected(connection.slot.getNumber());
@@ -2481,6 +2532,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             throw new IllegalStateException("Starting Lives lock once campaign play begins.");
         }
         this.startingLives = startingLives;
+        publishLobby();
     }
 
     public int getStartingLives() {
@@ -4317,6 +4369,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         private ReturnedParticipant returnedParticipant;
         private boolean lateParticipant;
         private boolean spectatorReady;
+        private boolean lobbySynchronized;
+        private long lastLobbySequence, lobbyAuthenticationSequence;
         private long admissionId, admissionGeneration, admissionTick, admissionStartedNanos;
         private int admissionStage;
         private final java.util.ArrayDeque<Message> admissionChanges = new java.util.ArrayDeque<Message>();
@@ -4448,6 +4502,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         protected void channelRead0(ChannelHandlerContext context, Message message) {
             if(message instanceof ClientHello && !helloAccepted) {
                 helloAccepted = acceptHello(context, (ClientHello)message);
+            }
+            else if(message instanceof DirectConnectWire.LobbyReceived && helloAccepted) {
+                lobbyReceived(context, (DirectConnectWire.LobbyReceived)message);
             }
             else if(message instanceof SlotClaim && helloAccepted) {
                 claimSlot(context, (SlotClaim)message);

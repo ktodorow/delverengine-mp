@@ -38,8 +38,6 @@ public class NativeConnectSetupTest {
                     LauncherIdentityStore.loadOrCreate(), request.getPresentation(), 0,
                     new ProfileReconnectTokenStore(), compatibility()));
             DirectConnectClient client = (DirectConnectClient)flow.getPeer();
-            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
-            assertTrue(host.approve(identity.getValue()));
             awaitPhase(client, DirectConnectPhase.LOBBY);
             assertEquals(2, host.getConnectedParticipantCount());
             assertEquals(new SlotPresentation("Friend", "humanoid-2"), host.getRoster().getSlot(2).getPresentation());
@@ -117,8 +115,6 @@ public class NativeConnectSetupTest {
             assertFalse(flow.enter(nicknameRejected, () -> fail("Rejected nickname attempt entered retry")));
             open(flow, host.getBoundPort(), "Friend", "humanoid-2");
             DirectConnectPeer accepted = flow.getPeer();
-            awaitPhase(accepted, DirectConnectPhase.AWAITING_APPROVAL);
-            assertTrue(host.approve(identity.getValue()));
             awaitPhase(accepted, DirectConnectPhase.LOBBY);
             host.startSession();
             awaitPhase(accepted, DirectConnectPhase.READY);
@@ -137,7 +133,7 @@ public class NativeConnectSetupTest {
                         new ProfileReconnectTokenStore(), compatibility()));
     }
 
-    @Test public void cancellingAuthenticationAndPendingClaimEndsAttemptBeforeSameWindowRetry() throws Exception {
+    @Test public void cancellingAuthenticationAndAdmittedConnectionEndsAttemptBeforeSameWindowRetry() throws Exception {
         DirectConnectSessionFlow flow = new DirectConnectSessionFlow();
         try(java.net.ServerSocket stalled = new java.net.ServerSocket(0)) {
             stalled.setSoTimeout(8000);
@@ -159,22 +155,21 @@ public class NativeConnectSetupTest {
         DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster(store), store);
         try {
             open(flow, host.getBoundPort(), "Friend", "humanoid-2");
-            DirectConnectPeer cancelledClaim = flow.getPeer();
-            awaitPhase(cancelledClaim, DirectConnectPhase.AWAITING_APPROVAL);
+            DirectConnectPeer cancelledConnection = flow.getPeer();
+            awaitPhase(cancelledConnection, DirectConnectPhase.LOBBY);
             flow.cancelClient();
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
-            while(!host.getPendingClaims().isEmpty() && System.nanoTime() < deadline) Thread.sleep(10L);
+            while(host.getConnectedParticipantCount() != 1 && System.nanoTime() < deadline) Thread.sleep(10L);
             assertTrue(host.getPendingClaims().isEmpty());
-            assertEquals(1, host.getRoster().getSlots().size());
+            assertEquals(1, host.getConnectedParticipantCount());
+            assertEquals(2, host.getRoster().getSlots().size());
             open(flow, host.getBoundPort(), "Friend", "humanoid-2");
             DirectConnectPeer current = flow.getPeer();
-            awaitPhase(current, DirectConnectPhase.AWAITING_APPROVAL);
-            assertTrue(host.approve(LauncherIdentityStore.loadOrCreate().getValue()));
             awaitPhase(current, DirectConnectPhase.LOBBY);
             assertEquals("Connected. Waiting for Host to start.", flow.getClientProgress());
             host.startSession();
             awaitPhase(current, DirectConnectPhase.READY);
-            assertFalse(flow.enter(cancelledClaim, () -> fail("Cancelled claim entered replacement")));
+            assertFalse(flow.enter(cancelledConnection, () -> fail("Cancelled claim entered replacement")));
             assertTrue(flow.enter(current, () -> { }));
         }
         finally { flow.leave(); host.close(); }
@@ -188,8 +183,6 @@ public class NativeConnectSetupTest {
         try {
             open(flow, host.getBoundPort(), "Friend", "humanoid-2");
             DirectConnectPeer first = flow.getPeer();
-            awaitPhase(first, DirectConnectPhase.AWAITING_APPROVAL);
-            assertTrue(host.approve(identity.getValue()));
             awaitPhase(first, DirectConnectPhase.LOBBY);
             host.startSession();
             awaitPhase(first, DirectConnectPhase.READY);
