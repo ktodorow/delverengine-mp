@@ -541,6 +541,20 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         GraceParticipant reconnecting = reconnectingParticipants.get(launcherIdentity);
         ReturnedParticipant returned = returnedParticipants.get(launcherIdentity);
+        // Cold subset resume has no expired live connection, but retains same private slot contract.
+        if(sessionStarted && reconnecting == null && returned == null && durableCampaign != null
+                && !lateParticipants.contains(launcherIdentity)) {
+            CampaignSlot savedSlot = roster.findSlot(launcherIdentity);
+            if(savedSlot != null && savedSlot.getNumber() != 1
+                    && durableCampaign.getParticipant(savedSlot.getNumber()) != null) {
+                MovementEntityDescriptor savedDescriptor = new MovementEntityDescriptor(
+                        ++nextLifecycleSequence, entityId(savedSlot), participantId(savedSlot),
+                        savedSlot.getNumber(), savedSlot.getPresentation().getNickname(),
+                        savedSlot.getPresentation().getAvatarId());
+                returned = new ReturnedParticipant(savedSlot, savedDescriptor, true);
+                returnedParticipants.put(launcherIdentity, returned);
+            }
+        }
         if(sessionStarted && (partyWiped || partyProgression.victory)) {
             reject(context, RejectCode.NOT_IN_LOBBY,
                     "Terminal Campaign cannot admit a Participant.");
@@ -2536,6 +2550,22 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         simulation.addParticipant(descriptor);
         AuthoritativeLives currentLives = lives;
+        if(returned.coldResume) {
+            CampaignSave.ParticipantState saved = durableCampaign.getParticipant(returned.slot.getNumber());
+            PartyMemberStatus party = saved.getParty();
+            currentLives.addParticipant(descriptor.getParticipantId(), startingLives);
+            AuthoritativeLives.Condition condition = party.getRemainingLives() == 0
+                    ? AuthoritativeLives.Condition.EXHAUSTED
+                    : party.getHealth() == 0 ? AuthoritativeLives.Condition.DOWNED
+                    : AuthoritativeLives.Condition.STANDING;
+            currentLives.restore(descriptor.getParticipantId(), party.getRemainingLives(), condition,
+                    condition == AuthoritativeLives.Condition.DOWNED ? party.getBleedoutTicks() : 0,
+                    0, null, Math.max(0, startingLives - party.getRemainingLives()));
+            combatEncounter.addSavedParticipant(descriptor, party.getHealth(), party.getMaximumHealth());
+            List<MovementEntityDescriptor> updated = new ArrayList<MovementEntityDescriptor>(livesDescriptors);
+            updated.add(descriptor);
+            livesDescriptors = updated;
+        }
         boolean standing = currentLives == null
                 || currentLives.isStanding(descriptor.getParticipantId());
         if(!standing) simulation.freezeParticipant(descriptor.getParticipantId());
@@ -4363,14 +4393,20 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     private static final class ReturnedParticipant {
         private final CampaignSlot slot;
         private final MovementEntityDescriptor descriptor;
+        private final boolean coldResume;
 
         private ReturnedParticipant(CampaignSlot slot, MovementEntityDescriptor descriptor) {
+            this(slot, descriptor, false);
+        }
+
+        private ReturnedParticipant(CampaignSlot slot, MovementEntityDescriptor descriptor, boolean coldResume) {
             if(slot == null || descriptor == null
                     || slot.getNumber() != descriptor.getCampaignSlot()) {
                 throw new IllegalArgumentException("Returned Participant does not match Campaign Slot.");
             }
             this.slot = slot;
             this.descriptor = descriptor;
+            this.coldResume = coldResume;
         }
     }
 

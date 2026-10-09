@@ -21,7 +21,15 @@ public class NamedCampaignMigrationTest {
         String token = new String(new char[64]).replace('\0', '2');
         byte[] before = Files.readAllBytes(file.toPath());
         CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
-        CampaignRoster migrated = store.load("legacy-friends", AvatarCatalog.ownedV108Humanoids());
+        CampaignLibrary library = new CampaignLibrary(store, AvatarCatalog.ownedV108Humanoids(),
+                new LauncherIdentity(identity), new SlotPresentation("Different default", "humanoid-1"));
+        CampaignLibrary.Entry summary = library.list().get(0);
+        assertEquals("legacy-friends", summary.getCampaignName());
+        assertNull(summary.getFloorId());
+        assertEquals(0L, summary.getLastSavedTime());
+        assertEquals(4, summary.getCapacity());
+        assertEquals(1, summary.getClaimedSlots());
+        CampaignRoster migrated = library.resume("legacy-friends");
         assertEquals("legacy-friends", migrated.getCampaignId());
         assertEquals("legacy-friends", migrated.getCampaignName());
         assertEquals(4, migrated.getCapacity());

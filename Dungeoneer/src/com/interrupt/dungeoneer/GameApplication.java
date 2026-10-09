@@ -78,6 +78,8 @@ public class GameApplication extends Game {
             new DirectConnectSessionFlow(this::releaseDirectConnectResources);
     private DirectConnectSessionScreen directConnectScreen;
     private CampaignLibraryScreen campaignLibraryScreen;
+    private CampaignLibrary campaignLibrary;
+    private String campaignLibrarySelection;
     private com.interrupt.dungeoneer.screens.HostSetupScreen hostSetupScreen;
     private DirectConnectMovementController directConnectMovementController;
     private DirectConnectCombatController directConnectCombatController;
@@ -376,9 +378,10 @@ public class GameApplication extends Game {
             directConnectLauncherIdentity = directConnectRoster.getSlot(1).getLauncherIdentity();
             directConnectPresentation = directConnectRoster.getSlot(1).getPresentation();
         }
-        campaignLibraryScreen = new CampaignLibraryScreen(this,
-                new CampaignLibrary(directConnectRosterStore, AvatarCatalog.ownedV108Humanoids(),
-                        directConnectLauncherIdentity, directConnectPresentation), directConnectCampaignCapacity);
+        campaignLibrary = new CampaignLibrary(directConnectRosterStore, AvatarCatalog.ownedV108Humanoids(),
+                directConnectLauncherIdentity, directConnectPresentation);
+        campaignLibraryScreen = new CampaignLibraryScreen(this, campaignLibrary,
+                directConnectCampaignCapacity, campaignLibrarySelection);
         setScreen(campaignLibraryScreen);
     }
 
@@ -407,8 +410,21 @@ public class GameApplication extends Game {
     public void showNewCampaignSetup(int capacity) {
         if(getDirectConnectPeer() != null) throw new IllegalStateException("Leave current session before creating a Campaign.");
         Screen previous = getScreen();
+        campaignLibrarySelection = campaignLibraryScreen == null ? campaignLibrarySelection
+                : campaignLibraryScreen.getSelectedCampaignId();
         hostSetupScreen = new com.interrupt.dungeoneer.screens.HostSetupScreen(this, capacity,
                 com.interrupt.dungeoneer.multiplayer.lobby.LauncherPresentationStore.load());
+        setScreen(hostSetupScreen);
+        campaignLibraryScreen = null;
+        if(previous != null) previous.dispose();
+    }
+
+    /** Saved selection feeds shared form before listener opens. */
+    public void showSavedCampaignSetup(String campaignId) {
+        DirectConnectSessionFlow.HostSetup setup = sessionFlow.prepareCampaign(campaignLibrary, campaignId, directConnectPort);
+        Screen previous = getScreen();
+        campaignLibrarySelection = campaignId;
+        hostSetupScreen = new com.interrupt.dungeoneer.screens.HostSetupScreen(this, setup);
         setScreen(hostSetupScreen);
         campaignLibraryScreen = null;
         if(previous != null) previous.dispose();
@@ -427,6 +443,19 @@ public class GameApplication extends Game {
         final CampaignRosterStore store = directConnectRosterStore;
         final LauncherIdentity identity = directConnectLauncherIdentity;
         sessionFlow.openNewCampaign(setup, store, identity, (request, roster) ->
+                createDirectConnectHost(request.getPort(), roster, store, null, createDirectConnectCompatibility()));
+        directConnectPort = setup.getPort();
+        directConnectRoster = ((DirectConnectHost)sessionFlow.getPeer()).getRoster();
+        directConnectFloor = null;
+        directConnectPresentation = setup.getPresentation();
+        directConnectCampaignCapacity = setup.getCapacity();
+        showDirectConnectSession(sessionFlow.getPeer());
+    }
+
+    public void openSavedCampaignLobby(DirectConnectSessionFlow.HostSetup setup) {
+        ensureNativeRendering();
+        final CampaignRosterStore store = directConnectRosterStore;
+        sessionFlow.openSavedCampaign(setup, campaignLibrary, store, (request, roster) ->
                 createDirectConnectHost(request.getPort(), roster, store, null, createDirectConnectCompatibility()));
         directConnectPort = setup.getPort();
         directConnectRoster = ((DirectConnectHost)sessionFlow.getPeer()).getRoster();

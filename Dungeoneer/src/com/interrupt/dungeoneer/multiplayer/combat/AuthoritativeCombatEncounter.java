@@ -87,6 +87,16 @@ public final class AuthoritativeCombatEncounter {
         snapshotSequence++;
     }
 
+    /** Authenticated return after cold subset resume restores health without resetting current floor. */
+    public synchronized void addSavedParticipant(MovementEntityDescriptor descriptor, int health, int maximumHealth) {
+        if(health < 0 || health > maximumHealth) throw new IllegalArgumentException("Saved health is invalid.");
+        if(descriptor == null || participants.containsKey(descriptor.getParticipantId())) {
+            throw new IllegalArgumentException("Saved Participant must be absent.");
+        }
+        addParticipant(descriptor, maximumHealth, false);
+        participants.get(descriptor.getParticipantId()).health = health;
+    }
+
     public synchronized void removeUnactivatedParticipant(ParticipantId id) {
         MutableCombatant participant = participants.get(id);
         if(participant == null || participant.combatEligible) return;

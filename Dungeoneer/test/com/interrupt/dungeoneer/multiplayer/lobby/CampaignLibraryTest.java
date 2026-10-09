@@ -14,6 +14,26 @@ import static org.junit.Assert.fail;
 public class CampaignLibraryTest {
     @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
+    @Test public void resumePreservesCampaignHostPresentationInsteadOfLauncherDefaults() throws Exception {
+        CampaignRosterStore store = new CampaignRosterStore(
+                temporaryFolder.newFolder("saved-presentation"), new SecureRandom());
+        CampaignRoster original = CampaignRoster.createNamed("friends", "Friday friends", 3, 5,
+                AvatarCatalog.ownedV108Humanoids(), new LauncherIdentity(repeat('1')),
+                new SlotPresentation("Explorer", AvatarCatalog.HUMANOID_3), new SecureRandom());
+        store.save(original);
+
+        CampaignRoster resumed = library(store).resume("friends");
+
+        assertEquals(original.getSlot(1).getPresentation(), resumed.getSlot(1).getPresentation());
+        assertEquals("Friday friends", resumed.getCampaignName());
+        assertEquals(3, resumed.getCapacity());
+        assertEquals(5, resumed.getStartingLives());
+        assertEquals(original.getSlot(1).getReconnectToken(), resumed.getSlot(1).getReconnectToken());
+        assertEquals(original.getSlot(1).getLauncherIdentity(), resumed.getSlot(1).getLauncherIdentity());
+        assertEquals(original.getSlot(1).getPresentation(),
+                store.load("friends", AvatarCatalog.ownedV108Humanoids()).getSlot(1).getPresentation());
+    }
+
     @Test public void listsRosterOnlyCampaignsAndCreatesIndependentEntries() throws Exception {
         CampaignRosterStore store = new CampaignRosterStore(
                 temporaryFolder.newFolder("campaigns"), new SecureRandom());

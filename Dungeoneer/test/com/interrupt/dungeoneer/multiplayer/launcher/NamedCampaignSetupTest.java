@@ -29,6 +29,234 @@ public class NamedCampaignSetupTest {
         if(previousProfile != null) MultiplayerProfile.initialize(previousProfile);
     }
 
+    @Test public void terminalCardsRemainReadableAndCannotPrepareOrdinaryResume() throws Exception {
+        for(CampaignSave.Outcome outcome : new CampaignSave.Outcome[] { CampaignSave.Outcome.COMPLETED, CampaignSave.Outcome.DEFEATED }) {
+            File root = temporary.newFolder(outcome.name());
+            CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+            CampaignRoster roster = saveCampaign(store, "Friday friends", 4, 5);
+            CampaignSave saved = store.campaignSaves().load(roster.getCampaignId(), compatibility());
+            CampaignSave terminal = new CampaignSave(saved.getCompatibility(), saved.getCampaignId(), saved.getCapacity(),
+                    saved.getStartingLives(), outcome, saved.getFloorId(), saved.getFloorSeed(), saved.getFloorFingerprint(),
+                    saved.getNativeWorldGeneration(), saved.getSlots(), saved.getParticipants(), saved.getPhysicalItems(),
+                    saved.getCombat(), saved.getDoors(), saved.getBreakables(), saved.getActorEffects(), saved.getMonsterSpawns(),
+                    saved.getConsumedMonsterSpawners(), saved.getNativeFloor()).withCampaignName(saved.getCampaignName());
+            store.campaignSaves().save(terminal);
+            CampaignLibrary library = new CampaignLibrary(store, AvatarCatalog.ownedV108Humanoids(), identity('1'), new SlotPresentation("Default", "humanoid-4"));
+            CampaignLibrary.Entry entry = library.list().get(0);
+            assertTrue(entry.isArchived());
+            assertFalse(entry.needsRecovery());
+            assertEquals("Friday friends", entry.getCampaignName());
+            assertEquals(saved.getFloorId(), entry.getFloorId());
+            assertEquals(2, entry.getClaimedSlots());
+            assertTrue(entry.getLastSavedTime() > 0L);
+            assertTrue(library.describeArchive(roster.getCampaignId(), compatibility()).contains(outcome.name()));
+            DirectConnectSessionFlow flow = new DirectConnectSessionFlow();
+            try {
+                flow.prepareCampaign(library, roster.getCampaignId(), freePort());
+                fail("Terminal Archive cannot offer ordinary Resume setup.");
+            }
+            catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("read-only")); }
+            assertNull(flow.getPeer());
+            // Terminal save itself is authoritative even before archive/latch write completes.
+            java.nio.file.Path folder = new File(root, roster.getCampaignId()).toPath();
+            java.nio.file.Path primary = folder.resolve("campaign.save");
+            java.nio.file.Files.move(folder.resolve("campaign.archive"), primary, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            java.nio.file.Files.delete(folder.resolve("terminal.outcome"));
+            byte[] terminalBytes = java.nio.file.Files.readAllBytes(primary);
+            CampaignLibrary.Entry unlatched = library.list().get(0);
+            assertTrue("Saved terminal outcome must classify Archive without marker", unlatched.isArchived());
+            assertFalse(unlatched.needsRecovery());
+            try {
+                flow.prepareCampaign(library, roster.getCampaignId(), freePort());
+                fail("Saved terminal outcome cannot prepare ordinary Resume.");
+            }
+            catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("read-only")); }
+            assertNull(flow.getPeer());
+            assertArrayEquals(terminalBytes, java.nio.file.Files.readAllBytes(primary));
+            assertFalse(java.nio.file.Files.exists(folder.resolve("campaign.archive")));
+            assertFalse(java.nio.file.Files.exists(folder.resolve("terminal.outcome")));
+        }
+    }
+
+    @Test public void corruptPrimaryRemainsVisibleForRecoveryWithoutHidingOtherCampaigns() throws Exception {
+        File root = temporary.newFolder("recover-summary");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster original = saveCampaign(store, "Friday friends", 4, 5);
+        CampaignSave saved = store.campaignSaves().load(original.getCampaignId(), compatibility());
+        store.campaignSaves().beginSession(original.getCampaignId());
+        store.campaignSaves().snapshot(saved);
+        store.campaignSaves().endSession(original.getCampaignId(), false);
+        File saveFile = new File(new File(root, original.getCampaignId()), "campaign.save");
+        java.nio.file.Files.write(saveFile.toPath(), new byte[] { 0 });
+        CampaignLibrary library = new CampaignLibrary(store, AvatarCatalog.ownedV108Humanoids(), identity('1'), new SlotPresentation("Default", "humanoid-4"));
+        library.create("other", 2);
+        assertEquals(2, library.list().size());
+        CampaignLibrary.Entry broken = library.list().stream().filter(entry -> entry.getCampaignId().equals(original.getCampaignId())).findFirst().get();
+        assertEquals("Friday friends", broken.getCampaignName());
+        assertTrue(broken.needsRecovery());
+        assertFalse(broken.isArchived());
+        assertNull(broken.getFloorId());
+        assertEquals(0L, broken.getLastSavedTime());
+        DirectConnectSessionFlow flow = new DirectConnectSessionFlow();
+        try {
+            flow.prepareCampaign(library, original.getCampaignId(), freePort());
+            fail("Unclean Campaign cannot bypass recovery through ordinary Resume.");
+        }
+        catch(IllegalStateException expected) { assertTrue(expected.getMessage().contains("Unclean")); }
+        assertNull(flow.getPeer());
+        CampaignRoster recovered = library.recover(original.getCampaignId(), compatibility());
+        assertEquals(original.getSlot(2).getReconnectToken(), recovered.getSlot(2).getReconnectToken());
+        DirectConnectSessionFlow.HostSetup setup = flow.prepareCampaign(library, original.getCampaignId(), freePort());
+        assertEquals("Friday friends", setup.getCampaignName());
+        assertEquals(4, setup.getCapacity());
+        assertEquals(5, setup.getStartingLives());
+        CampaignLibrary.Entry restored = library.list().stream().filter(entry -> entry.getCampaignId().equals(original.getCampaignId())).findFirst().get();
+        assertFalse(restored.needsRecovery());
+        assertEquals(saved.getFloorId(), restored.getFloorId());
+        assertTrue(restored.getLastSavedTime() > 0L);
+        assertNull(flow.getPeer());
+    }
+
+    @Test public void savedSetupRetainsRulesOnFailedBindAndAcceptsOnlyExplicitAvailableHostEdits() throws Exception {
+        File root = temporary.newFolder("saved-bind");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster original = saveCampaign(store, "Friday friends", 4, 5);
+        SlotPresentation defaults = new SlotPresentation("Different default", "humanoid-4");
+        LauncherPresentationStore.save(defaults);
+        CampaignLibrary library = new CampaignLibrary(store, AvatarCatalog.ownedV108Humanoids(), identity('1'), defaults);
+        java.util.concurrent.atomic.AtomicInteger releases = new java.util.concurrent.atomic.AtomicInteger();
+        DirectConnectSessionFlow flow = new DirectConnectSessionFlow(releases::incrementAndGet);
+        try(java.net.DatagramSocket occupied = SocketTestPorts.occupyUdpWithAvailableTcp()) {
+            DirectConnectSessionFlow.HostSetup setup = flow.prepareCampaign(library, original.getCampaignId(), occupied.getLocalPort());
+            DirectConnectSessionFlow.HostSetup edited = setup.withHostOptions("Scout", "humanoid-4", setup.getPort());
+            try {
+                flow.openSavedCampaign(edited, library, store,
+                        (request, roster) -> DirectConnectHost.start(request.getPort(), compatibility(), roster, store));
+                fail("Occupied UDP must keep saved setup open.");
+            }
+            catch(RuntimeException expected) { assertTrue(expected.getMessage().contains("UDP listener")); }
+            assertNull(flow.getPeer());
+            assertEquals(0, releases.get());
+            assertEquals(defaults, LauncherPresentationStore.load());
+            assertEquals(original.getSlot(1).getPresentation(), store.load(original.getCampaignId(), AvatarCatalog.ownedV108Humanoids()).getSlot(1).getPresentation());
+            assertEquals(1, store.listCampaigns().size());
+            // Offline reservations still constrain explicit Host choices.
+            int retryPort = freePort();
+            assertInvalid(() -> flow.openSavedCampaign(setup.withHostOptions("Friend", "humanoid-4", retryPort), library, store,
+                    (request, roster) -> DirectConnectHost.start(request.getPort(), compatibility(), roster, store)));
+            assertInvalid(() -> flow.openSavedCampaign(setup.withHostOptions("Scout", "humanoid-2", retryPort), library, store,
+                    (request, roster) -> DirectConnectHost.start(request.getPort(), compatibility(), roster, store)));
+            flow.openSavedCampaign(edited.withHostOptions("Scout", "humanoid-4", freePort()), library, store,
+                    (request, roster) -> DirectConnectHost.start(request.getPort(), compatibility(), roster, store));
+            DirectConnectHost host = (DirectConnectHost)flow.getPeer();
+            assertEquals(DirectConnectPhase.LISTENING, host.getStatus().getPhase());
+            assertEquals("Friday friends", host.getRoster().getCampaignName());
+            assertEquals(4, host.getRoster().getCapacity());
+            assertEquals(5, host.getStartingLives());
+            assertEquals(new SlotPresentation("Scout", "humanoid-4"), host.getRoster().getSlot(1).getPresentation());
+            assertEquals(original.getSlot(2).getReconnectToken(), host.getRoster().getSlot(2).getReconnectToken());
+            assertEquals(original.getSlot(2).getPresentation(), host.getRoster().getSlot(2).getPresentation());
+            assertEquals(host.getRoster().getSlot(1).getPresentation(), LauncherPresentationStore.load());
+            host.startSession();
+            flow.leave();
+            assertEquals(new SlotPresentation("Scout", "humanoid-4"), library.resume(original.getCampaignId()).getSlot(1).getPresentation());
+        }
+        finally { flow.leave(); }
+    }
+
+    @Test public void savedSetupLocksRulesAndHostOnlyResumePreservesAbsentFriendForLiveReturn() throws Exception {
+        File root = temporary.newFolder("subset-setup");
+        CampaignRosterStore firstStore = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster original = saveCampaign(firstStore, "Friday friends", 4, 5, true);
+        CampaignSave before = firstStore.campaignSaves().load(original.getCampaignId(), compatibility());
+        assertEquals(4, before.getParticipant(2).getParty().getRemainingLives());
+        assertEquals(3, before.getParticipant(2).getParty().getHealth());
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        LauncherPresentationStore.save(new SlotPresentation("Different default", "humanoid-4"));
+        CampaignLibrary library = new CampaignLibrary(store, AvatarCatalog.ownedV108Humanoids(),
+                identity('1'), LauncherPresentationStore.load());
+        DirectConnectSessionFlow flow = new DirectConnectSessionFlow();
+        DirectConnectClient returning = null;
+        try {
+            DirectConnectSessionFlow.HostSetup setup = flow.prepareCampaign(library, original.getCampaignId(), freePort());
+            assertNull(flow.getPeer());
+            assertTrue(setup.isResume());
+            assertEquals(original.getCampaignId(), setup.getCampaignId());
+            assertEquals("Friday friends", setup.getCampaignName());
+            assertEquals(4, setup.getCapacity());
+            assertEquals(5, setup.getStartingLives());
+            assertEquals(new SlotPresentation("Explorer", "humanoid-3"), setup.getPresentation());
+            flow.openSavedCampaign(setup, library, store,
+                    (request, roster) -> DirectConnectHost.start(request.getPort(), compatibility(), roster, store));
+            DirectConnectHost host = (DirectConnectHost)flow.getPeer();
+            assertEquals(DirectConnectPhase.LISTENING, host.getStatus().getPhase());
+            assertTrue(host.isResumedCampaign());
+            assertTrue(host.isStartingLivesLocked());
+            assertEquals(5, host.getStartingLives());
+            assertEquals(2, host.getRoster().getSlots().size());
+            assertEquals(original.getSlot(2).getReconnectToken(), host.getRoster().getSlot(2).getReconnectToken());
+            host.startSession();
+            assertEquals(DirectConnectPhase.READY, host.getStatus().getPhase());
+            CampaignSave subset = host.persistCampaign();
+            assertEquals(before.getParticipant(2).getParty().getHealth(), subset.getParticipant(2).getParty().getHealth());
+            assertEquals(before.getParticipant(2).getParty().getRemainingLives(), subset.getParticipant(2).getParty().getRemainingLives());
+            assertEquals(original.getSlot(2).getReconnectToken(), new ProfileReconnectTokenStore().load(original.getCampaignId()));
+            ProfileReconnectTokenStore tokens = new ProfileReconnectTokenStore();
+            tokens.save(original.getCampaignId(), new String(new char[64]).replace('\0', 'f'));
+            DirectConnectClient unauthorized = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
+                    new SlotPresentation("Provisional", "humanoid-4"), 2, tokens, compatibility());
+            try { awaitPhase(unauthorized, DirectConnectPhase.REJECTED); }
+            finally { unauthorized.close(); }
+            assertEquals(original.getSlot(2).getReconnectToken(), host.getRoster().getSlot(2).getReconnectToken());
+            tokens.save(original.getCampaignId(), original.getSlot(2).getReconnectToken());
+            returning = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
+                    new SlotPresentation("Provisional", "humanoid-4"), 0, tokens, compatibility());
+            awaitPhase(returning, DirectConnectPhase.READY);
+            assertEquals(original.getSlot(2).getPresentation(), host.getRoster().getSlot(2).getPresentation());
+            assertEquals(original.getSlot(2).getLauncherIdentity(), host.getRoster().getSlot(2).getLauncherIdentity());
+            assertEquals(original.getSlot(2).getReconnectToken(), host.getRoster().getSlot(2).getReconnectToken());
+            CampaignSave joined = host.persistCampaign();
+            assertEquals("Friday friends", joined.getCampaignName());
+            assertEquals(before.getParticipant(2).getParty().getHealth(), joined.getParticipant(2).getParty().getHealth());
+            assertEquals(before.getParticipant(2).getParty().getRemainingLives(), joined.getParticipant(2).getParty().getRemainingLives());
+        }
+        finally { if(returning != null) returning.close(); flow.leave(); }
+    }
+
+    @Test public void librarySummariesUseSavedFloorAndFileTimeWithoutInventingUnsavedData() throws Exception {
+        File root = temporary.newFolder("summaries");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster saved = saveCampaign(store, "Friday friends", 4, 5);
+        File saveFile = new File(new File(root, saved.getCampaignId()), "campaign.save");
+        long lastSaved = 1700000000000L;
+        java.nio.file.Files.setLastModifiedTime(saveFile.toPath(), java.nio.file.attribute.FileTime.fromMillis(lastSaved));
+        byte[] before = java.nio.file.Files.readAllBytes(saveFile.toPath());
+        CampaignLibrary library = new CampaignLibrary(store, AvatarCatalog.ownedV108Humanoids(),
+                identity('1'), new SlotPresentation("Different default", "humanoid-4"));
+        for(int index = 0; index < 16; index++) library.create(String.format("not-started-%02d", index), 2);
+
+        java.util.List<CampaignLibrary.Entry> entries = library.list();
+        assertEquals(17, entries.size());
+        CampaignLibrary.Entry summary = entries.stream().filter(entry -> entry.hasSave()).findFirst().get();
+        assertEquals("Friday friends", summary.getCampaignName());
+        assertEquals("levels/test-level.bin", summary.getFloorId());
+        assertEquals(lastSaved, summary.getLastSavedTime());
+        assertEquals(4, summary.getCapacity());
+        assertEquals(2, summary.getClaimedSlots());
+        assertEquals(5, summary.getStartingLives());
+        assertFalse(summary.needsRecovery());
+        assertFalse(summary.isArchived());
+        for(CampaignLibrary.Entry entry : entries) {
+            if(entry.hasSave()) continue;
+            assertEquals(entry.getCampaignId(), entry.getCampaignName());
+            assertNull(entry.getFloorId());
+            assertEquals(0L, entry.getLastSavedTime());
+            assertEquals(1, entry.getClaimedSlots());
+        }
+        assertArrayEquals(before, java.nio.file.Files.readAllBytes(saveFile.toPath()));
+        assertEquals(lastSaved, saveFile.lastModified());
+    }
+
     @Test public void occupiedPortKeepsSetupAndDefaultsUntilEditedAttemptOpensLobby() throws Exception {
         CampaignRosterStore store = new CampaignRosterStore(temporary.newFolder("failed-bind"), new SecureRandom());
         SlotPresentation defaults = LauncherPresentationStore.load();
@@ -264,13 +492,57 @@ public class NamedCampaignSetupTest {
         return SocketTestPorts.availableTcpAndUdp();
     }
 
+    private CampaignRoster saveCampaign(CampaignRosterStore store, String name, int capacity, int lives) throws Exception {
+        return saveCampaign(store, name, capacity, lives, false);
+    }
+
+    private CampaignRoster saveCampaign(CampaignRosterStore store, String name, int capacity, int lives, boolean wounded) throws Exception {
+        DirectConnectSessionFlow flow = new DirectConnectSessionFlow();
+        DirectConnectClient client = null;
+        try {
+            flow.openNewCampaign(new DirectConnectSessionFlow.HostSetup(name, capacity, lives,
+                    "Explorer", "humanoid-3", freePort()), store, identity('1'),
+                    (request, roster) -> DirectConnectHost.start(request.getPort(), compatibility(), roster, store));
+            DirectConnectHost host = (DirectConnectHost)flow.getPeer();
+            client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
+                    new SlotPresentation("Friend", "humanoid-2"), 0, new ProfileReconnectTokenStore(), compatibility());
+            awaitPhase(client, DirectConnectPhase.AWAITING_APPROVAL);
+            host.approve(identity('2').getValue());
+            awaitPhase(client, DirectConnectPhase.LOBBY);
+            host.startSession();
+            awaitPhase(client, DirectConnectPhase.READY);
+            if(wounded) {
+                com.interrupt.dungeoneer.multiplayer.participant.ParticipantId friend =
+                        new com.interrupt.dungeoneer.multiplayer.participant.ParticipantId("campaign-slot-2");
+                com.interrupt.dungeoneer.multiplayer.participant.ParticipantId owner =
+                        new com.interrupt.dungeoneer.multiplayer.participant.ParticipantId("campaign-slot-1");
+                // Real simultaneous Downing consumes one Life and respawns at half health.
+                host.applyNativeParticipantDamage("test-trap", friend, 8, 0f, 0f, 0f);
+                host.applyNativeParticipantDamage("test-trap", owner, 8, 0f, 0f, 0f);
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
+                while(System.nanoTime() < deadline) {
+                    com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus member = host.getPartyStatus().getMembers().get(1);
+                    if(member.getRemainingLives() == lives - 1 && member.getHealth() == 4) break;
+                    Thread.sleep(10);
+                }
+                assertEquals(lives - 1, host.getPartyStatus().getMembers().get(1).getRemainingLives());
+                assertEquals(4, host.getPartyStatus().getMembers().get(1).getHealth());
+                host.applyNativeParticipantDamage("test-trap", friend, 1, 0f, 0f, 0f);
+            }
+            CampaignRoster roster = host.getRoster();
+            flow.leave();
+            return roster;
+        }
+        finally { if(client != null) client.close(); flow.leave(); }
+    }
+
     private static void awaitPhase(DirectConnectPeer peer, DirectConnectPhase phase) throws Exception {
         long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
         while(System.nanoTime() < deadline) {
             if(peer.getStatus().getPhase() == phase) return;
             Thread.sleep(10);
         }
-        assertEquals(phase, peer.getStatus().getPhase());
+        assertEquals(peer.getStatus().getMessage(), phase, peer.getStatus().getPhase());
     }
 
     private static LauncherIdentity identity(char digit) {

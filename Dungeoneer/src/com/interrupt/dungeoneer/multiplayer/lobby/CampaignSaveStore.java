@@ -111,6 +111,17 @@ public final class CampaignSaveStore {
         return loaded;
     }
 
+    /** Display-only inspection uses same bounded codec without migration or compatibility writes. */
+    public synchronized CampaignSave inspect(String campaignId) {
+        return loadFile(currentFile(campaignId), campaignId, null);
+    }
+
+    /** File time means last saved, never last played; unavailable is zero. */
+    public synchronized long getLastSavedTime(String campaignId) {
+        File file = currentFile(campaignId);
+        return file.isFile() ? file.lastModified() : 0L;
+    }
+
     private CampaignSave loadFile(File file, String campaignId,
             DirectConnectCompatibility expectedCompatibility) {
         if(!file.isFile()) throw new IllegalStateException("Campaign Save does not exist: " + campaignId);
@@ -137,6 +148,7 @@ public final class CampaignSaveStore {
         if(campaignId != null && !campaignId.equals(loaded.getCampaignId())) {
             throw corrupt(file, "Campaign identity does not match its profile path", null);
         }
+        if(expectedCompatibility == null) return loaded;
         DirectConnectCompatibility saved = loaded.getCompatibility();
         if(!expectedCompatibility.getBuildId().equals(saved.getBuildId())) {
             throw incompatible(file, "engine build", saved.getBuildId(),
@@ -417,25 +429,25 @@ public final class CampaignSaveStore {
         DirectConnectCompatibility compatibility = new DirectConnectCompatibility(
                 input.readUTF(), input.readUTF(), input.readUTF());
         // Explicit predecessor migration; content identity remains checked by loadFile.
-        if(format < 5 && protocol <= 47
+        if(expected != null && format < 5 && protocol <= 47
                 && compatibility.getBuildId().equals("mp-v108-prototype-campaign-library-51")
                 && expected.getBuildId().equals("mp-v108-prototype-campaign-library-52")) {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }
-        if(format == 5 && protocol <= 49
+        if(expected != null && format == 5 && protocol <= 49
                 && compatibility.getBuildId().equals("mp-v108-prototype-late-admission-53")
                 && expected.getBuildId().equals("mp-v108-prototype-dormant-floors-54")) {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }
-        if(format <= 6 && protocol <= 49 && expected.getBuildId().equals("mp-v108-prototype-party-travel-55")
+        if(expected != null && format <= 6 && protocol <= 49 && expected.getBuildId().equals("mp-v108-prototype-party-travel-55")
                 && (compatibility.getBuildId().equals("mp-v108-prototype-dormant-floors-54")
                     || format <= 5 && compatibility.getBuildId().equals("mp-v108-prototype-late-admission-53"))) {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }
-        if(format <= 7 && protocol <= 50 && expected.getBuildId().equals("mp-v108-prototype-named-campaigns-56")
+        if(expected != null && format <= 7 && protocol <= 50 && expected.getBuildId().equals("mp-v108-prototype-named-campaigns-56")
                 && (compatibility.getBuildId().equals("mp-v108-prototype-party-travel-55")
                     || format <= 6 && compatibility.getBuildId().equals("mp-v108-prototype-dormant-floors-54")
                     || format <= 5 && compatibility.getBuildId().equals("mp-v108-prototype-late-admission-53"))) {

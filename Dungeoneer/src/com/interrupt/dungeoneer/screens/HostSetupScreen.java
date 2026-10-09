@@ -28,6 +28,7 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol;
 /** Native form is a view over application's real session flow, never a second session model. */
 public final class HostSetupScreen extends BaseScreen {
     private final GameApplication application;
+    private final HostSetup savedSetup;
     private final TextField campaignName, nickname, port;
     private final ButtonGroup<TextButton> capacities = new ButtonGroup<>();
     private final ButtonGroup<TextButton> lives = new ButtonGroup<>();
@@ -37,7 +38,16 @@ public final class HostSetupScreen extends BaseScreen {
     private boolean opening, disposed;
 
     public HostSetupScreen(GameApplication application, int capacity, SlotPresentation defaults) {
+        this(application, capacity, defaults, null);
+    }
+
+    public HostSetupScreen(GameApplication application, HostSetup savedSetup) {
+        this(application, savedSetup.getCapacity(), savedSetup.getPresentation(), savedSetup);
+    }
+
+    private HostSetupScreen(GameApplication application, int capacity, SlotPresentation defaults, HostSetup savedSetup) {
         this.application = application;
+        this.savedSetup = savedSetup;
         screenName = "HostSetupScreen";
         splashLevel = splashScreenInfo.backgroundLevel;
         viewport = new FitViewport(520, 440);
@@ -47,13 +57,18 @@ public final class HostSetupScreen extends BaseScreen {
         Table panel = new Table(skin);
         panel.setBackground(new NinePatchDrawable(new NinePatch(skin.getRegion("window"), 8, 8, 8, 8)));
         panel.pad(12);
-        panel.add(new Label("New Co-op Campaign", skin)).colspan(2).padBottom(8);
+        panel.add(new Label(savedSetup == null ? "New Co-op Campaign" : "Resume Co-op Campaign", skin)).colspan(2).padBottom(8);
         panel.row();
-        campaignName = field("", 128);
+        campaignName = field(savedSetup == null ? "" : savedSetup.getCampaignName(), 128);
+        campaignName.setDisabled(savedSetup != null);
         campaignName.setMessageText("Campaign Name");
         row(panel, "Campaign Name", campaignName);
         row(panel, "Capacity", numbers(capacities, 2, 4, capacity));
-        row(panel, "Starting Lives", numbers(lives, 1, 5, 3));
+        row(panel, "Starting Lives", numbers(lives, 1, 5, savedSetup == null ? 3 : savedSetup.getStartingLives()));
+        if(savedSetup != null) {
+            for(TextButton button : capacities.getButtons()) button.setDisabled(true);
+            for(TextButton button : lives.getButtons()) button.setDisabled(true);
+        }
         nickname = field(defaults.getNickname(), 64);
         row(panel, "Nickname", nickname);
 
@@ -85,10 +100,11 @@ public final class HostSetupScreen extends BaseScreen {
         panel.add(new Label("Selected Avatar", skin)).left();
         panel.add(selectedPortrait).size(56).padBottom(4);
         panel.row();
-        port = field(Integer.toString(DirectConnectProtocol.DEFAULT_PORT), 5);
+        port = field(Integer.toString(savedSetup == null ? DirectConnectProtocol.DEFAULT_PORT : savedSetup.getPort()), 5);
         port.setTextFieldFilter((textField, character) -> character >= '0' && character <= '9');
         row(panel, "Port", port);
-        message = new Label("Open Lobby waits for Participants. Host starts play from Lobby.", skin);
+        message = new Label(savedSetup == null ? "Open Lobby waits for Participants. Host starts play from Lobby."
+                : "Saved name, Capacity and Lives are locked. Host can resume alone.", skin);
         message.setFontScale(0.7f);
         message.setWrap(true);
         panel.add(message).colspan(2).width(390).height(32).padTop(3);
@@ -163,9 +179,11 @@ public final class HostSetupScreen extends BaseScreen {
             int listenerPort;
             try { listenerPort = Integer.parseInt(port.getText()); }
             catch(NumberFormatException invalid) { throw new IllegalArgumentException("Port must be 1-65535."); }
-            application.openNewCampaignLobby(new HostSetup(campaignName.getText(),
+            String avatar = (String)avatars.getChecked().getUserObject();
+            if(savedSetup == null) application.openNewCampaignLobby(new HostSetup(campaignName.getText(),
                     (Integer)capacities.getChecked().getUserObject(), (Integer)lives.getChecked().getUserObject(),
-                    nickname.getText(), (String)avatars.getChecked().getUserObject(), listenerPort));
+                    nickname.getText(), avatar, listenerPort));
+            else application.openSavedCampaignLobby(savedSetup.withHostOptions(nickname.getText(), avatar, listenerPort));
         }
         catch(RuntimeException failure) {
             opening = false;
@@ -179,7 +197,7 @@ public final class HostSetupScreen extends BaseScreen {
         super.show();
         Gdx.input.setCursorCatched(false);
         Gdx.input.setInputProcessor(ui);
-        ui.setKeyboardFocus(campaignName);
+        ui.setKeyboardFocus(savedSetup == null ? campaignName : nickname);
     }
 
     @Override protected void tick(float delta) {

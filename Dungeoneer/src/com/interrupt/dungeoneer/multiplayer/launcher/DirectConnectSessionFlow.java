@@ -8,6 +8,7 @@ import java.util.function.Supplier;
 import java.util.function.BiFunction;
 import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRoster;
+import com.interrupt.dungeoneer.multiplayer.lobby.CampaignLibrary;
 import com.interrupt.dungeoneer.multiplayer.lobby.CampaignRosterStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherPresentationStore;
@@ -19,6 +20,7 @@ import java.util.UUID;
 public final class DirectConnectSessionFlow {
     /** Typed native form request. Display names never supply paths or ownership credentials. */
     public static final class HostSetup {
+        private final String campaignId;
         private final String campaignName;
         private final int capacity;
         private final int startingLives;
@@ -27,6 +29,12 @@ public final class DirectConnectSessionFlow {
 
         public HostSetup(String campaignName, int capacity, int startingLives,
                 String nickname, String avatar, int port) {
+            this(null, campaignName, capacity, startingLives, nickname, avatar, port);
+        }
+
+        private HostSetup(String campaignId, String campaignName, int capacity, int startingLives,
+                String nickname, String avatar, int port) {
+            this.campaignId = campaignId;
             this.campaignName = CampaignRoster.requireCampaignName(campaignName);
             if(capacity < 2 || capacity > 4) throw new IllegalArgumentException("Campaign Capacity must be 2, 3, or 4.");
             com.interrupt.dungeoneer.multiplayer.lives.AuthoritativeLives.requireStartingLives(startingLives);
@@ -39,10 +47,17 @@ public final class DirectConnectSessionFlow {
         }
 
         public String getCampaignName() { return campaignName; }
+        public String getCampaignId() { return campaignId; }
+        public boolean isResume() { return campaignId != null; }
         public int getCapacity() { return capacity; }
         public int getStartingLives() { return startingLives; }
         public SlotPresentation getPresentation() { return presentation; }
         public int getPort() { return port; }
+
+        /** Resume edits only Host presentation and listener; immutable saved rules retain identity. */
+        public HostSetup withHostOptions(String nickname, String avatar, int port) {
+            return new HostSetup(campaignId, campaignName, capacity, startingLives, nickname, avatar, port);
+        }
     }
 
     private DirectConnectPeer peer;
@@ -60,11 +75,48 @@ public final class DirectConnectSessionFlow {
 
     public DirectConnectPeer getPeer() { return peer; }
 
+    /** Selection restores campaign defaults but opens no listener. Same request feeds native form. */
+    public HostSetup prepareCampaign(CampaignLibrary library, String campaignId, int port) {
+        if(peer != null) throw new IllegalStateException("Leave current session before selecting a Campaign.");
+        CampaignRoster roster = library.resume(campaignId);
+        SlotPresentation host = roster.getSlot(1).getPresentation();
+        return new HostSetup(roster.getCampaignId(), roster.getCampaignName(), roster.getCapacity(),
+                roster.getStartingLives(), host.getNickname(), host.getAvatarId(), port);
+    }
+
+    /** Revalidate durable rules/ownership on every open and retry; bind failure retains setup view. */
+    public void openSavedCampaign(HostSetup setup, CampaignLibrary library, CampaignRosterStore store,
+            BiFunction<HostSetup, CampaignRoster, DirectConnectHost> openHost) {
+        if(peer != null) throw new IllegalStateException("Leave current session before opening a Campaign.");
+        if(setup == null || !setup.isResume() || library == null || store == null || openHost == null)
+            throw new IllegalArgumentException("Saved setup, Campaign Library, storage and listener are required.");
+        request = () -> {
+            CampaignRoster roster = library.resume(setup.getCampaignId());
+            if(roster.getCapacity() != setup.getCapacity() || roster.getStartingLives() != setup.getStartingLives()
+                    || !roster.getCampaignName().equals(setup.getCampaignName()))
+                throw new IllegalStateException("Saved Campaign settings changed; return to Campaigns and select again.");
+            roster.updateHostPresentation(roster.getSlot(1).getLauncherIdentity(), setup.getPresentation());
+            DirectConnectHost host = openHost.apply(setup, roster);
+            try {
+                store.save(roster);
+                LauncherPresentationStore.save(roster.getSlot(1).getPresentation());
+                return host;
+            }
+            catch(RuntimeException failure) {
+                try { host.close(); } catch(RuntimeException closeFailure) { failure.addSuppressed(closeFailure); }
+                throw failure;
+            }
+        };
+        try { peer = request.get(); }
+        catch(RuntimeException failure) { throw failure; }
+        catch(Exception failure) { throw new IllegalStateException("Lobby could not open: " + failure.getMessage(), failure); }
+    }
+
     /** Failed bind keeps native setup alive and creates no durable orphan campaign. */
     public void openNewCampaign(HostSetup setup, CampaignRosterStore store, LauncherIdentity identity,
             BiFunction<HostSetup, CampaignRoster, DirectConnectHost> openHost) {
         if(peer != null) throw new IllegalStateException("Leave current session before creating a Campaign.");
-        if(setup == null || store == null || identity == null || openHost == null)
+        if(setup == null || setup.isResume() || store == null || identity == null || openHost == null)
             throw new IllegalArgumentException("Host setup, storage, identity and listener are required.");
         CampaignRoster roster = CampaignRoster.createNamed(UUID.randomUUID().toString(),
                 setup.getCampaignName(), setup.getCapacity(), setup.getStartingLives(),
