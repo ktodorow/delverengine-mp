@@ -209,9 +209,18 @@ public final class CampaignRoster {
             throw new IllegalStateException(
                     "Campaign belongs to a different Host Launcher Identity; Host ownership cannot migrate.");
         }
-        ClaimOutcome validation = validatePresentation(presentation, host);
+        updatePresentation(hostIdentity, presentation);
+    }
+
+    /** Host session supplies authenticated owner; presentation never supplies ownership. */
+    public synchronized CampaignSlot updatePresentation(LauncherIdentity owner, SlotPresentation presentation) {
+        CampaignSlot slot = findSlot(owner);
+        if(slot == null) throw new IllegalArgumentException("Participant has no Campaign Slot.");
+        ClaimOutcome validation = validatePresentation(presentation, slot);
         if(validation != null) throw new IllegalArgumentException(validation.getReason());
-        replace(host, host.withPresentation(presentation));
+        CampaignSlot updated = slot.withPresentation(presentation);
+        replace(slot, updated);
+        return updated;
     }
 
     public synchronized CampaignSlot findSlot(LauncherIdentity identity) {

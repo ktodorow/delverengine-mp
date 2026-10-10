@@ -13,6 +13,75 @@ import static org.junit.Assert.*;
 
 /** External reliable wire boundary; assertions follow independent launcher contract. */
 public class LobbyWireTest {
+    @Test public void presentationEditsAndResultsRequireReliableTcpInBothDirections() throws Exception {
+        DirectConnectWire.PresentationEdit edit = new DirectConnectWire.PresentationEdit("session", 2, 123L, 9L, "  Scout  ", "humanoid-3");
+        DirectConnectWire.PresentationEdited result = new DirectConnectWire.PresentationEdited("session",
+                new com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult(9L, false,
+                        new SlotPresentation("Friend", "humanoid-2"), "Nickname is already used by another Campaign Slot."));
+        for(DirectConnectWire.Message message : Arrays.asList(edit, result)) {
+            try {
+                ByteBuf datagram = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT, message);
+                datagram.release(); fail("Presentation authority requires reliable TCP");
+            }
+            catch(DirectConnectWire.ProtocolException expected) { assertTrue(expected.getMessage().contains("reliable")); }
+            ByteBuf bytes = payload(message);
+            try {
+                assertTrue(bytes.readableBytes() <= DirectConnectProtocol.MAX_TCP_FRAME_BYTES);
+                ByteBuf datagram = bytes.copy();
+                try { DirectConnectWire.decodeDatagram(datagram); fail("UDP cannot deliver presentation authority"); }
+                catch(DirectConnectWire.ProtocolException expected) { assertTrue(expected.getMessage().contains("reliable")); }
+                finally { datagram.release(); }
+                DirectConnectWire.Message decoded = decode(bytes.copy());
+                if(decoded instanceof DirectConnectWire.PresentationEdit) {
+                    DirectConnectWire.PresentationEdit request = (DirectConnectWire.PresentationEdit)decoded;
+                    assertEquals("session", request.sessionId); assertEquals(2, request.slot);
+                    assertEquals(123L, request.connectionToken); assertEquals(9L, request.requestId);
+                    assertEquals("  Scout  ", request.nickname); assertEquals("humanoid-3", request.avatar);
+                }
+                else {
+                    DirectConnectWire.PresentationEdited report = (DirectConnectWire.PresentationEdited)decoded;
+                    assertEquals("session", report.sessionId); assertEquals(9L, report.result.getRequestId());
+                    assertFalse(report.result.isAccepted());
+                    assertEquals(new SlotPresentation("Friend", "humanoid-2"), report.result.getPresentation());
+                    assertEquals("Nickname is already used by another Campaign Slot.", report.result.getReason());
+                }
+            }
+            finally { bytes.release(); }
+        }
+    }
+
+    @Test public void malformedPresentationAuthorityRejectsInvalidIdsFlagsUtf8AndFraming() throws Exception {
+        ByteBuf edit = payload(new DirectConnectWire.PresentationEdit("session", 2, 123L, 1L, "Scout", "humanoid-3"));
+        ByteBuf result = payload(new DirectConnectWire.PresentationEdited("session",
+                new com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult(1L, true,
+                        new SlotPresentation("Scout", "humanoid-3"), "Presentation updated.")));
+        try {
+            ByteBuf cursor = edit.duplicate(); cursor.skipBytes(5); skipString(cursor);
+            int slot = cursor.readerIndex();
+            for(int value : new int[] {0, 5, 255}) {
+                ByteBuf bad = edit.copy(); bad.setByte(slot, value); rejects(bad);
+            }
+            ByteBuf zeroToken = edit.copy(); zeroToken.setLong(slot + 1, 0L); rejects(zeroToken);
+            for(long value : new long[] {0L, -1L}) {
+                ByteBuf bad = edit.copy(); bad.setLong(slot + 9, value); rejects(bad);
+            }
+            ByteBuf invalidUtf8 = edit.copy(); invalidUtf8.setByte(slot + 19, 255); rejects(invalidUtf8);
+            ByteBuf oversizedNickname = edit.copy(); oversizedNickname.setShort(slot + 17, 257); rejects(oversizedNickname);
+            cursor = result.duplicate(); cursor.skipBytes(5); skipString(cursor);
+            int id = cursor.readerIndex();
+            ByteBuf zeroId = result.copy(); zeroId.setLong(id, 0L); rejects(zeroId);
+            for(int value : new int[] {2, 255}) {
+                ByteBuf bad = result.copy(); bad.setByte(id + 8, value); rejects(bad);
+            }
+            ByteBuf invalidNickname = result.copy(); invalidNickname.setByte(id + 12, 10); rejects(invalidNickname);
+            for(ByteBuf valid : Arrays.asList(edit, result)) {
+                for(int length : new int[] {0, 4, 10, valid.readableBytes() - 1}) rejects(valid.copy(0, length));
+                ByteBuf trailing = valid.copy(); trailing.writeByte(0); rejects(trailing);
+            }
+        }
+        finally { edit.release(); result.release(); }
+    }
+
     @Test public void playerConsentRequiresReliableTcpInBothDirections() throws Exception {
         DirectConnectWire.PlayerReady request = new DirectConnectWire.PlayerReady("session", 2, 123L, 7L, true);
         try {

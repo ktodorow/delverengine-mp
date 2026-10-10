@@ -140,6 +140,36 @@ public class CampaignSaveStoreTest {
         assertEquals("Friday Delver", store.load("friends", next).getCampaignName());
     }
 
+    @Test public void presentationWireUpgradePreservesWholeSavedGameplayBody() throws Exception {
+        File root = temporaryFolder.newFolder("edit-build-upgrade");
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        CampaignSave original = withFloor(save("friends", compatibility("mp-v108-prototype-manual-ready-58")),
+                new byte[] { 7, 8, 9 }).withCampaignName("Friday Delver");
+        store.save(original);
+        File file = new File(new File(root, "friends"), "campaign.save");
+        try(RandomAccessFile predecessor = new RandomAccessFile(file, "rw")) {
+            predecessor.seek(8); predecessor.writeInt(52);
+        }
+        byte[] before = Files.readAllBytes(file.toPath());
+        DirectConnectCompatibility next = compatibility("mp-v108-prototype-lobby-presentation-59");
+        assertFailure(store, "friends", new DirectConnectCompatibility(next.getBuildId(), "owned-v108", repeat('b')), "incompatible");
+        assertTrue(Arrays.equals(before, Files.readAllBytes(file.toPath())));
+        CampaignSave resumed = store.load("friends", next);
+        assertEquals(next.getBuildId(), resumed.getCompatibility().getBuildId());
+        assertEquals("Friday Delver", resumed.getCampaignName());
+        assertEquals(original.getSlots().get(0).getLauncherIdentity(), resumed.getSlots().get(0).getLauncherIdentity());
+        assertEquals(original.getSlots().get(1).getReconnectToken(), resumed.getSlots().get(1).getReconnectToken());
+        assertEquals(41, resumed.getParticipant(2).getProgress().gold);
+        assertEquals(19L, resumed.getPhysicalItems().get(0).entityId);
+        assertTrue(Arrays.equals(original.getNativeFloor(), resumed.getNativeFloor()));
+        assertTrue(Arrays.equals(before, Files.readAllBytes(file.toPath())));
+        store.save(resumed);
+        assertTrue(Arrays.equals(before, Files.readAllBytes(new File(file.getParentFile(), "campaign.previous").toPath())));
+        assertTrue("Presentation wire upgrade cannot change saved gameplay body bytes",
+                Arrays.equals(savedGameplayBody(before), savedGameplayBody(Files.readAllBytes(file.toPath()))));
+        assertEquals("Friday Delver", store.load("friends", next).getCampaignName());
+    }
+
     private static byte[] savedGameplayBody(byte[] bytes) throws IOException {
         try(java.io.DataInputStream input = new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes))) {
             input.readInt(); input.readInt(); input.readInt();

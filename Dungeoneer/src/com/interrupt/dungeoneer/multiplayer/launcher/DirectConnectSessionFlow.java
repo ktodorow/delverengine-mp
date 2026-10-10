@@ -16,6 +16,7 @@ import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherPresentationStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherEndpointStore;
 import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
+import com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult;
 import java.security.SecureRandom;
 import java.util.UUID;
 
@@ -83,6 +84,8 @@ public final class DirectConnectSessionFlow {
     private DirectConnectPeer peer;
     private Supplier<? extends DirectConnectPeer> request;
     private boolean entered;
+    private DirectConnectPeer rememberedEditPeer;
+    private long rememberedEditRequest;
     private final Runnable releaseNativeSession;
 
     public DirectConnectSessionFlow() { this(() -> { }); }
@@ -245,6 +248,25 @@ public final class DirectConnectSessionFlow {
     public void retry() {
         if(request == null) throw new IllegalStateException("No session request to retry.");
         open(request);
+    }
+
+    /** Queued presentation edits belong only to current pregame connection. */
+    public long editPresentation(DirectConnectPeer expected, String nickname, String avatar) {
+        if(expected == null || peer != expected || entered || !expected.canEditPresentation()) return 0L;
+        return expected.editPresentation(nickname, avatar);
+    }
+
+    /** Consume current Host decision; accepted choice alone becomes editable local default. */
+    public PresentationEditResult pollPresentationEditResult(DirectConnectPeer expected) {
+        if(expected == null || peer != expected) return null;
+        PresentationEditResult result = expected.getPresentationEditResult();
+        if(result != null && result.isAccepted()
+                && (rememberedEditPeer != expected || result.getRequestId() > rememberedEditRequest)) {
+            LauncherPresentationStore.save(result.getPresentation());
+            rememberedEditPeer = expected;
+            rememberedEditRequest = result.getRequestId();
+        }
+        return result;
     }
 
     /** Queued consent belongs only to current pregame connection. */

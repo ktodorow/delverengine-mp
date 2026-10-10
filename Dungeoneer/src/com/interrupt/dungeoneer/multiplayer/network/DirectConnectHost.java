@@ -58,6 +58,7 @@ import com.interrupt.dungeoneer.multiplayer.lobby.CampaignSlot;
 import com.interrupt.dungeoneer.multiplayer.lobby.LauncherIdentity;
 import com.interrupt.dungeoneer.multiplayer.lobby.SlotClaimRequest;
 import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
+import com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CampaignChallenge;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatActionRequestMessage;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectWire.CombatPresentationMessage;
@@ -886,6 +887,34 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         return ready;
     }
 
+    private long nextPresentationRequest;
+    private PresentationEditResult presentationEditResult;
+
+    @Override public synchronized PresentationEditResult getPresentationEditResult() { return presentationEditResult; }
+
+    private PresentationEditResult applyPresentationEdit(long request, CampaignSlot slot, String nickname, String avatar) {
+        try {
+            CampaignSlot updated = rosterStore.editPresentation(roster, slot.getLauncherIdentity(), new SlotPresentation(nickname, avatar));
+            publishLobby();
+            return new PresentationEditResult(request, true, updated.getPresentation(),
+                    slot == updated ? "Presentation unchanged." : "Presentation updated. Confirm Ready when prepared.");
+        }
+        catch(IllegalArgumentException rejected) {
+            return new PresentationEditResult(request, false, slot.getPresentation(), rejected.getMessage());
+        }
+        catch(IllegalStateException failedSave) {
+            return new PresentationEditResult(request, false, slot.getPresentation(),
+                    "Campaign presentation could not be saved. Previous choice retained.");
+        }
+    }
+
+    @Override public synchronized long editPresentation(String nickname, String avatar) {
+        if(!canEditPresentation()) throw new IllegalStateException("Presentation editing requires an open pregame lobby.");
+        long request = ++nextPresentationRequest;
+        presentationEditResult = applyPresentationEdit(request, roster.getSlot(1), nickname, avatar);
+        return request;
+    }
+
     @Override public synchronized boolean canSetPlayerReady() {
         return !sessionStarted && !closing.get() && lobbySnapshot != null
                 && status.getPhase() != DirectConnectPhase.FAILED;
@@ -897,6 +926,20 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         if(hostPlayerReady == ready) return;
         hostPlayerReady = ready;
         publishLobby();
+    }
+
+    private synchronized void presentationEdit(ChannelHandlerContext context, DirectConnectWire.PresentationEdit request) {
+        RemoteConnection connection = connections.get(context.channel());
+        if(!canEditPresentation() || connection == null || connection.kicked || connection.slot == null
+                || !connection.channel.isActive() || connection.udpAddress == null || !connection.lobbySynchronized
+                || !sessionId.equals(request.sessionId) || request.slot != connection.slot.getNumber()
+                || request.connectionToken != connection.udpToken || request.requestId <= connection.lastPresentationRequest) return;
+        connection.lastPresentationRequest = request.requestId;
+        PresentationEditResult result = applyPresentationEdit(request.requestId, connection.slot, request.nickname, request.avatar);
+        connection.slot = roster.findSlot(connection.launcherIdentity);
+        connection.channel.eventLoop().execute(() -> {
+            if(connection.channel.isActive()) connection.channel.writeAndFlush(new DirectConnectWire.PresentationEdited(sessionId, result));
+        });
     }
 
     private synchronized void playerReady(ChannelHandlerContext context, DirectConnectWire.PlayerReady request) {
@@ -4432,6 +4475,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         private boolean lobbySynchronized;
         private boolean playerReady;
         private long lastLobbySequence, lobbyAuthenticationSequence, minimumReadySequence;
+        private long lastPresentationRequest;
         private long admissionId, admissionGeneration, admissionTick, admissionStartedNanos;
         private int admissionStage;
         private final java.util.ArrayDeque<Message> admissionChanges = new java.util.ArrayDeque<Message>();
@@ -4569,6 +4613,9 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             else if(message instanceof DirectConnectWire.PlayerReady && helloAccepted) {
                 playerReady(context, (DirectConnectWire.PlayerReady)message);
+            }
+            else if(message instanceof DirectConnectWire.PresentationEdit && helloAccepted) {
+                presentationEdit(context, (DirectConnectWire.PresentationEdit)message);
             }
             else if(message instanceof SlotClaim && helloAccepted) {
                 claimSlot(context, (SlotClaim)message);

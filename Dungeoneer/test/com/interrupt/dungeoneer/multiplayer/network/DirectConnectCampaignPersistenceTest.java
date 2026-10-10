@@ -61,6 +61,7 @@ import static com.interrupt.dungeoneer.multiplayer.network.ReadyTestSupport.star
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -822,6 +823,66 @@ public class DirectConnectCampaignPersistenceTest {
         game.level = new Level(4, 4);
         Game.instance = game;
         return game;
+    }
+
+    @Test public void resumedLobbyPresentationEditRetainsSavedCharacterAndRestoresEditedChoiceOnNextResume() throws Exception {
+        File root = temporaryFolder.newFolder("resumed-presentation");
+        CampaignRosterStore store = new CampaignRosterStore(root, new SecureRandom());
+        CampaignRoster roster = store.loadOrCreate("friends", 2, AvatarCatalog.ownedV108Humanoids(), identity('1'),
+                new SlotPresentation("Host", AvatarCatalog.HUMANOID_1));
+        CampaignSlot friend = roster.approve(new SlotClaimRequest(identity('2'),
+                new SlotPresentation("Friend", AvatarCatalog.HUMANOID_2), 2, null), new SecureRandom()).getSlot();
+        store.save(roster);
+        store.campaignSaves().save(save(compatibility(), roster));
+        File campaignFile = new File(root, "friends/campaign.save");
+        byte[] before = java.nio.file.Files.readAllBytes(campaignFile.toPath());
+        MemoryReconnectTokens tokens = new MemoryReconnectTokens(); tokens.save("friends", friend.getReconnectToken());
+        DirectConnectHost host = DirectConnectHost.start(0, compatibility(), roster, store);
+        DirectConnectClient client = DirectConnectClient.connect("127.0.0.1", host.getBoundPort(), identity('2'),
+                new SlotPresentation("Provisional", AvatarCatalog.HUMANOID_4), 2, tokens, compatibility());
+        SlotPresentation edited = new SlotPresentation("Scout", AvatarCatalog.HUMANOID_3);
+        try {
+            readyClient(client);
+            long request = client.editPresentation("Scout", AvatarCatalog.HUMANOID_3);
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            while(System.currentTimeMillis() < deadline && (client.getPresentationEditResult() == null
+                    || client.getPresentationEditResult().getRequestId() != request)) Thread.sleep(10L);
+            assertNotNull(client.getPresentationEditResult());
+            assertTrue(client.getPresentationEditResult().isAccepted());
+            assertArrayEquals("Lobby edit cannot rewrite saved character/world", before, java.nio.file.Files.readAllBytes(campaignFile.toPath()));
+            assertEquals(friend.getLauncherIdentity(), roster.getSlot(2).getLauncherIdentity());
+            assertEquals(friend.getReconnectToken(), roster.getSlot(2).getReconnectToken());
+            assertFalse("Accepted edit requires fresh consent", host.canStartSession());
+            readyClient(client);
+            startReadySession(host); awaitPhase(client, DirectConnectPhase.READY);
+            assertEquals("Scout", client.getPartyStatus().getMember(2).getNickname());
+            assertEquals(AvatarCatalog.HUMANOID_3, client.getPartyStatus().getMember(2).getAvatarId());
+            assertEquals(PartyMemberState.DOWNED, client.getPartyStatus().getMember(2).getState());
+            assertEquals(3, client.getPartyStatus().getMember(2).getHealth());
+            assertEquals(1, client.getPartyStatus().getMember(2).getRemainingLives());
+            assertEquals(37, gold(client.getParticipantProgress(), new ParticipantId("campaign-slot-2")));
+            assertEquals(8L, client.getPhysicalItems().get(0).entityId);
+            CampaignSave checkpoint = host.persistCampaign();
+            assertEquals(edited, checkpoint.getSlots().get(1).getPresentation());
+            assertEquals(37, checkpoint.getParticipant(2).getProgress().gold);
+            assertEquals(3, checkpoint.getParticipant(2).getParty().getHealth());
+            assertTrue(checkpoint.getParticipant(2).isHoldingOrb());
+        }
+        finally { client.close(); host.close(); }
+        CampaignRoster returnedRoster = store.load("friends", AvatarCatalog.ownedV108Humanoids());
+        DirectConnectHost returnedHost = DirectConnectHost.start(0, compatibility(), returnedRoster, store);
+        DirectConnectClient returnedClient = DirectConnectClient.connect("127.0.0.1", returnedHost.getBoundPort(), identity('2'),
+                friend.getPresentation(), 2, tokens, compatibility());
+        try {
+            readyClient(returnedClient);
+            assertEquals(edited, returnedClient.getLobbySnapshot().getSlot(2).getPresentation());
+            startReadySession(returnedHost); awaitPhase(returnedClient, DirectConnectPhase.READY);
+            assertEquals(37, gold(returnedClient.getParticipantProgress(), new ParticipantId("campaign-slot-2")));
+            assertEquals(3, returnedClient.getPartyStatus().getMember(2).getHealth());
+            assertEquals(1, returnedClient.getPartyStatus().getMember(2).getRemainingLives());
+            assertEquals(friend.getReconnectToken(), tokens.load("friends"));
+        }
+        finally { returnedClient.close(); returnedHost.close(); }
     }
 
     @Test public void coldResumeStartsWithHostSubsetAndPreservesAbsentSlotState()

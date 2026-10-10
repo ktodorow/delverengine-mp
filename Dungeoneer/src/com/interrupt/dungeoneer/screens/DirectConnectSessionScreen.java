@@ -4,6 +4,7 @@ import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Input;
 import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.graphics.g2d.NinePatch;
+import com.badlogic.gdx.graphics.g2d.TextureRegion;
 import com.badlogic.gdx.scenes.scene2d.InputEvent;
 import com.badlogic.gdx.scenes.scene2d.Stage;
 import com.badlogic.gdx.scenes.scene2d.ui.*;
@@ -16,6 +17,8 @@ import com.interrupt.dungeoneer.GameApplication;
 import com.interrupt.dungeoneer.GameManager;
 import com.interrupt.dungeoneer.gfx.drawables.DrawableSprite;
 import com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot;
+import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
+import com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult;
 import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
 import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.network.*;
@@ -27,10 +30,18 @@ public final class DirectConnectSessionScreen extends BaseScreen {
     private final DirectConnectPeer peer;
     private final Table cards = new Table();
     private final Label title, settings, counts, progress, recovery;
-    private final TextButton ready, start, leave, retry, keepOpen, relink, reject;
+    private final TextButton ready, start, edit, leave, retry, keepOpen, relink, reject;
     private LobbySnapshot displayed;
     private boolean floorEntryRequested, navigationPending, confirmClose, disposed;
     private String entryError;
+    private String presentationNotice;
+    private Window editor;
+    private TextField nickname;
+    private ButtonGroup<TextButton> avatars;
+    private Image selectedPortrait;
+    private Label editMessage;
+    private TextButton applyEdit, cancelEdit;
+    private long pendingEdit;
 
     public DirectConnectSessionScreen(GameApplication application, DirectConnectPeer peer) {
         if(application == null) throw new IllegalArgumentException("Game application cannot be null.");
@@ -63,6 +74,7 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         Table actions = new Table();
         ready = action(actions, "Ready (Space)", this::toggleReady);
         start = action(actions, "Start (Enter)", () -> application.startMultiplayerCampaign(peer));
+        edit = action(actions, "Edit player (E)", this::openEditor);
         panel.add(actions).height(24).padTop(5); panel.row();
         Table navigation = new Table();
         leave = action(navigation, peer instanceof DirectConnectHost ? "Close lobby (Esc)" : "Leave (Esc)", this::leave);
@@ -136,16 +148,20 @@ public final class DirectConnectSessionScreen extends BaseScreen {
                 || phase == DirectConnectPhase.REJECTED || phase == DirectConnectPhase.DISCONNECTED && !(peer instanceof DirectConnectHost);
         progress.setText(text(confirmClose ? "Close Host lobby? Connected Participants will disconnect."
                 : entryError != null ? entryError : peer == null ? "Connection could not open."
-                : stopped ? peer.getStatus().getMessage() : peer instanceof DirectConnectHost ? "Lobby open / " + peer.getEndpoint()
+                : stopped ? peer.getStatus().getMessage() : presentationNotice != null ? presentationNotice
+                : peer instanceof DirectConnectHost ? "Lobby open / " + peer.getEndpoint()
                 : application.getMultiplayerConnectionProgress()));
         progress.setColor(confirmClose || stopped || entryError != null ? Color.ORANGE : Color.WHITE);
         boolean host = peer instanceof DirectConnectHost;
         ready.setVisible(!confirmClose && !stopped);
-        ready.setDisabled(peer == null || !peer.canSetPlayerReady());
+        ready.setDisabled(editor != null || peer == null || !peer.canSetPlayerReady());
         LobbySnapshot.Slot local = lobby == null ? null : lobby.getSlot(host ? 1 : peer.getLocalCampaignSlot());
         ready.setText(local != null && local.isPlayerReady() ? "Not ready (Space)" : "Ready (Space)");
         start.setVisible(host && !confirmClose && !stopped);
-        start.setDisabled(!host || !((DirectConnectHost)peer).canStartSession());
+        start.setDisabled(editor != null || !host || !((DirectConnectHost)peer).canStartSession());
+        edit.setVisible(!confirmClose && !stopped);
+        edit.setDisabled(editor != null || peer == null || !peer.canEditPresentation());
+        if(editor != null && (stopped || !peer.canEditPresentation())) closeEditor();
         if(host) start.setText(((DirectConnectHost)peer).isResumedCampaign() ? "Resume (Enter)" : "Start (Enter)");
         retry.setVisible(stopped && !confirmClose);
         keepOpen.setVisible(confirmClose);
@@ -165,6 +181,121 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         LobbySnapshot lobby = peer.getLobbySnapshot();
         LobbySnapshot.Slot local = lobby == null ? null : lobby.getSlot(peer instanceof DirectConnectHost ? 1 : peer.getLocalCampaignSlot());
         if(local != null) application.setMultiplayerPlayerReady(peer, !local.isPlayerReady());
+    }
+
+    private void openEditor() {
+        if(editor != null || peer == null || !peer.canEditPresentation()) return;
+        LobbySnapshot lobby = peer.getLobbySnapshot();
+        LobbySnapshot.Slot local = lobby == null ? null : lobby.getSlot(peer instanceof DirectConnectHost ? 1 : peer.getLocalCampaignSlot());
+        if(local == null || !local.isClaimed()) return;
+        entryError = presentationNotice = null;
+        pendingEdit = 0L;
+        editor = new Window("", new Window.WindowStyle(skin.get(TextButton.TextButtonStyle.class).font, Color.WHITE,
+                new NinePatchDrawable(new NinePatch(skin.getRegion("window"), 8, 8, 8, 8))));
+        editor.setModal(true);
+        editor.setMovable(false);
+        editor.pad(12);
+        editor.add(label("Edit Nickname and Avatar", 1f)).width(400).height(24); editor.row();
+        editor.add(label("Nickname", 0.8f)).width(400).height(20).left(); editor.row();
+        TextField.TextFieldStyle style = com.interrupt.dungeoneer.ui.UiSkin.createTextFieldStyle(skin);
+        style.cursor = new TextureRegionDrawable(new TextureRegion(skin.getRegion("knob"), 8, 8, 1, 1));
+        nickname = new TextField(local.getPresentation().getNickname(), style);
+        nickname.setMaxLength(64);
+        nickname.setOnlyFontChars(false);
+        editor.add(nickname).width(400).height(26).padBottom(8); editor.row();
+        avatars = new ButtonGroup<>();
+        selectedPortrait = new Image();
+        selectedPortrait.setScaling(Scaling.fit);
+        Table choices = new Table();
+        int number = 1;
+        for(String id : AvatarCatalog.ownedV108Humanoids().getAvatarIds()) {
+            DrawableSprite sprite = HostSetupScreen.resolvedPortrait(id);
+            TextButton button = new TextButton("Avatar " + number++, com.interrupt.dungeoneer.ui.UiSkin.createChoiceButtonStyle(skin));
+            button.setUserObject(id);
+            Label name = button.getLabel(); name.setFontScale(0.65f);
+            button.clearChildren();
+            Image portrait = new Image(new TextureRegionDrawable(sprite.atlas.getSprite(sprite.tex)), Scaling.fit);
+            portrait.setColor(sprite.color);
+            button.add(portrait).size(34).pad(2); button.row(); button.add(name).padBottom(2);
+            avatars.add(button);
+            button.setChecked(id.equals(local.getPresentation().getAvatarId()));
+            button.addListener(new ClickListener() {
+                @Override public void clicked(InputEvent event, float x, float y) {
+                    if(!button.isDisabled()) selectPortrait();
+                }
+            });
+            choices.add(button).width(68).height(56).padRight(4);
+        }
+        editor.add(choices).height(56); editor.row();
+        editor.add(selectedPortrait).size(64).pad(4); editor.row();
+        selectPortrait();
+        editor.add(label("Up/Down chooses Avatar. Enter applies. Esc cancels.", 0.7f)).width(400).height(28); editor.row();
+        editMessage = label("Host checks choices, including absent reserved players.", 0.7f);
+        editor.add(editMessage).width(400).height(44); editor.row();
+        Table actions = new Table();
+        cancelEdit = action(actions, "Cancel (Esc)", this::closeEditor);
+        applyEdit = action(actions, "Apply (Enter)", this::applyPresentation);
+        editor.add(actions).height(24);
+        editor.pack();
+        editor.setPosition((viewport.getWorldWidth() - editor.getWidth()) / 2f,
+                (viewport.getWorldHeight() - editor.getHeight()) / 2f);
+        ui.addActor(editor);
+        ui.setKeyboardFocus(nickname);
+        nickname.setCursorPosition(nickname.getText().length());
+    }
+
+    private void selectPortrait() {
+        DrawableSprite sprite = HostSetupScreen.resolvedPortrait((String)avatars.getChecked().getUserObject());
+        selectedPortrait.setDrawable(new TextureRegionDrawable(sprite.atlas.getSprite(sprite.tex)));
+        selectedPortrait.setColor(sprite.color);
+    }
+
+    private void cycleAvatar(int direction) {
+        int selected = avatars.getButtons().indexOf(avatars.getChecked(), true);
+        avatars.getButtons().get((selected + direction + avatars.getButtons().size) % avatars.getButtons().size).setChecked(true);
+        selectPortrait();
+    }
+
+    private void applyPresentation() {
+        if(editor == null || pendingEdit != 0L) return;
+        pendingEdit = application.editMultiplayerPresentation(peer, nickname.getText(), (String)avatars.getChecked().getUserObject());
+        if(pendingEdit == 0L) { closeEditor(); return; }
+        setEditorPending(true);
+        editMessage.setText("Waiting for Host decision...");
+    }
+
+    private void setEditorPending(boolean pending) {
+        nickname.setDisabled(pending);
+        for(TextButton button : avatars.getButtons()) button.setDisabled(pending);
+        applyEdit.setDisabled(pending); cancelEdit.setDisabled(pending);
+    }
+
+    private void pollEdit() {
+        if(editor == null || pendingEdit == 0L) return;
+        PresentationEditResult result = peer.getPresentationEditResult();
+        if(result == null || result.getRequestId() != pendingEdit) return;
+        try { application.pollMultiplayerPresentationEditResult(peer); }
+        catch(RuntimeException failedDefaults) {
+            entryError = "Campaign choice saved. Local defaults could not be saved.";
+            closeEditor(); return;
+        }
+        pendingEdit = 0L;
+        if(result.isAccepted()) {
+            presentationNotice = result.getReason();
+            closeEditor();
+        }
+        else {
+            setEditorPending(false);
+            editMessage.setText(text(result.getReason()));
+            editMessage.setColor(Color.ORANGE);
+            ui.setKeyboardFocus(nickname);
+        }
+    }
+
+    private void closeEditor() {
+        if(editor == null) return;
+        editor.remove(); editor = null; pendingEdit = 0L;
+        ui.setKeyboardFocus(edit);
     }
 
     private void recoverClaim(boolean trusted) {
@@ -206,7 +337,17 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         super.tick(delta);
         ui.act(delta);
         updateLobby();
-        if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) {
+        boolean editing = editor != null;
+        pollEdit();
+        if(editing) {
+            if(editor != null && pendingEdit == 0L) {
+                if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) navigate(this::closeEditor);
+                else if(Gdx.input.isKeyJustPressed(Input.Keys.ENTER)) navigate(this::applyPresentation);
+                else if(Gdx.input.isKeyJustPressed(Input.Keys.UP)) cycleAvatar(-1);
+                else if(Gdx.input.isKeyJustPressed(Input.Keys.DOWN)) cycleAvatar(1);
+            }
+        }
+        else if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) {
             if(confirmClose) confirmClose = false;
             else navigate(this::leave);
         }
@@ -215,6 +356,7 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         else if(!confirmClose && retry.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.T)) navigate(application::retryDirectConnectSession);
         else if(!confirmClose && relink.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.L)) navigate(() -> recoverClaim(true));
         else if(!confirmClose && reject.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.R)) navigate(() -> recoverClaim(false));
+        else if(!confirmClose && edit.isVisible() && !edit.isDisabled() && Gdx.input.isKeyJustPressed(Input.Keys.E)) navigate(this::openEditor);
         else if(!confirmClose && ready.isVisible() && !ready.isDisabled() && Gdx.input.isKeyJustPressed(Input.Keys.SPACE)) navigate(this::toggleReady);
         else if(!confirmClose && peer instanceof DirectConnectHost && Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && !start.isDisabled())
             navigate(() -> application.startMultiplayerCampaign(peer));

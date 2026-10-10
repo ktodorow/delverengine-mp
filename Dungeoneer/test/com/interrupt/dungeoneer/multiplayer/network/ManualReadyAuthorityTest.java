@@ -19,6 +19,61 @@ import static org.junit.Assert.*;
 public class ManualReadyAuthorityTest {
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
 
+    @Test public void replayedPresentationEditCannotReplaceNewerChoiceOrRestoreOldConsent() throws Exception {
+        try(Fixture fixture = new Fixture(); RawParticipant participant = new RawParticipant(fixture.host, '2', 2, "")) {
+            DirectConnectHost host = fixture.host;
+            participant.authenticateUdp(); participant.synchronizeLobby();
+            host.setPlayerReady(true); participant.ready(true); participant.fence();
+            DirectConnectWire.PlayerReady staleReady = new DirectConnectWire.PlayerReady(participant.session, 2,
+                    participant.accepted.udpToken, participant.lobby.getSequence(), true);
+            DirectConnectWire.PresentationEdit first = new DirectConnectWire.PresentationEdit(participant.session, 2,
+                    participant.accepted.udpToken, 1L, "Scout", "humanoid-3");
+            write(participant.tcp, first); participant.next(DirectConnectWire.PresentationEdited.class); participant.fence();
+            write(participant.tcp, staleReady); participant.fence();
+            assertFalse("Pre-edit Ready cannot reconfirm edited choice", host.getLobbySnapshot().getSlot(2).isPlayerReady());
+            write(participant.tcp, new DirectConnectWire.PresentationEdit(participant.session, 2,
+                    participant.accepted.udpToken, 2L, "Mage", "humanoid-4"));
+            participant.next(DirectConnectWire.PresentationEdited.class); participant.fence();
+            participant.ready(true); participant.fence();
+            assertTrue(host.canStartSession());
+            write(participant.tcp, first); participant.fence();
+            assertEquals(new SlotPresentation("Mage", "humanoid-4"), host.getLobbySnapshot().getSlot(2).getPresentation());
+            assertTrue("Replayed edit cannot invalidate current consent", host.canStartSession());
+        }
+    }
+
+    @Test public void editsRequireSynchronizedCurrentOwnConnectionAndPregameAuthority() throws Exception {
+        try(Fixture fixture = new Fixture(); RawParticipant participant = new RawParticipant(fixture.host, '2', 2, "")) {
+            DirectConnectHost host = fixture.host;
+            SlotPresentation original = new SlotPresentation("Friend2", "humanoid-2");
+            DirectConnectWire.PresentationEdit own = new DirectConnectWire.PresentationEdit(participant.session, 2,
+                    participant.accepted.udpToken, 1L, "Scout", "humanoid-3");
+            write(participant.tcp, own); participant.fence();
+            assertEquals(original, host.getLobbySnapshot().getSlot(2).getPresentation());
+            participant.authenticateUdp();
+            write(participant.tcp, own); participant.fence();
+            assertEquals("Authenticated but unsynchronized edit must be ignored", original,
+                    host.getLobbySnapshot().getSlot(2).getPresentation());
+            participant.synchronizeLobby();
+            for(DirectConnectWire.PresentationEdit unauthorized : new DirectConnectWire.PresentationEdit[] {
+                    new DirectConnectWire.PresentationEdit(participant.session, 1, participant.accepted.udpToken, 99L, "Scout", "humanoid-3"),
+                    new DirectConnectWire.PresentationEdit(participant.session, 3, participant.accepted.udpToken, 99L, "Scout", "humanoid-3"),
+                    new DirectConnectWire.PresentationEdit(participant.session, 2, participant.accepted.udpToken + 1L, 99L, "Scout", "humanoid-3"),
+                    new DirectConnectWire.PresentationEdit("old-session", 2, participant.accepted.udpToken, 99L, "Scout", "humanoid-3") }) {
+                write(participant.tcp, unauthorized); participant.fence();
+                assertEquals(original, host.getLobbySnapshot().getSlot(2).getPresentation());
+            }
+            write(participant.tcp, own);
+            assertTrue(participant.next(DirectConnectWire.PresentationEdited.class).result.isAccepted());
+            participant.fence();
+            assertEquals(new SlotPresentation("Scout", "humanoid-3"), host.getLobbySnapshot().getSlot(2).getPresentation());
+            host.setPlayerReady(true); participant.ready(true); participant.fence(); host.startSession();
+            write(participant.tcp, new DirectConnectWire.PresentationEdit(participant.session, 2,
+                    participant.accepted.udpToken, 2L, "Mage", "humanoid-4")); participant.fence();
+            assertEquals(new SlotPresentation("Scout", "humanoid-3"), host.getRoster().getSlot(2).getPresentation());
+        }
+    }
+
     @Test public void consentRequiresAuthenticationSynchronizationAndCurrentOwnSlotAuthority() throws Exception {
         try(Fixture fixture = new Fixture(); RawParticipant participant = new RawParticipant(fixture.host, '2', 2, "")) {
             DirectConnectHost host = fixture.host;
@@ -70,7 +125,10 @@ public class ManualReadyAuthorityTest {
             try(RawParticipant returning = new RawParticipant(host, '2', 2, reconnect)) {
                 returning.authenticateUdp(); returning.synchronizeLobby();
                 assertNotEquals(oldToken, returning.accepted.udpToken);
-                write(returning.tcp, stale); returning.fence();
+                write(returning.tcp, stale);
+                write(returning.tcp, new DirectConnectWire.PresentationEdit(returning.session, 2, oldToken, 1L, "Scout", "humanoid-3"));
+                returning.fence();
+                assertEquals(new SlotPresentation("Friend2", "humanoid-2"), host.getRoster().getSlot(2).getPresentation());
                 assertTrue(host.getLobbySnapshot().getSlot(1).isPlayerReady());
                 assertFalse(host.getLobbySnapshot().getSlot(2).isPlayerReady());
                 assertFalse(host.canStartSession());

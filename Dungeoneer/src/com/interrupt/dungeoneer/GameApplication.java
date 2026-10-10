@@ -514,6 +514,14 @@ public class GameApplication extends Game {
         return sessionFlow.setPlayerReady(expected, ready);
     }
 
+    public long editMultiplayerPresentation(DirectConnectPeer expected, String nickname, String avatar) {
+        return sessionFlow.editPresentation(expected, nickname, avatar);
+    }
+
+    public com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult pollMultiplayerPresentationEditResult(DirectConnectPeer expected) {
+        return sessionFlow.pollPresentationEditResult(expected);
+    }
+
     public boolean startMultiplayerCampaign(DirectConnectPeer expected) { return sessionFlow.startCampaign(expected); }
 
     public void cancelMultiplayerConnect() {

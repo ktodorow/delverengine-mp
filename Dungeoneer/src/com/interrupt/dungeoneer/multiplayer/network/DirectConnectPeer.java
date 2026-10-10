@@ -38,6 +38,10 @@ public interface DirectConnectPeer extends AutoCloseable {
     /** Ephemeral pregame consent; distinct from network or destination readiness. */
     default boolean canSetPlayerReady() { return false; }
     default void setPlayerReady(boolean ready) { throw new IllegalStateException("Player Ready is unavailable."); }
+    /** Edit only own presentation while authenticated, synchronized and pregame. */
+    default boolean canEditPresentation() { return canSetPlayerReady(); }
+    default long editPresentation(String nickname, String avatar) { throw new IllegalStateException("Presentation editing is unavailable."); }
+    default com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult getPresentationEditResult() { return null; }
     default com.interrupt.dungeoneer.multiplayer.floor.PartyDestination getPartyDestination() { return null; }
     default void acknowledgePartyDestination(long generation) { }
     default com.interrupt.dungeoneer.multiplayer.floor.PartyTransition getPartyTransition() {

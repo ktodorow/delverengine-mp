@@ -450,7 +450,8 @@ public final class CampaignSaveStore {
         if(expected != null && format <= 7 && protocol <= 50
                 && (expected.getBuildId().equals("mp-v108-prototype-named-campaigns-56")
                     || expected.getBuildId().equals("mp-v108-prototype-shared-lobby-57")
-                    || expected.getBuildId().equals("mp-v108-prototype-manual-ready-58"))
+                    || expected.getBuildId().equals("mp-v108-prototype-manual-ready-58")
+                    || expected.getBuildId().equals("mp-v108-prototype-lobby-presentation-59"))
                 && (compatibility.getBuildId().equals("mp-v108-prototype-party-travel-55")
                     || format <= 6 && compatibility.getBuildId().equals("mp-v108-prototype-dormant-floors-54")
                     || format <= 5 && compatibility.getBuildId().equals("mp-v108-prototype-late-admission-53"))) {
@@ -461,14 +462,23 @@ public final class CampaignSaveStore {
         if(expected != null && format == 8 && protocol <= 50
                 && compatibility.getBuildId().equals("mp-v108-prototype-named-campaigns-56")
                 && (expected.getBuildId().equals("mp-v108-prototype-shared-lobby-57")
-                    || expected.getBuildId().equals("mp-v108-prototype-manual-ready-58"))) {
+                    || expected.getBuildId().equals("mp-v108-prototype-manual-ready-58")
+                    || expected.getBuildId().equals("mp-v108-prototype-lobby-presentation-59"))) {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }
         // Manual Ready is ephemeral wire state; existing campaign body remains unchanged.
         if(expected != null && format == 8 && protocol == 51
                 && compatibility.getBuildId().equals("mp-v108-prototype-shared-lobby-57")
-                && expected.getBuildId().equals("mp-v108-prototype-manual-ready-58")) {
+                && (expected.getBuildId().equals("mp-v108-prototype-manual-ready-58")
+                    || expected.getBuildId().equals("mp-v108-prototype-lobby-presentation-59"))) {
+            compatibility = new DirectConnectCompatibility(expected.getBuildId(),
+                    compatibility.getContentFormat(), compatibility.getContentSha256());
+        }
+        // Lobby presentation adds reliable wire messages without changing saved gameplay layout.
+        if(expected != null && format == 8 && protocol == 52
+                && compatibility.getBuildId().equals("mp-v108-prototype-manual-ready-58")
+                && expected.getBuildId().equals("mp-v108-prototype-lobby-presentation-59")) {
             compatibility = new DirectConnectCompatibility(expected.getBuildId(),
                     compatibility.getContentFormat(), compatibility.getContentSha256());
         }

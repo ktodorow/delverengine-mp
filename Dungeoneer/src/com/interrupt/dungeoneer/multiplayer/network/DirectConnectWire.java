@@ -1,6 +1,7 @@
 package com.interrupt.dungeoneer.multiplayer.network;
 
 import com.interrupt.dungeoneer.multiplayer.floor.SharedFloorFingerprint;
+import com.interrupt.dungeoneer.multiplayer.lobby.SlotPresentation;
 import com.interrupt.dungeoneer.multiplayer.items.ItemActionResult;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeExplosionPresentation;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationCue;
@@ -131,6 +132,8 @@ final class DirectConnectWire {
     private static final int LOBBY_SNAPSHOT = 67;
     private static final int LOBBY_RECEIVED = 68;
     private static final int PLAYER_READY = 69;
+    private static final int PRESENTATION_EDIT = 70;
+    private static final int PRESENTATION_EDITED = 71;
     private static final int TRAVEL_INTENT = 63;
     private static final int TRAVEL_STATE = 64;
     private static final int MAX_MAPPING_MESSAGE_BYTES = com.interrupt.dungeoneer.multiplayer.knowledge.PotionMapping.MAX_BYTES + 128;
@@ -159,7 +162,8 @@ final class DirectConnectWire {
 
     static ByteBuf encodeDatagram(ByteBufAllocator allocator, Message message)
             throws ProtocolException {
-        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived || message instanceof PlayerReady)
+        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived || message instanceof PlayerReady
+                || message instanceof PresentationEdit || message instanceof PresentationEdited)
             throw new ProtocolException("Lobby messages require reliable TCP.");
         ByteBuf output = allocator.buffer(128);
         boolean successful = false;
@@ -181,7 +185,8 @@ final class DirectConnectWire {
             throw new ProtocolException("Datagram exceeded protocol size bound.");
         }
         Message message = decode(input);
-        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived || message instanceof PlayerReady)
+        if(message instanceof LobbySnapshotMessage || message instanceof LobbyReceived || message instanceof PlayerReady
+                || message instanceof PresentationEdit || message instanceof PresentationEdited)
             throw new ProtocolException("Lobby messages require reliable TCP.");
         return message;
     }
@@ -223,6 +228,23 @@ final class DirectConnectWire {
             writeString(output, ready.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
             output.writeByte(ready.slot); output.writeLong(ready.connectionToken);
             output.writeLong(ready.sequence); output.writeBoolean(ready.ready);
+        }
+        else if(message instanceof PresentationEdit) {
+            PresentationEdit edit = (PresentationEdit)message;
+            output.writeByte(PRESENTATION_EDIT);
+            writeString(output, edit.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeByte(edit.slot); output.writeLong(edit.connectionToken); output.writeLong(edit.requestId);
+            writeString(output, edit.nickname, 256, "typed nickname");
+            writeString(output, edit.avatar, DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity");
+        }
+        else if(message instanceof PresentationEdited) {
+            PresentationEdited report = (PresentationEdited)message;
+            output.writeByte(PRESENTATION_EDITED);
+            writeString(output, report.sessionId, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+            output.writeLong(report.result.getRequestId()); output.writeBoolean(report.result.isAccepted());
+            writeString(output, report.result.getPresentation().getNickname(), DirectConnectProtocol.MAX_NICKNAME_BYTES, "nickname");
+            writeString(output, report.result.getPresentation().getAvatarId(), DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity");
+            writeString(output, report.result.getReason(), DirectConnectProtocol.MAX_REASON_BYTES, "edit result");
         }
         else if(message instanceof TravelDestination) {
             TravelDestination report = (TravelDestination)message;
@@ -1098,6 +1120,24 @@ final class DirectConnectWire {
                 int readyFlag = input.readUnsignedByte();
                 if(readyFlag > 1) throw new ProtocolException("Invalid player Ready flag.");
                 message = new PlayerReady(playerReadySession, readySlot, readyToken, readySequence, readyFlag == 1);
+                break;
+            case PRESENTATION_EDIT:
+                String editSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 17, "presentation edit");
+                int editSlot = input.readUnsignedByte();
+                long editToken = input.readLong(), editRequest = input.readLong();
+                message = new PresentationEdit(editSession, editSlot, editToken, editRequest,
+                        readString(input, 256, "typed nickname"), readString(input, DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity"));
+                break;
+            case PRESENTATION_EDITED:
+                String editedSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
+                requireReadable(input, 9, "presentation result");
+                long editedRequest = input.readLong(); int editedFlag = input.readUnsignedByte();
+                if(editedFlag > 1) throw new ProtocolException("Invalid presentation result flag.");
+                SlotPresentation editedPresentation = new SlotPresentation(readString(input, DirectConnectProtocol.MAX_NICKNAME_BYTES, "nickname"),
+                        readString(input, DirectConnectProtocol.MAX_AVATAR_ID_BYTES, "Avatar identity"));
+                message = new PresentationEdited(editedSession, new com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult(
+                        editedRequest, editedFlag == 1, editedPresentation, readString(input, DirectConnectProtocol.MAX_REASON_BYTES, "edit result")));
                 break;
             case TRAVEL_DESTINATION:
                 String destinationSession = readString(input, DirectConnectProtocol.MAX_SESSION_ID_BYTES, "session identity");
@@ -3222,6 +3262,29 @@ final class DirectConnectWire {
                 throw new IllegalArgumentException("Invalid player Ready request.");
             this.sessionId = sessionId; this.slot = slot; this.connectionToken = connectionToken;
             this.sequence = sequence; this.ready = ready;
+        }
+    }
+
+    static final class PresentationEdit implements Message {
+        final String sessionId, nickname, avatar;
+        final int slot;
+        final long connectionToken, requestId;
+        PresentationEdit(String sessionId, int slot, long connectionToken, long requestId, String nickname, String avatar) {
+            if(sessionId == null || sessionId.isEmpty() || slot < 1 || slot > 4 || connectionToken == 0L
+                    || requestId < 1L || nickname == null || avatar == null)
+                throw new IllegalArgumentException("Invalid presentation edit request.");
+            this.sessionId = sessionId; this.slot = slot; this.connectionToken = connectionToken;
+            this.requestId = requestId; this.nickname = nickname; this.avatar = avatar;
+        }
+    }
+
+    static final class PresentationEdited implements Message {
+        final String sessionId;
+        final com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult result;
+        PresentationEdited(String sessionId, com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult result) {
+            if(sessionId == null || sessionId.isEmpty() || result == null)
+                throw new IllegalArgumentException("Invalid presentation edit report.");
+            this.sessionId = sessionId; this.result = result;
         }
     }
 

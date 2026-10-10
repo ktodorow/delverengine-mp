@@ -1453,6 +1453,25 @@ public final class DirectConnectClient implements DirectConnectPeer {
                 && local != null && local.isSynchronized();
     }
 
+    private long nextPresentationRequest;
+    private volatile com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult presentationEditResult;
+
+    @Override public com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult getPresentationEditResult() { return presentationEditResult; }
+
+    private synchronized void presentationEdited(DirectConnectWire.PresentationEdited report) {
+        if(!java.util.Objects.equals(sessionId, report.sessionId)
+                || report.result.getRequestId() > nextPresentationRequest
+                || presentationEditResult != null && report.result.getRequestId() <= presentationEditResult.getRequestId()) return;
+        presentationEditResult = report.result;
+    }
+
+    @Override public synchronized long editPresentation(String nickname, String avatar) {
+        if(!canEditPresentation()) throw new IllegalStateException("Presentation editing requires authenticated, synchronized pregame connection.");
+        long request = ++nextPresentationRequest;
+        tcpChannel.writeAndFlush(new DirectConnectWire.PresentationEdit(sessionId, campaignSlot, udpToken, request, nickname, avatar));
+        return request;
+    }
+
     @Override public synchronized void setPlayerReady(boolean ready) {
         if(!canSetPlayerReady()) throw new IllegalStateException("Player Ready requires authenticated, synchronized pregame connection.");
         tcpChannel.writeAndFlush(new DirectConnectWire.PlayerReady(sessionId, campaignSlot, udpToken,
@@ -1547,6 +1566,9 @@ public final class DirectConnectClient implements DirectConnectPeer {
             }
             else if(message instanceof DirectConnectWire.LobbySnapshotMessage) {
                 lobbySnapshot((DirectConnectWire.LobbySnapshotMessage)message);
+            }
+            else if(message instanceof DirectConnectWire.PresentationEdited) {
+                presentationEdited((DirectConnectWire.PresentationEdited)message);
             }
             else if(message instanceof ServerRejected) {
                 rejected((ServerRejected)message);

@@ -120,6 +120,20 @@ public final class CampaignRosterStore {
         }
     }
 
+    /** Persist validated candidate before publishing live presentation/consent revision. */
+    public synchronized CampaignSlot editPresentation(CampaignRoster roster, LauncherIdentity owner,
+            SlotPresentation presentation) {
+        synchronized(roster) {
+            CampaignSlot before = roster.findSlot(owner);
+            CampaignRoster candidate = CampaignRoster.restore(roster.getCampaignId(), roster.getCapacity(),
+                    roster.getAvatarCatalog(), roster.getSlots()).withMetadata(roster.getCampaignName(), roster.getStartingLives());
+            CampaignSlot updated = candidate.updatePresentation(owner, presentation);
+            if(updated == before) return before;
+            save(candidate);
+            return roster.updatePresentation(owner, presentation);
+        }
+    }
+
     public synchronized void save(CampaignRoster roster) {
         Properties properties = new Properties();
         properties.setProperty("format", FORMAT);
