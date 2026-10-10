@@ -1759,6 +1759,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext context, Throwable cause) {
+            System.err.println("[DEBUG-issue49-tcp] Client handler failure");
+            cause.printStackTrace(System.err);
             fail("TCP session failed: " + safeMessage(cause));
         }
     }
