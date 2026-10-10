@@ -217,15 +217,8 @@ public final class ConnectSetupScreen extends BaseScreen {
                 if(!application.showDirectConnectLobby(peer)) entryRequested = false;
             });
         }
-        boolean spectator = peer != null && peer.getPartyStatus() != null
-                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null
-                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()).getState() == PartyMemberState.SPECTATING;
         if(peer != null && !navigationPending && !entryRequested
-                && (DirectConnectSessionScreen.isFloorEntryReady(peer.getStatus().getPhase(),
-                        peer.getLocalMovementEntityId(), peer.getMovementSnapshots())
-                || spectator && (peer.getStatus().getPhase() == DirectConnectPhase.READY
-                        || peer.getStatus().getPhase() == DirectConnectPhase.SYNCHRONIZING)
-                        && !peer.getMovementSnapshots().isEmpty())) {
+                && application.canEnterDirectConnectFloor(peer)) {
             entryRequested = true;
             Gdx.app.postRunnable(() -> {
                 if(disposed || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;

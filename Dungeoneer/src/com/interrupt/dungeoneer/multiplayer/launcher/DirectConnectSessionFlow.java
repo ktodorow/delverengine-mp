@@ -4,6 +4,11 @@ import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectHost;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectClient;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyStatusSnapshot;
+import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
+import java.util.List;
 
 import java.util.function.Supplier;
 import java.util.function.BiFunction;
@@ -158,8 +163,12 @@ public final class DirectConnectSessionFlow {
             case AWAITING_APPROVAL: return "Waiting for Host admission...";
             case REGISTERING_UDP: return "Authenticating UDP...";
             case LOBBY: return "Connected. Waiting for Host to start.";
-            case SYNCHRONIZING: return "Synchronizing campaign...";
-            case READY: return "Connection ready.";
+            case SYNCHRONIZING: return isLocalSpectator()
+                    ? "Synchronizing as Spectator. Fresh Return at Party's first unvisited floor."
+                    : "Synchronizing campaign...";
+            case READY: return isLocalSpectator()
+                    ? "Spectator. Fresh Return at Party's first unvisited floor."
+                    : "Connection ready.";
             case REJECTED: return "Connection rejected: " + peer.getStatus().getMessage();
             case FAILED:
             case DISCONNECTED: return "Connection failed: " + peer.getStatus().getMessage()
@@ -167,6 +176,14 @@ public final class DirectConnectSessionFlow {
             case CLOSED: return "Connection cancelled.";
             default: return peer.getStatus().getMessage();
         }
+    }
+
+    private boolean isLocalSpectator() {
+        PartyStatusSnapshot party = peer.getPartyStatus();
+        PartyMemberStatus local = party == null
+                ? null : party.getMember(peer.getLocalCampaignSlot());
+        return local != null && local.getState()
+                == PartyMemberState.SPECTATING;
     }
 
     /** Selection restores campaign defaults but opens no listener. Same request feeds native form. */
@@ -284,12 +301,22 @@ public final class DirectConnectSessionFlow {
 
     /** Queued native entry belongs to exactly one current, started session. */
     public boolean enter(DirectConnectPeer expected, Runnable installWorld) {
-        if(expected == null || peer != expected || entered) return false;
-        DirectConnectPhase phase = expected.getStatus().getPhase();
-        if(phase != DirectConnectPhase.READY && phase != DirectConnectPhase.SYNCHRONIZING) return false;
+        if(!canEnter(expected)) return false;
         entered = true;
         installWorld.run();
         return true;
+    }
+
+    /** Native reconstruction may attach during admission; interaction still waits for Host activation. */
+    public boolean canEnter(DirectConnectPeer expected) {
+        if(expected == null || peer != expected || entered) return false;
+        DirectConnectPhase phase = expected.getStatus().getPhase();
+        if(phase != DirectConnectPhase.READY && phase != DirectConnectPhase.SYNCHRONIZING) return false;
+        List<MovementSnapshot> snapshots = expected.getMovementSnapshots();
+        if(snapshots == null || snapshots.isEmpty()) return false;
+        if(isLocalSpectator()) return phase == DirectConnectPhase.READY || expected.getPendingAdmissionCheckpoint() > 0L;
+        return phase == DirectConnectPhase.READY && expected.getLocalMovementEntityId() != null
+                && snapshots.get(snapshots.size() - 1).getEntity(expected.getLocalMovementEntityId()) != null;
     }
 
     public void leave() {

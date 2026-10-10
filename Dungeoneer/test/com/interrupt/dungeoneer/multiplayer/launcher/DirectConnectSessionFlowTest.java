@@ -90,6 +90,7 @@ public class DirectConnectSessionFlowTest {
         DirectConnectClient friend = client(first.getBoundPort());
         try {
             admitAndStart(first, friend);
+            awaitEntry(flow, first);
             assertTrue(flow.enter(first, () -> entered.add(first)));
             assertFalse(flow.enter(first, () -> entered.add(first)));
             flow.leave();
@@ -98,6 +99,7 @@ public class DirectConnectSessionFlowTest {
             DirectConnectHost next = (DirectConnectHost)flow.getPeer();
             startReadySession(next); // Saved campaign permits Host-only resume.
             assertFalse(flow.enter(first, () -> entered.add(first))); // Queued callback after replacement.
+            awaitEntry(flow, next);
             assertTrue(flow.enter(next, () -> entered.add(next)));
             assertEquals(java.util.Arrays.asList(first, next), entered);
         }
@@ -174,14 +176,15 @@ public class DirectConnectSessionFlowTest {
         CampaignRoster roster = roster(store);
         com.interrupt.dungeoneer.owned.MultiplayerProfile.initialize(temporary.newFolder("client-profile"));
         ReconnectTokenStore tokens = new ProfileReconnectTokenStore();
-        int port;
-        try(ServerSocket unused = new ServerSocket(0)) { port = unused.getLocalPort(); }
+        DatagramSocket reservedUdp = SocketTestPorts.occupyUdpWithAvailableTcp();
+        int port = reservedUdp.getLocalPort();
         DirectConnectSessionFlow flow = new DirectConnectSessionFlow();
         DirectConnectHost host = null;
         try {
             flow.open(() -> client(port, tokens));
             DirectConnectPeer refused = flow.getPeer();
             awaitPhase(refused, DirectConnectPhase.FAILED);
+            reservedUdp.close();
             host = DirectConnectHost.start(port, compatibility(), roster, store);
             flow.retry();
             DirectConnectClient joined = (DirectConnectClient)flow.getPeer();
@@ -200,9 +203,10 @@ public class DirectConnectSessionFlowTest {
             assertEquals(2, rejoined.getLocalCampaignSlot());
             assertTrue(host.getPendingClaims().isEmpty());
             assertFalse(flow.enter(joined, () -> fail("Departed attempt entered replacement world")));
+            awaitEntry(flow, rejoined);
             assertTrue(flow.enter(rejoined, () -> { }));
         }
-        finally { flow.leave(); if(host != null) host.close(); }
+        finally { reservedUdp.close(); flow.leave(); if(host != null) host.close(); }
     }
 
     @Test public void cancelledAdmittedClientRetainsSlotButCannotEnterRetriedSession() throws Exception {
@@ -229,6 +233,7 @@ public class DirectConnectSessionFlowTest {
             admitAndStart(host, joined);
             assertEquals(2, joined.getLocalCampaignSlot());
             assertFalse(flow.enter(cancelled, () -> fail("Cancelled attempt entered replacement world")));
+            awaitEntry(flow, joined);
             assertTrue(flow.enter(joined, () -> { }));
         }
         finally { flow.leave(); host.close(); }
@@ -293,6 +298,15 @@ public class DirectConnectSessionFlowTest {
         readyClient(client);
         startReadySession(host);
         awaitPhase(client, DirectConnectPhase.READY);
+    }
+
+    private static void awaitEntry(DirectConnectSessionFlow flow, DirectConnectPeer peer) throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
+        while(System.nanoTime() < deadline) {
+            if(flow.canEnter(peer)) return;
+            Thread.sleep(10L);
+        }
+        fail("Native entry baseline unavailable: " + peer.getStatus().getPhase());
     }
 
     private static void awaitPhase(DirectConnectPeer peer, DirectConnectPhase expected) throws Exception {

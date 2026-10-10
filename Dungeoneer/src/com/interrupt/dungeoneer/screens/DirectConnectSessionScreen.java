@@ -19,8 +19,6 @@ import com.interrupt.dungeoneer.gfx.drawables.DrawableSprite;
 import com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot;
 import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
 import com.interrupt.dungeoneer.multiplayer.lobby.PresentationEditResult;
-import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshot;
-import com.interrupt.dungeoneer.multiplayer.movement.NetworkEntityId;
 import com.interrupt.dungeoneer.multiplayer.network.*;
 import java.util.List;
 
@@ -153,13 +151,14 @@ public final class DirectConnectSessionScreen extends BaseScreen {
                 : application.getMultiplayerConnectionProgress()));
         progress.setColor(confirmClose || stopped || entryError != null ? Color.ORANGE : Color.WHITE);
         boolean host = peer instanceof DirectConnectHost;
-        ready.setVisible(!confirmClose && !stopped);
+        boolean pregame = peer != null && !peer.isCampaignStarted();
+        ready.setVisible(pregame && !confirmClose && !stopped);
         ready.setDisabled(editor != null || peer == null || !peer.canSetPlayerReady());
         LobbySnapshot.Slot local = lobby == null ? null : lobby.getSlot(host ? 1 : peer.getLocalCampaignSlot());
         ready.setText(local != null && local.isPlayerReady() ? "Not ready (Space)" : "Ready (Space)");
-        start.setVisible(host && !confirmClose && !stopped);
+        start.setVisible(pregame && host && !confirmClose && !stopped);
         start.setDisabled(editor != null || !host || !((DirectConnectHost)peer).canStartSession());
-        edit.setVisible(!confirmClose && !stopped);
+        edit.setVisible(pregame && !confirmClose && !stopped);
         edit.setDisabled(editor != null || peer == null || !peer.canEditPresentation());
         if(editor != null && (stopped || !peer.canEditPresentation())) closeEditor();
         if(host) start.setText(((DirectConnectHost)peer).isResumedCampaign() ? "Resume (Enter)" : "Start (Enter)");
@@ -174,7 +173,8 @@ public final class DirectConnectSessionScreen extends BaseScreen {
             recovery.setText(text("Recovery: " + claim.getNickname() + " / Slot " + claim.getRequestedSlot()
                     + " / Identity fingerprint " + claim.getLauncherIdentity().getFingerprint() + ". Verify trusted friend before relink."));
         }
-        else recovery.setText("Every connected player must be Ready. Host then chooses Start.");
+        else recovery.setText(pregame ? "Every connected player must be Ready. Host then chooses Start."
+                : "Synchronizing ongoing campaign. No Ready confirmation required.");
     }
 
     private void toggleReady() {
@@ -361,13 +361,7 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         else if(!confirmClose && peer instanceof DirectConnectHost && Gdx.input.isKeyJustPressed(Input.Keys.ENTER) && !start.isDisabled())
             navigate(() -> application.startMultiplayerCampaign(peer));
         if(peer == null || navigationPending || confirmClose || floorEntryRequested) return;
-        DirectConnectPhase phase = peer.getStatus().getPhase();
-        boolean spectator = peer.getPartyStatus() != null && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()) != null
-                && peer.getPartyStatus().getMember(peer.getLocalCampaignSlot()).getState()
-                == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING;
-        if(isFloorEntryReady(phase, peer.getLocalMovementEntityId(), peer.getMovementSnapshots())
-                || spectator && (phase == DirectConnectPhase.READY || phase == DirectConnectPhase.SYNCHRONIZING)
-                && !peer.getMovementSnapshots().isEmpty()) {
+        if(application.canEnterDirectConnectFloor(peer)) {
             floorEntryRequested = true;
             Gdx.app.postRunnable(() -> {
                 if(disposed || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;
@@ -385,11 +379,6 @@ public final class DirectConnectSessionScreen extends BaseScreen {
                 }
             });
         }
-    }
-
-    static boolean isFloorEntryReady(DirectConnectPhase phase, NetworkEntityId localEntityId, List<MovementSnapshot> snapshots) {
-        if(phase != DirectConnectPhase.READY || localEntityId == null || snapshots == null || snapshots.isEmpty()) return false;
-        return snapshots.get(snapshots.size() - 1).getEntity(localEntityId) != null;
     }
 
     @Override protected void draw(float delta) {

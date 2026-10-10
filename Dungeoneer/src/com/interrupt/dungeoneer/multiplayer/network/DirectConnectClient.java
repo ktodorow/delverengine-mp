@@ -377,6 +377,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
             fail("Could not store private Campaign reconnect credential: " + safeMessage(ex));
             return;
         }
+        campaignStarted = accepted.campaignStarted;
         campaignSlot = accepted.slotNumber;
         acceptedReconnectToken = accepted.reconnectToken;
         udpToken = accepted.udpToken;
@@ -463,9 +464,10 @@ public final class DirectConnectClient implements DirectConnectPeer {
             UdpRegistered registered = (UdpRegistered)message;
             if(!sessionId.equals(registered.sessionId) || udpToken != registered.udpToken) return;
             udpRegistered = true;
-            if(!admissionPending) status = new DirectConnectStatus(DirectConnectPhase.LOBBY,
-                    "Campaign Slot " + campaignSlot
-                            + " is ready. Waiting for Host to start play.",
+            if(!admissionPending) status = new DirectConnectStatus(
+                    campaignStarted ? DirectConnectPhase.SYNCHRONIZING : DirectConnectPhase.LOBBY,
+                    campaignStarted ? "Synchronizing ongoing campaign."
+                            : "Campaign Slot " + campaignSlot + " is ready. Waiting for Host to start play.",
                     sessionId, "host", null);
             becomeReadyIfComplete();
             return;
@@ -500,6 +502,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
             return;
         }
         nextItemRequestId = Math.max(nextItemRequestId, ready.nextItemRequestId);
+        campaignStarted = true;
         readyMessage = ready;
         becomeReadyIfComplete();
     }
@@ -690,6 +693,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
                 sessionId, "host", readyMessage.floorId);
     }
 
+    private volatile boolean campaignStarted;
+    @Override public boolean isCampaignStarted() { return campaignStarted; }
     private boolean admissionPending;
     private long admissionId, admissionGeneration;
     private boolean nativeAdmission;
@@ -1448,7 +1453,7 @@ public final class DirectConnectClient implements DirectConnectPeer {
 
     @Override public synchronized boolean canSetPlayerReady() {
         com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot.Slot local = lobbySnapshot == null ? null : lobbySnapshot.getSlot(campaignSlot);
-        return !closing.get() && status.getPhase() == DirectConnectPhase.LOBBY
+        return !campaignStarted && !closing.get() && status.getPhase() == DirectConnectPhase.LOBBY
                 && tcpChannel != null && tcpChannel.isActive() && udpRegistered
                 && local != null && local.isSynchronized();
     }

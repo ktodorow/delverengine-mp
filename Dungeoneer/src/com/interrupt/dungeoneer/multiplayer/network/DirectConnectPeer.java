@@ -33,6 +33,7 @@ import com.interrupt.dungeoneer.multiplayer.items.PhysicalItemState;
 import java.util.List;
 
 public interface DirectConnectPeer extends AutoCloseable {
+    default boolean isCampaignStarted() { return false; }
     /** Same Host-owned public lobby facts on every admitted peer. */
     default com.interrupt.dungeoneer.multiplayer.lobby.LobbySnapshot getLobbySnapshot() { return null; }
     /** Ephemeral pregame consent; distinct from network or destination readiness. */

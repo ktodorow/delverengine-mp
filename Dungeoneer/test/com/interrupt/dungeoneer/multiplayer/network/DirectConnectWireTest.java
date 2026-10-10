@@ -445,6 +445,22 @@ public class DirectConnectWireTest {
         assertEquals(-7L, ready.floorSeed);
     }
 
+    @Test public void campaignAcceptanceCarriesBoundedStartedFlag() throws Exception {
+        for(boolean started : new boolean[] { false, true }) {
+            DirectConnectWire.ServerAccepted accepted = (DirectConnectWire.ServerAccepted)roundTrip(
+                    new DirectConnectWire.ServerAccepted("session", 42L, "campaign", 2, repeat('b'), started));
+            assertEquals(started, accepted.campaignStarted);
+        }
+        ByteBuf valid = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,
+                new DirectConnectWire.ServerAccepted("session", 42L, "campaign", 2, repeat('b'), true));
+        try {
+            ByteBuf invalid = valid.copy(); invalid.setByte(invalid.writerIndex() - 1, 2); rejectPartyDatagram(invalid);
+            ByteBuf truncated = valid.copy(); truncated.writerIndex(truncated.writerIndex() - 1); rejectPartyDatagram(truncated);
+            ByteBuf trailing = valid.copy(); trailing.writeByte(0); rejectPartyDatagram(trailing);
+        }
+        finally { valid.release(); }
+    }
+
     @Test
     public void sessionReadyWithoutSharedFloorSeedIsRejected() throws Exception {
         ByteBuf encoded = DirectConnectWire.encodeDatagram(UnpooledByteBufAllocator.DEFAULT,

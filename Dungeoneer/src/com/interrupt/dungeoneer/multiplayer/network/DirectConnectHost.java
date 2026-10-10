@@ -679,7 +679,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             }
             else if(connection.slot != null) {
                 context.writeAndFlush(new ServerAccepted(sessionId, connection.udpToken,
-                        roster.getCampaignId(), connection.slot.getNumber(), connection.slot.getReconnectToken()));
+                        roster.getCampaignId(), connection.slot.getNumber(), connection.slot.getReconnectToken(), sessionStarted));
             }
             else {
                 context.writeAndFlush(new SlotPending(sessionId, "Campaign Slot awaits Host approval."));
@@ -700,7 +700,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             if(existing == null && (preference > roster.getCapacity()
                     || preference != 0 && roster.getSlot(preference) != null)) preference = 0;
             SlotClaimRequest lateClaim = new SlotClaimRequest(connection.launcherIdentity,
-                    request.getPresentation(), preference, request.getReconnectToken());
+                    existing == null ? request.getPresentation() : existing.getPresentation(),
+                    preference, request.getReconnectToken());
             outcome = existing == null ? roster.approve(lateClaim, random) : roster.submit(lateClaim);
         }
         else if(sessionStarted) {
@@ -2074,7 +2075,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         }
         connection.udpToken = nextNonZeroLong(random);
         connection.channel.writeAndFlush(new ServerAccepted(sessionId, connection.udpToken,
-                roster.getCampaignId(), slot.getNumber(), slot.getReconnectToken()));
+                roster.getCampaignId(), slot.getNumber(), slot.getReconnectToken(), sessionStarted));
         DirectConnectStatus previous = status;
         status = status(sessionStarted ? DirectConnectPhase.READY
                         : DirectConnectPhase.REGISTERING_UDP,
@@ -2645,6 +2646,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     public boolean isStartingLivesLocked() {
         return sessionStarted || durableCampaign != null;
     }
+
+    @Override public boolean isCampaignStarted() { return sessionStarted; }
 
     private void beginReconnectGrace(RemoteConnection connection) {
         MovementEntityDescriptor descriptor = connection.movementDescriptor;

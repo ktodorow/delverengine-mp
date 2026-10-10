@@ -10,6 +10,8 @@ import com.interrupt.dungeoneer.multiplayer.movement.MovementSnapshotInterpolato
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.overlays.OverlayManager;
 import com.interrupt.dungeoneer.multiplayer.participant.ParticipantId;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus;
+import com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -49,21 +51,30 @@ public final class DirectConnectMovementController {
         if(player == null) throw new IllegalArgumentException("Local Player cannot be null.");
         NetworkEntityId localId = peer.getLocalMovementEntityId();
         List<MovementSnapshot> snapshots = peer.getMovementSnapshots();
-        com.interrupt.dungeoneer.multiplayer.participant.PartyMemberStatus local =
+        PartyMemberStatus local =
                 peer.getPartyStatus() == null ? null
                         : peer.getPartyStatus().getMember(peer.getLocalCampaignSlot());
         if(localId == null && local != null && local.getState()
-                == com.interrupt.dungeoneer.multiplayer.participant.PartyMemberState.SPECTATING) {
+                == PartyMemberState.SPECTATING) {
             player.setMultiplayerIncapacitated(true);
             player.inventory.clear();
+            // Native HUD addresses inventorySize slots, including empty Spectator slots.
+            for(int i = 0; i < player.inventorySize; i++) player.inventory.add(null);
             player.equippedItems.clear();
             player.gold = 0;
             return true;
         }
-        if(localId == null || snapshots.isEmpty()) return false;
+        boolean spectator = local != null && local.getState()
+                == PartyMemberState.SPECTATING;
+        // Exhausted retained bodies can already be absent from live movement snapshots.
+        if(spectator) player.setMultiplayerIncapacitated(true);
+        if(localId == null || snapshots.isEmpty()) return spectator;
         MovementSnapshot latest = snapshots.get(snapshots.size() - 1);
         MovementEntityState authoritative = latest.getEntity(localId);
-        if(authoritative == null) return false;
+        if(authoritative == null) return spectator;
+        player.setMultiplayerIncapacitated(local != null && (local.getState()
+                == PartyMemberState.DOWNED
+                || local.getState() == PartyMemberState.SPECTATING));
         player.setPosition(authoritative.getX(), authoritative.getY(), authoritative.getZ());
         // Snapshots carry units per second; native Player velocity is per 60 Hz tick.
         player.xa = authoritative.getVelocityX() / 60f;

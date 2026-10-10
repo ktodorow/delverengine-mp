@@ -1,5 +1,7 @@
 package com.interrupt.dungeoneer.multiplayer.lobby;
 
+import com.interrupt.dungeoneer.multiplayer.network.DirectConnectProtocol;
+
 import com.interrupt.dungeoneer.multiplayer.combat.ActorEffectsSnapshot;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeAnimationState;
 import com.interrupt.dungeoneer.multiplayer.combat.NativeMonsterSpawn;
@@ -168,6 +170,58 @@ public class CampaignSaveStoreTest {
         assertTrue("Presentation wire upgrade cannot change saved gameplay body bytes",
                 Arrays.equals(savedGameplayBody(before), savedGameplayBody(Files.readAllBytes(file.toPath()))));
         assertEquals("Friday Delver", store.load("friends", next).getCampaignName());
+    }
+
+    @Test public void activeEntryWireUpgradePreservesWholeSavedGameplayBody() throws Exception {
+        File root = temporaryFolder.newFolder("active-entry-upgrade");
+        CampaignSaveStore store = new CampaignSaveStore(root);
+        CampaignSave original = withFloor(save("friends", compatibility("mp-v108-prototype-lobby-presentation-59")),
+                new byte[] { 7, 8, 9 }).withCampaignName("Friday Delver");
+        store.save(original);
+        File file = new File(new File(root, "friends"), "campaign.save");
+        try(RandomAccessFile predecessor = new RandomAccessFile(file, "rw")) {
+            predecessor.seek(8); predecessor.writeInt(53);
+        }
+        byte[] before = Files.readAllBytes(file.toPath());
+        DirectConnectCompatibility next = compatibility("mp-v108-prototype-active-entry-60");
+        assertFailure(store, "friends", new DirectConnectCompatibility(next.getBuildId(), "owned-v108", repeat('b')), "incompatible");
+        assertTrue(Arrays.equals(before, Files.readAllBytes(file.toPath())));
+        CampaignSave resumed = store.load("friends", next);
+        assertEquals(next.getBuildId(), resumed.getCompatibility().getBuildId());
+        assertEquals("Friday Delver", resumed.getCampaignName());
+        assertEquals(original.getSlots().get(0).getLauncherIdentity(), resumed.getSlots().get(0).getLauncherIdentity());
+        assertEquals(original.getSlots().get(1).getReconnectToken(), resumed.getSlots().get(1).getReconnectToken());
+        assertEquals(41, resumed.getParticipant(2).getProgress().gold);
+        assertEquals(19L, resumed.getPhysicalItems().get(0).entityId);
+        assertTrue(Arrays.equals(original.getNativeFloor(), resumed.getNativeFloor()));
+        assertTrue(Arrays.equals(before, Files.readAllBytes(file.toPath())));
+        store.save(resumed);
+        assertTrue(Arrays.equals(before, Files.readAllBytes(new File(file.getParentFile(), "campaign.previous").toPath())));
+        assertTrue("Active entry wire upgrade cannot change saved gameplay body bytes",
+                Arrays.equals(savedGameplayBody(before), savedGameplayBody(Files.readAllBytes(file.toPath()))));
+        assertEquals("Friday Delver", store.load("friends", next).getCampaignName());
+    }
+
+    @Test public void activeEntryResumesEveryKnownFormatEightLauncherPredecessor() throws Exception {
+        String[] predecessors = { "mp-v108-prototype-named-campaigns-56", "mp-v108-prototype-shared-lobby-57",
+                "mp-v108-prototype-manual-ready-58", "mp-v108-prototype-lobby-presentation-59" };
+        for(int index = 0; index < predecessors.length; index++) {
+            File root = temporaryFolder.newFolder("active-predecessor-" + index);
+            CampaignSaveStore store = new CampaignSaveStore(root);
+            CampaignSave original = withFloor(save("friends", compatibility(predecessors[index])), new byte[] { 7, 8, 9 });
+            store.save(original);
+            File file = new File(new File(root, "friends"), "campaign.save");
+            try(RandomAccessFile predecessor = new RandomAccessFile(file, "rw")) {
+                predecessor.seek(8); predecessor.writeInt(50 + index);
+            }
+            byte[] before = Files.readAllBytes(file.toPath());
+            CampaignSave resumed = store.load("friends", compatibility(DirectConnectProtocol.BUILD_ID));
+            assertEquals(DirectConnectProtocol.BUILD_ID, resumed.getCompatibility().getBuildId());
+            assertEquals(original.getSlots().get(1).getReconnectToken(), resumed.getSlots().get(1).getReconnectToken());
+            assertEquals(41, resumed.getParticipant(2).getProgress().gold);
+            assertTrue(Arrays.equals(original.getNativeFloor(), resumed.getNativeFloor()));
+            assertTrue(Arrays.equals(before, Files.readAllBytes(file.toPath())));
+        }
     }
 
     private static byte[] savedGameplayBody(byte[] bytes) throws IOException {

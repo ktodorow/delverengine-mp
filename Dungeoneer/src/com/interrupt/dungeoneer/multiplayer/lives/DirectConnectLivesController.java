@@ -30,6 +30,7 @@ public final class DirectConnectLivesController {
     static final float REVIVAL_PROMPT_REACH = 1.4f;
     private static final float INTENT_RESEND_SECONDS = 0.5f;
     private static final float TICKS_PER_SECOND = 60f;
+    private static final String FRESH_RETURN_PROMPT = "FRESH RETURN AT FIRST UNVISITED FLOOR";
 
     private final DirectConnectPeer peer;
     private final DirectConnectMovementController movement;
@@ -106,6 +107,7 @@ public final class DirectConnectLivesController {
 
     /** Spectators watch living teammates; left mouse toggles first/third person, right mouse cycles. */
     private void updateSpectator(PartyStatusSnapshot status, PartyMemberStatus local) {
+        prompt = "SPECTATOR / " + FRESH_RETURN_PROMPT;
         java.util.List<PartyMemberStatus> living = new java.util.ArrayList<PartyMemberStatus>();
         for(PartyMemberStatus member : status.getMembers()) {
             if(member == local || member.getEntityId() == null
@@ -114,7 +116,7 @@ public final class DirectConnectLivesController {
         }
         if(living.isEmpty()) {
             stopSpectating();
-            prompt = "NO LIVES REMAINING";
+            prompt = "NO LIVES REMAINING / " + FRESH_RETURN_PROMPT;
             return;
         }
         boolean overlayOpen = com.interrupt.dungeoneer.overlays.OverlayManager.instance.current() != null;
@@ -153,7 +155,8 @@ public final class DirectConnectLivesController {
                 state.getLookY(), thirdPerson, watched.getNickname());
         prompt = "SPECTATING " + watched.getNickname()
                 + (thirdPerson ? "  [LMB] FIRST PERSON" : "  [LMB] THIRD PERSON")
-                + (living.size() > 1 ? "  [RMB] NEXT" : "");
+                + (living.size() > 1 ? "  [RMB] NEXT" : "")
+                + "\n" + FRESH_RETURN_PROMPT;
     }
 
     private void stopSpectating() {

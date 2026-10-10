@@ -685,6 +685,10 @@ public class GameApplication extends Game {
         return sessionFlow.enter(expected, this::installDirectConnectFloor);
     }
 
+    public boolean canEnterDirectConnectFloor(DirectConnectPeer expected) {
+        return sessionFlow.canEnter(expected);
+    }
+
     private void installDirectConnectFloor() {
 
         // Clients load the floor announced by Host from their own certified Owned Game Copy.

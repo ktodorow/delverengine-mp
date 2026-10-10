@@ -322,7 +322,7 @@ public class DirectConnectIntegrationTest {
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
                     3, new MemoryReconnectTokens(), compatibility);
-            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            awaitAdmissionCheckpoint(late, 0L);
             com.interrupt.dungeoneer.game.Game game = nativePartyGame();
             com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController movement =
                     new com.interrupt.dungeoneer.multiplayer.movement.DirectConnectMovementController(late);
@@ -582,7 +582,7 @@ public class DirectConnectIntegrationTest {
             awaitPhase(existing, DirectConnectPhase.READY);
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3), 3, tokens, compatibility);
-            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            awaitAdmissionCheckpoint(late, 0L);
             fixture.host.updatePendingAdmissions(System.nanoTime() + java.util.concurrent.TimeUnit.MINUTES.toNanos(2));
             awaitPhase(late, DirectConnectPhase.REJECTED);
             assertTrue(late.getStatus().getMessage().contains("retry"));
@@ -657,12 +657,14 @@ public class DirectConnectIntegrationTest {
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
                     3, new MemoryReconnectTokens(), compatibility);
-            awaitPhase(late, DirectConnectPhase.LOBBY);
+            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            assertTrue(late.isCampaignStarted());
+            assertFalse(late.canSetPlayerReady());
             assertEquals(0L, late.getPendingAdmissionCheckpoint());
             assertNull(fixture.host.getPartyStatus().getMember(3));
             fixture.host.completeNativeWorld(loadingGeneration);
-            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
-            long obsoleteCheckpoint = late.getPendingAdmissionCheckpoint();
+            long obsoleteCheckpoint = awaitAdmissionCheckpoint(late, 0L);
+            assertTrue(obsoleteCheckpoint > 0L);
             fixture.host.beginNativeWorld();
             long stableGeneration = fixture.host.getNativeWorldGeneration();
             fixture.host.completeNativeWorld(loadingGeneration); // obsolete loading completion
@@ -740,17 +742,14 @@ public class DirectConnectIntegrationTest {
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
                     3, new MemoryReconnectTokens(), compatibility);
-            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
-            long baseline = late.getPendingAdmissionCheckpoint();
+            long baseline = awaitAdmissionCheckpoint(late, 0L);
             late.acknowledgeNativeWorldReadiness(baseline);
-            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
-            while(late.getPendingAdmissionCheckpoint() == 0L && System.currentTimeMillis() < deadline) Thread.sleep(10L);
-            long catchUp = late.getPendingAdmissionCheckpoint();
+            long catchUp = awaitAdmissionCheckpoint(late, baseline);
             assertTrue(catchUp > baseline);
             com.interrupt.dungeoneer.game.Progression progress = new com.interrupt.dungeoneer.game.Progression();
             progress.progressionTriggers.put("opened-during-catchup", "done");
             fixture.host.publishPartyProgression(progress);
-            deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+            long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
             while(!late.getPartyProgression().persistent.containsKey("opened-during-catchup")
                     && System.currentTimeMillis() < deadline) Thread.sleep(10L);
             assertEquals("Changes after fence must close mutation gap", "done",
@@ -779,11 +778,10 @@ public class DirectConnectIntegrationTest {
             late = DirectConnectClient.connectForNativeWorld("127.0.0.1", fixture.host.getBoundPort(),
                     identity('3'), new SlotPresentation("Late", AvatarCatalog.HUMANOID_3),
                     3, new MemoryReconnectTokens(), compatibility);
-            awaitPhase(late, DirectConnectPhase.SYNCHRONIZING);
+            long baseline = awaitAdmissionCheckpoint(late, 0L);
             assertNull(fixture.host.getPartyStatus().getMember(3));
             assertFalse(late.getMovementSnapshots().isEmpty());
             assertNotNull(late.getStatus().getFloorId());
-            long baseline = late.getPendingAdmissionCheckpoint();
             assertTrue(baseline > 0);
             late.acknowledgeNativeWorldReadiness(baseline);
             long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
@@ -827,7 +825,8 @@ public class DirectConnectIntegrationTest {
                     movement.applyInitialAuthoritativeState(local));
             assertTrue(local.multiplayerIncapacitated);
             assertEquals(0, local.gold);
-            assertEquals(0, local.inventory.size);
+            assertEquals(local.inventorySize, local.inventory.size);
+            for(com.interrupt.dungeoneer.entities.Item item : local.inventory) assertNull(item);
             assertFalse(new com.interrupt.dungeoneer.multiplayer.items.DirectConnectItemController(late)
                     .isLocalMapMarkerVisible());
         }
@@ -4974,6 +4973,18 @@ public class DirectConnectIntegrationTest {
             return decoder.readInbound();
         }
         finally { decoder.finishAndReleaseAll(); }
+    }
+
+    private long awaitAdmissionCheckpoint(DirectConnectPeer peer, long previous)
+            throws InterruptedException {
+        awaitPhase(peer, DirectConnectPhase.SYNCHRONIZING);
+        long deadline = System.currentTimeMillis() + TIMEOUT_MILLIS;
+        while(peer.getPendingAdmissionCheckpoint() <= previous
+                && System.currentTimeMillis() < deadline) Thread.sleep(10L);
+        long checkpoint = peer.getPendingAdmissionCheckpoint();
+        assertTrue("Native admission checkpoint must advance", checkpoint > previous);
+        assertEquals(DirectConnectPhase.SYNCHRONIZING, peer.getStatus().getPhase());
+        return checkpoint;
     }
 
     private void awaitPhase(DirectConnectPeer peer, DirectConnectPhase phase)

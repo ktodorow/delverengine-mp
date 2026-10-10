@@ -394,6 +394,7 @@ final class DirectConnectWire {
             output.writeByte(accepted.slotNumber);
             writeString(output, accepted.reconnectToken,
                     DirectConnectProtocol.MAX_RECONNECT_TOKEN_BYTES, "reconnect credential");
+            output.writeBoolean(accepted.campaignStarted);
         }
         else if(message instanceof ServerRejected) {
             ServerRejected rejected = (ServerRejected)message;
@@ -1820,10 +1821,13 @@ final class DirectConnectWire {
                 if(acceptedSlot < 1 || acceptedSlot > 4) {
                     throw new ProtocolException("Campaign Slot number is outside protocol bounds.");
                 }
+                String acceptedCredential = readString(input, DirectConnectProtocol.MAX_RECONNECT_TOKEN_BYTES,
+                        "reconnect credential");
+                requireReadable(input, 1, "campaign started flag");
+                int campaignStarted = input.readUnsignedByte();
+                if(campaignStarted > 1) throw new ProtocolException("Invalid campaign started flag.");
                 message = new ServerAccepted(acceptedSession, acceptedUdpToken,
-                        acceptedCampaign, acceptedSlot,
-                        readString(input, DirectConnectProtocol.MAX_RECONNECT_TOKEN_BYTES,
-                                "reconnect credential"));
+                        acceptedCampaign, acceptedSlot, acceptedCredential, campaignStarted == 1);
                 break;
             case SERVER_REJECTED:
                 requireReadable(input, 1, "rejection code");
@@ -2478,14 +2482,21 @@ final class DirectConnectWire {
         final String campaignId;
         final int slotNumber;
         final String reconnectToken;
+        final boolean campaignStarted;
 
         ServerAccepted(String sessionId, long udpToken, String campaignId, int slotNumber,
                 String reconnectToken) {
+            this(sessionId, udpToken, campaignId, slotNumber, reconnectToken, false);
+        }
+
+        ServerAccepted(String sessionId, long udpToken, String campaignId, int slotNumber,
+                String reconnectToken, boolean campaignStarted) {
             this.sessionId = sessionId;
             this.udpToken = udpToken;
             this.campaignId = campaignId;
             this.slotNumber = slotNumber;
             this.reconnectToken = reconnectToken;
+            this.campaignStarted = campaignStarted;
         }
     }
 

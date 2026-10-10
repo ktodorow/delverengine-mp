@@ -46,6 +46,7 @@ public class NativeConnectSetupTest {
             assertEquals(new SlotPresentation("Friend", "humanoid-2"), host.getRoster().getSlot(2).getPresentation());
             startReadySession(host);
             awaitPhase(client, DirectConnectPhase.READY);
+            awaitEntry(flow, client);
             assertTrue(flow.enter(client, () -> { }));
             flow.leave();
             DirectConnectSessionFlow.ConnectSetup recalled = new DirectConnectSessionFlow().prepareConnect();
@@ -121,6 +122,7 @@ public class NativeConnectSetupTest {
             readyClient(accepted);
             startReadySession(host);
             awaitPhase(accepted, DirectConnectPhase.READY);
+            awaitEntry(flow, accepted);
             assertTrue(flow.enter(accepted, () -> { }));
             assertFalse(flow.enter(avatarRejected, () -> fail("Rejected Avatar attempt entered retry")));
             assertEquals(new SlotPresentation("Friend", "humanoid-2"), host.getRoster().getSlot(2).getPresentation());
@@ -173,6 +175,7 @@ public class NativeConnectSetupTest {
             startReadySession(host);
             awaitPhase(current, DirectConnectPhase.READY);
             assertFalse(flow.enter(cancelledConnection, () -> fail("Cancelled claim entered replacement")));
+            awaitEntry(flow, current);
             assertTrue(flow.enter(current, () -> { }));
         }
         finally { flow.leave(); host.close(); }
@@ -215,6 +218,7 @@ public class NativeConnectSetupTest {
             assertEquals(new SlotPresentation("Host", "humanoid-1"), flow.prepareConnect().getPresentation());
             assertEquals(credential, new ProfileReconnectTokenStore().load("friends"));
             assertFalse(flow.enter(denied, () -> fail("Wrong-token attempt entered reclaimed slot")));
+            awaitEntry(flow, reclaimed);
             assertTrue(flow.enter(reclaimed, () -> { }));
             assertTrue(host.getPendingClaims().isEmpty());
         }
@@ -312,6 +316,15 @@ public class NativeConnectSetupTest {
     private static DirectConnectCompatibility compatibility() {
         return DirectConnectCompatibility.forOpenSourceTestFloor(
                 "connect-floor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static void awaitEntry(DirectConnectSessionFlow flow, DirectConnectPeer peer) throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
+        while(System.nanoTime() < deadline) {
+            if(flow.canEnter(peer)) return;
+            Thread.sleep(10L);
+        }
+        fail("Native entry baseline unavailable: " + peer.getStatus().getPhase());
     }
 
     private static void awaitPhase(DirectConnectPeer peer, DirectConnectPhase expected) throws Exception {
