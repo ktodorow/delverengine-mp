@@ -771,7 +771,13 @@ public final class DirectConnectClient implements DirectConnectPeer {
         shutdownAsync();
     }
 
+    private volatile String hostDisconnectReason;
+
+    /** Reliable Host notification, absent when transport disappears unexpectedly. */
+    public String getHostDisconnectReason() { return hostDisconnectReason; }
+
     private synchronized void serverDisconnected(ServerDisconnect disconnect) {
+        hostDisconnectReason = disconnect.reason;
         status = new DirectConnectStatus(DirectConnectPhase.DISCONNECTED,
                 "Host disconnected cleanly: " + disconnect.reason,
                 sessionId, "host", null);

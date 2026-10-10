@@ -144,6 +144,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Host authority for lobby approval, live admission and persistent Campaign Slots. */
 public final class DirectConnectHost implements DirectConnectPeer, NativeCombatAuthority,
         com.interrupt.dungeoneer.multiplayer.economy.EconomyHost {
+    /** Reliable shutdown notices also identify successful role-specific launcher returns. */
+    public static final String LOBBY_CLOSED_MESSAGE = "Host closed lobby.";
+    public static final String SESSION_SAVED_MESSAGE = "Host saved and closed session.";
     private static final float REVIVAL_REACH = 1.6f;
     /** Knockback or sliding beyond this breaks Revival even without movement input. */
     private static final float REVIVAL_DRIFT = 0.5f;
@@ -3669,7 +3672,7 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
             catch(RuntimeException failure) { persistenceFailure = failure; }
         }
         if(sessionStarted) {
-            try { campaignSaveStore.endSession(roster.getCampaignId(), persistenceFailure == null); }
+            try { campaignSaveStore.endSession(roster.getCampaignId(), persistenceFailure == null && !confirmedSavePrepared); }
             catch(RuntimeException failure) { if(persistenceFailure == null) persistenceFailure = failure; }
         }
         List<Channel> participants;
@@ -3679,7 +3682,8 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
         for(Channel participant : participants) {
             if(participant.isActive()) {
                 participant.writeAndFlush(new ServerDisconnect(persistenceFailure == null
-                        ? "Host saved and closed session." : "Host lost session; crash recovery required."))
+                        ? sessionStarted ? SESSION_SAVED_MESSAGE : LOBBY_CLOSED_MESSAGE
+                        : "Host lost session; crash recovery required."))
                         .awaitUninterruptibly(1000L);
             }
         }
@@ -3797,7 +3801,10 @@ public final class DirectConnectHost implements DirectConnectPeer, NativeCombatA
     public void saveAndQuit() {
         boolean wasPaused = isSessionPaused();
         setSessionPaused(true);
-        try { persistCampaign(); }
+        try {
+            persistCampaign();
+            campaignSaveStore.prepareCleanShutdown(roster.getCampaignId());
+        }
         catch(RuntimeException failure) {
             setSessionPaused(wasPaused);
             throw failure;

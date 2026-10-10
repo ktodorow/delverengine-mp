@@ -554,21 +554,32 @@ public class GameApplication extends Game {
             }
             return;
         }
-        DirectConnectPhase phase = stopped.getStatus().getPhase();
-        String reason = stopped.getStatus().getMessage();
-        sessionFlow.leave();
-        if(stopped instanceof DirectConnectHost) showCampaignLibrary();
+        finishSessionReturn(stopped, true);
+    }
+
+    /** False means native Host confirmation remains open; stale callbacks do nothing. */
+    public boolean leaveDirectConnectSession(DirectConnectPeer expected, boolean confirmed) {
+        return finishSessionReturn(expected, confirmed);
+    }
+
+    private boolean finishSessionReturn(DirectConnectPeer stopped, boolean confirmed) {
+        DirectConnectSessionFlow.SessionReturn result = sessionFlow.returnToLauncher(stopped, confirmed);
+        if(result == null) return true;
+        if(result.isConfirmationRequired()) return false;
+        if(result.getDestination() == DirectConnectSessionFlow.ReturnDestination.CAMPAIGNS) {
+            showCampaignLibrary();
+            if(result.isFailure()) showDirectConnectFailure(result.getMessage());
+        }
         else {
             if(isMultiplayerLauncher()) {
                 promptMultiplayerConnect();
-                if(phase == DirectConnectPhase.FAILED || phase == DirectConnectPhase.REJECTED
-                        || phase == DirectConnectPhase.DISCONNECTED) showDirectConnectFailure(reason);
-                return;
+                connectSetupScreen.showSessionReturn(result);
+                return true;
             }
             showDirectConnectSession(stopped);
-            if(phase == DirectConnectPhase.FAILED || phase == DirectConnectPhase.REJECTED
-                    || phase == DirectConnectPhase.DISCONNECTED) showDirectConnectFailure(reason);
+            if(result.isFailure()) showDirectConnectFailure(result.getMessage());
         }
+        return true;
     }
 
     public void leaveDirectConnectSession() {

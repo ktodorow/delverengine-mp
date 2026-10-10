@@ -17,6 +17,7 @@ import com.interrupt.dungeoneer.GameApplication;
 import com.interrupt.dungeoneer.GameManager;
 import com.interrupt.dungeoneer.gfx.drawables.DrawableSprite;
 import com.interrupt.dungeoneer.multiplayer.launcher.DirectConnectSessionFlow.ConnectSetup;
+import com.interrupt.dungeoneer.multiplayer.launcher.DirectConnectSessionFlow.SessionReturn;
 import com.interrupt.dungeoneer.multiplayer.lobby.AvatarCatalog;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPeer;
 import com.interrupt.dungeoneer.multiplayer.network.DirectConnectPhase;
@@ -29,7 +30,8 @@ public final class ConnectSetupScreen extends BaseScreen {
     private final ButtonGroup<TextButton> avatars = new ButtonGroup<>();
     private final Image selectedPortrait = new Image();
     private final Label message;
-    private final TextButton connect, back;
+    private final TextButton connect, back, edit;
+    private Window failurePanel;
     private boolean pending, navigationPending, entryRequested, disposed;
     private String localFailure;
 
@@ -97,6 +99,8 @@ public final class ConnectSetupScreen extends BaseScreen {
         panel.row();
         Table actions = new Table();
         back = action(actions, "Back", application::cancelMultiplayerConnect);
+        edit = action(actions, "Edit", () -> ui.setKeyboardFocus(address));
+        edit.setVisible(false);
         connect = action(actions, "Connect", this::connect);
         panel.add(actions).colspan(2).padTop(4);
         root.add(panel);
@@ -132,7 +136,7 @@ public final class ConnectSetupScreen extends BaseScreen {
                 if(!button.isDisabled()) navigate(action);
             }
         });
-        parent.add(button).width(145).height(24).padRight(6);
+        parent.add(button).width(120).height(24).padRight(6);
         return button;
     }
 
@@ -155,6 +159,8 @@ public final class ConnectSetupScreen extends BaseScreen {
         ConnectSetup setup = new ConnectSetup(address.getText(), selectedPort, nickname.getText(),
                 (String)avatars.getChecked().getUserObject());
         localFailure = null;
+        connect.setText("Connect");
+        edit.setVisible(false);
         entryRequested = false;
         application.openMultiplayerConnection(setup);
         setPending(true);
@@ -164,6 +170,43 @@ public final class ConnectSetupScreen extends BaseScreen {
         localFailure = reason == null ? "Connection failed. Edit fields and retry." : reason;
         message.setText(localFailure.replace("[", "[["));
         message.setColor(Color.ORANGE);
+        connect.setText("Retry");
+        edit.setVisible(true);
+    }
+
+    /** Unexpected session loss is acknowledged before the retained Connect form is edited. */
+    public void showSessionReturn(SessionReturn result) {
+        localFailure = result.getMessage();
+        message.setText(localFailure.replace("[", "[["));
+        message.setColor(result.isFailure() ? Color.ORANGE : Color.WHITE);
+        if(!result.isFailure()) return;
+        showFailure(localFailure);
+        failurePanel = new Window("", new Window.WindowStyle(skin.get(TextButton.TextButtonStyle.class).font,
+                Color.WHITE, new NinePatchDrawable(new NinePatch(skin.getRegion("window"), 8, 8, 8, 8))));
+        failurePanel.setModal(true);
+        failurePanel.setMovable(false);
+        failurePanel.pad(12);
+        Label reason = new Label(localFailure.replace("[", "[["), skin);
+        reason.setFontScale(0.8f);
+        reason.setWrap(true);
+        failurePanel.add(reason).width(390).height(90).padBottom(8); failurePanel.row();
+        Table actions = new Table();
+        action(actions, "Retry", () -> { closeFailurePanel(); connect(); });
+        TextButton editReason = action(actions, "Edit / Continue", this::closeFailurePanel);
+        action(actions, "Back", application::cancelMultiplayerConnect);
+        failurePanel.add(actions).height(24);
+        failurePanel.pack();
+        failurePanel.setPosition((viewport.getWorldWidth() - failurePanel.getWidth()) / 2f,
+                (viewport.getWorldHeight() - failurePanel.getHeight()) / 2f);
+        ui.addActor(failurePanel);
+        ui.setKeyboardFocus(editReason);
+    }
+
+    private void closeFailurePanel() {
+        if(failurePanel == null) return;
+        failurePanel.remove();
+        failurePanel = null;
+        ui.setKeyboardFocus(address);
     }
 
     private void setPending(boolean value) {
@@ -172,6 +215,7 @@ public final class ConnectSetupScreen extends BaseScreen {
         port.setDisabled(value);
         nickname.setDisabled(value);
         connect.setDisabled(value);
+        edit.setDisabled(value);
         for(TextButton button : avatars.getButtons()) button.setDisabled(value);
         back.setText(value ? "Cancel" : "Back");
     }
@@ -186,12 +230,19 @@ public final class ConnectSetupScreen extends BaseScreen {
     @Override protected void tick(float delta) {
         super.tick(delta);
         ui.act(delta);
+        if(failurePanel != null) {
+            if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE) || Gdx.input.isKeyJustPressed(Input.Keys.ENTER))
+                navigate(this::closeFailurePanel);
+            return;
+        }
         DirectConnectPeer peer = application.getDirectConnectPeer();
         if(peer != null) {
             DirectConnectPhase phase = peer.getStatus().getPhase();
             boolean stopped = phase == DirectConnectPhase.FAILED || phase == DirectConnectPhase.REJECTED
                     || phase == DirectConnectPhase.DISCONNECTED || phase == DirectConnectPhase.CLOSED;
             setPending(!stopped);
+            connect.setText(stopped ? "Retry" : "Connect");
+            edit.setVisible(stopped);
             if(localFailure == null) {
                 message.setText(application.getMultiplayerConnectionProgress().replace("[", "[["));
                 message.setColor(stopped ? Color.ORANGE : Color.WHITE);

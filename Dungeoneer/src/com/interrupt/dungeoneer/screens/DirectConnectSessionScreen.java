@@ -144,8 +144,10 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         DirectConnectPhase phase = peer == null ? DirectConnectPhase.FAILED : peer.getStatus().getPhase();
         boolean stopped = phase == DirectConnectPhase.CLOSED || phase == DirectConnectPhase.FAILED
                 || phase == DirectConnectPhase.REJECTED || phase == DirectConnectPhase.DISCONNECTED && !(peer instanceof DirectConnectHost);
-        progress.setText(text(confirmClose ? "Close Host lobby? Connected Participants will disconnect."
-                : entryError != null ? entryError : peer == null ? "Connection could not open."
+        progress.setText(text(entryError != null ? entryError : confirmClose ? peer.isCampaignStarted()
+                ? "Save Campaign and end session? Connected Participants will disconnect."
+                : "Close Host lobby? Connected Participants will disconnect."
+                : peer == null ? "Connection could not open."
                 : stopped ? peer.getStatus().getMessage() : presentationNotice != null ? presentationNotice
                 : peer instanceof DirectConnectHost ? "Lobby open / " + peer.getEndpoint()
                 : application.getMultiplayerConnectionProgress()));
@@ -164,7 +166,8 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         if(host) start.setText(((DirectConnectHost)peer).isResumedCampaign() ? "Resume (Enter)" : "Start (Enter)");
         retry.setVisible(stopped && !confirmClose);
         keepOpen.setVisible(confirmClose);
-        leave.setText(confirmClose ? "Confirm close" : host ? "Close lobby (Esc)" : stopped ? "Edit / Back (Esc)" : "Leave (Esc)");
+        leave.setText(confirmClose ? "Confirm close" : host ? peer.isCampaignStarted()
+                ? "Save and Quit (Esc)" : "Close lobby (Esc)" : stopped ? "Edit / Back (Esc)" : "Leave (Esc)");
         List<PendingSlotClaim> pending = host ? ((DirectConnectHost)peer).getPendingClaims() : java.util.Collections.emptyList();
         relink.setVisible(!pending.isEmpty() && !confirmClose && !stopped);
         reject.setVisible(relink.isVisible());
@@ -307,10 +310,7 @@ public final class DirectConnectSessionScreen extends BaseScreen {
     }
 
     private void leave() {
-        if(peer instanceof DirectConnectHost && !confirmClose
-                && peer.getStatus().getPhase() != DirectConnectPhase.CLOSED
-                && peer.getStatus().getPhase() != DirectConnectPhase.FAILED) confirmClose = true;
-        else application.leaveDirectConnectSession();
+        confirmClose = !application.leaveDirectConnectSession(peer, confirmClose);
     }
 
     private void navigate(Runnable action) {
@@ -319,7 +319,10 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         Gdx.app.postRunnable(() -> {
             if(disposed || application.getScreen() != this || application.getDirectConnectPeer() != peer) return;
             try { action.run(); }
-            catch(RuntimeException failure) { showFailure(failure.getMessage()); }
+            catch(RuntimeException failure) {
+                showFailure(peer instanceof DirectConnectHost && confirmClose && peer.isCampaignStarted()
+                        ? "Save failed; session continues. " + failure.getMessage() : failure.getMessage());
+            }
             finally { navigationPending = false; }
         });
     }
@@ -337,6 +340,14 @@ public final class DirectConnectSessionScreen extends BaseScreen {
         super.tick(delta);
         ui.act(delta);
         updateLobby();
+        if(peer instanceof DirectConnectClient && !navigationPending && !floorEntryRequested) {
+            DirectConnectPhase phase = peer.getStatus().getPhase();
+            if(phase == DirectConnectPhase.DISCONNECTED || phase == DirectConnectPhase.FAILED
+                    || phase == DirectConnectPhase.REJECTED || phase == DirectConnectPhase.CLOSED) {
+                navigate(application::returnToDirectConnectSession);
+                return;
+            }
+        }
         boolean editing = editor != null;
         pollEdit();
         if(editing) {
@@ -351,7 +362,7 @@ public final class DirectConnectSessionScreen extends BaseScreen {
             if(confirmClose) confirmClose = false;
             else navigate(this::leave);
         }
-        else if(confirmClose && Gdx.input.isKeyJustPressed(Input.Keys.Y)) navigate(application::leaveDirectConnectSession);
+        else if(confirmClose && Gdx.input.isKeyJustPressed(Input.Keys.Y)) navigate(this::leave);
         else if(confirmClose && Gdx.input.isKeyJustPressed(Input.Keys.N)) confirmClose = false;
         else if(!confirmClose && retry.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.T)) navigate(application::retryDirectConnectSession);
         else if(!confirmClose && relink.isVisible() && Gdx.input.isKeyJustPressed(Input.Keys.L)) navigate(() -> recoverClaim(true));

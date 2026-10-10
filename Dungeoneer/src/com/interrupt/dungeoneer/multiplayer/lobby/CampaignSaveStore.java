@@ -276,11 +276,16 @@ public final class CampaignSaveStore {
         }
     }
 
+    /** Confirm clean shutdown while the live Host still owns its campaign lock. */
+    public synchronized void prepareCleanShutdown(String id) {
+        try { Files.deleteIfExists(campaignFile(id, "session.running").toPath()); }
+        catch(IOException failure) { throw new IllegalStateException("Could not mark Campaign shutdown clean: " + id, failure); }
+    }
+
     public synchronized void endSession(String id, boolean clean) {
         try {
-            if(clean) Files.deleteIfExists(campaignFile(id, "session.running").toPath());
+            if(clean) prepareCleanShutdown(id);
         }
-        catch(IOException failure) { throw new IllegalStateException("Could not mark Campaign shutdown clean: " + id, failure); }
         finally {
             FileLock lock = sessionLocks.remove(id);
             FileChannel channel = sessionChannels.remove(id);

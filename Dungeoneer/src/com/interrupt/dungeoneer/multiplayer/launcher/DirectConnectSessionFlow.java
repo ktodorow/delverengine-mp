@@ -27,6 +27,29 @@ import java.util.UUID;
 
 /** Application-owned session boundary. All operations run on the application thread. */
 public final class DirectConnectSessionFlow {
+    public enum ReturnDestination { CAMPAIGNS, CONNECT }
+
+    /** Result of a current-session action; confirmation never retires a live Host. */
+    public static final class SessionReturn {
+        private final ReturnDestination destination;
+        private final boolean confirmationRequired;
+        private final boolean failure;
+        private final String message;
+
+        private SessionReturn(ReturnDestination destination, boolean confirmationRequired,
+                boolean failure, String message) {
+            this.destination = destination;
+            this.confirmationRequired = confirmationRequired;
+            this.failure = failure;
+            this.message = message;
+        }
+
+        public ReturnDestination getDestination() { return destination; }
+        public boolean isConfirmationRequired() { return confirmationRequired; }
+        public boolean isFailure() { return failure; }
+        public String getMessage() { return message; }
+    }
+
     /** Provisional typed Client preferences; Host decides Campaign Slot presentation. */
     public static final class ConnectSetup {
         private final LauncherEndpointStore.Endpoint endpoint;
@@ -164,8 +187,11 @@ public final class DirectConnectSessionFlow {
                     ? "Spectator. Fresh Return at Party's first unvisited floor."
                     : "Connection ready.";
             case REJECTED: return "Connection rejected: " + peer.getStatus().getMessage();
+            case DISCONNECTED:
+                if(peer instanceof DirectConnectClient && ((DirectConnectClient)peer).getHostDisconnectReason() != null)
+                    return ((DirectConnectClient)peer).getHostDisconnectReason() + " Return to Connect.";
             case FAILED:
-            case DISCONNECTED: return "Connection failed: " + peer.getStatus().getMessage()
+                return "Connection failed: " + peer.getStatus().getMessage()
                     + " Check Host address and TCP/UDP port; edit and retry.";
             case CLOSED: return "Connection cancelled.";
             default: return peer.getStatus().getMessage();
@@ -311,6 +337,32 @@ public final class DirectConnectSessionFlow {
         if(isLocalSpectator()) return phase == DirectConnectPhase.READY || expected.getPendingAdmissionCheckpoint() > 0L;
         return phase == DirectConnectPhase.READY && expected.getLocalMovementEntityId() != null
                 && snapshots.get(snapshots.size() - 1).getEntity(expected.getLocalMovementEntityId()) != null;
+    }
+
+    /** Confirmation and role-specific destinations share the real save/teardown boundary. */
+    public SessionReturn returnToLauncher(DirectConnectPeer expected, boolean confirmed) {
+        if(expected == null || expected != peer) return null;
+        DirectConnectPhase phase = expected.getStatus().getPhase();
+        boolean host = expected instanceof DirectConnectHost;
+        boolean stopped = phase == DirectConnectPhase.CLOSED || phase == DirectConnectPhase.FAILED
+                || phase == DirectConnectPhase.REJECTED || phase == DirectConnectPhase.DISCONNECTED;
+        ReturnDestination destination = host ? ReturnDestination.CAMPAIGNS : ReturnDestination.CONNECT;
+        if(host && !stopped && !confirmed) {
+            return new SessionReturn(destination, true, false, expected.isCampaignStarted()
+                    ? "Save Campaign and end session? Connected Participants will disconnect."
+                    : "Close Host lobby? Connected Participants will disconnect.");
+        }
+        String notified = expected instanceof DirectConnectClient
+                ? ((DirectConnectClient)expected).getHostDisconnectReason() : null;
+        boolean cleanHostClose = DirectConnectHost.LOBBY_CLOSED_MESSAGE.equals(notified)
+                || DirectConnectHost.SESSION_SAVED_MESSAGE.equals(notified);
+        boolean failure = phase == DirectConnectPhase.FAILED || phase == DirectConnectPhase.REJECTED
+                || phase == DirectConnectPhase.DISCONNECTED && !cleanHostClose;
+        String message = host ? failure ? expected.getStatus().getMessage()
+                : expected.isCampaignStarted() ? "Campaign saved. Session closed." : "Host closed lobby."
+                : stopped ? getClientProgress() : "Left session. Campaign Slot stays with Host.";
+        leave(); // A failed Host save throws before resources or destination can be released.
+        return new SessionReturn(destination, false, failure, message);
     }
 
     public void leave() {
