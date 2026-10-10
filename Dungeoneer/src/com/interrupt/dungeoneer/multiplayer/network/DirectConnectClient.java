@@ -293,6 +293,8 @@ public final class DirectConnectClient implements DirectConnectPeer {
             context.close();
             return;
         }
+        // Host can reply before Bootstrap.connect returns on the application thread.
+        tcpChannel = context.channel();
         status = new DirectConnectStatus(DirectConnectPhase.HANDSHAKING,
                 "TCP connected. Validating protocol build and normalized content identity.",
                 null, null, null);
@@ -1759,8 +1761,6 @@ public final class DirectConnectClient implements DirectConnectPeer {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext context, Throwable cause) {
-            System.err.println("[DEBUG-issue49-tcp] Client handler failure");
-            cause.printStackTrace(System.err);
             fail("TCP session failed: " + safeMessage(cause));
         }
     }

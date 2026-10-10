@@ -83,6 +83,32 @@ public class DirectConnectIntegrationTest {
 
     private int campaignStoreCounter;
 
+    @Test public void immediateHostChallengeSurvivesDelayedApplicationThread() throws Exception {
+        Thread caller = Thread.currentThread();
+        int previousPriority = caller.getPriority();
+        caller.setPriority(Thread.MIN_PRIORITY);
+        try {
+            // Real sockets; let network callbacks overtake the application-side connect caller.
+            for(int attempt = 0; attempt < 32; attempt++) {
+                String campaignId = "immediate-challenge-" + attempt;
+                DirectConnectCompatibility compatibility = compatibility(campaignId);
+                HostFixture fixture = host(compatibility, 2, campaignId);
+                MemoryReconnectTokens tokens = new MemoryReconnectTokens();
+                DirectConnectClient friend = null;
+                try {
+                    friend = client(fixture.host.getBoundPort(), '2', "Friend", AvatarCatalog.HUMANOID_2,
+                            0, tokens, compatibility);
+                    readyClient(friend);
+                    assertEquals(DirectConnectPhase.LOBBY, friend.getStatus().getPhase());
+                    assertEquals(2, friend.getLocalCampaignSlot());
+                    assertNotNull(tokens.load(campaignId));
+                }
+                finally { if(friend != null) friend.close(); fixture.close(); }
+            }
+        }
+        finally { caller.setPriority(previousPriority); }
+    }
+
     @Test public void admittedClientCannotPublishLobbyAuthorityOrForgeAuthenticationReceipt() throws Exception {
         DirectConnectCompatibility compatibility = compatibility("lobby-authority");
         HostFixture fixture = host(compatibility, 3, "lobby-authority");
