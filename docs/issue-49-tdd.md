@@ -190,3 +190,27 @@ Connect active campaign: enter bodyless Spectator, world stays open through firs
 2026-10-10: owner explicitly requested commit, push and issue closure if all checks are green. Re-ran final verification before staging: 740 Windows tests / zero failures/errors/skips, required build/package tasks passed, all 715 tested source hashes match, no new source paths, original owned archive unchanged, same checkout/branch and baseline HEAD. No code changed after passing full run; documentation records this later authorization.
 
 Closure follows owner instruction based on green automated validation. Native owner retest has not been reported; no claim of native rendering/camera/gameplay acceptance. Failed native HUD RED runs and subsequent passing regression remain documented above. Commit scope includes issue #49 implementation, tests and this TDD record; pre-existing local tooling and unrelated untracked documents remain outside commit.
+
+## Hosted CI preference/admission race — follow-up
+
+Initial implementation committed and pushed as `d985a63de0ca11a83343f6edf6eeb57373242ab4`. Fresh hosted Windows CI run [38052097745](https://github.com/ktodorow/delverengine-mp/actions/runs/38052097745) fails at `NativeConnectSetupTest.failedPreferenceWriteClosesOpenedClientWithoutClaimingHostCapacity`, Host roster-size assertion: local preference-write failure must not reserve Campaign Capacity. 718 core tests / 1 failure / 16 owned-copy tests skipped; Desktop/package checks not reached. Earlier full VM run remains valid historical evidence, but this CI failure blocks closure. Issue remains open.
+
+Before production changes, pin real TCP/UDP interleaving in existing agreed Connect action seam: connection factory waits until Host admits second participant before returning. Real presentation preference target is directory, so actual filesystem write fails. Expected Host roster remains one slot, flow owns no peer, launcher identity remains unchanged. No Host policy mocks or sleeps to hide admission. CCE recall/search attempted again; both connectors still return `Transport closed`. Logs/XML captured under `.scratch/issue-49/ci-race-*`.
+
+Pinned RED `ci-race-red-01`: 1 Windows test / 1 failure, 53.54s; `ci-race-red-02`: same failure, 15.37s. Exact assertion `expected:<1> but was:<2>` after opened Client is already `CLOSED`, disproving missing Client-close explanation. Host admission legitimately reserves durable slot; local close must not erase admitted ownership. Ranked hypotheses shared before probing: admission-before-preferences, incomplete close, filesystem failure indirectly changing roster. Expected correction: complete local preference persistence before invoking transport factory. Strengthened regression retains pinned real-admission path, Host-capacity assertion, and explicitly requires no Client opening, token, pending claim or connected participant on local setup failure; identity unchanged.
+
+Strengthened contract RED `ci-race-contract-red`: 1 test / 1 failure, 31.81s, same Host-capacity assertion. Production fix only moves both validated preference saves before Client factory; removes ineffective post-admission close-on-write-failure. Existing durable admission/disconnect policy unchanged. Exact regression GREEN `ci-race-green-01`: 1 test / zero failures/errors/skips, 43.94s. No test-side Host roster repair or Client cancellation before assertions. Full fresh Windows run follows with separately captured 715 source/test/build hashes.
+
+Supplemental Standards and Spec reviews: zero actionable findings. Scope limited to sequencing local setup before durable admission; validated unreachable/rejected attempts still retain editable defaults, Host remains presentation/ownership authority. Existing native HUD correction and owner play-test limitation remain. CCE decision/area recording also unavailable (`Transport closed`); this local TDD record preserves rationale and evidence.
+
+Exact regression command, from repository on Windows:
+
+```cmd
+gradlew.bat Dungeoneer:test --tests com.interrupt.dungeoneer.multiplayer.launcher.NativeConnectSetupTest.failedPreferenceWriteCannotOpenClientOrClaimHostCapacity --no-daemon --console=plain
+```
+
+Same command executes final contract RED and GREEN above. Admission barrier deterministically exposes old ordering; with correct ordering, failed local persistence prevents factory invocation entirely. No temporary diagnostic logs or production probes retained.
+
+Final race follow-up GREEN `ci-fix-full-01`: fresh Windows 11 core/Desktop suite and open-source distribution checks pass, 740 tests (718 core + 22 Desktop), 92 suites, zero failures/errors/skips. 414.82s, Gradle 6m 54s, all 11 tasks executed. Both exact native Spectator HUD regression and pinned preference/admission regression pass within full suite. Verification `python3 .scratch/issue-49/verify-ci-fix-results.py` confirms all 715 tested source/build hashes unchanged, no added source paths, original owned archive unchanged, `git diff --check` clean, same checkout/branch. Fork `game.jar` SHA256 `c52129522ee565fca446b680ad968af23e742f9b9a40819d79a365cf1f32d56c`. Metadata retained in `.scratch/issue-49/ci-fix-final-results.json`.
+
+This supersedes earlier automated validation status. Owner native camera/gameplay retest remains unreported. Follow-up commit/push authorized by owner; closure remains gated on fresh hosted CI. Final hosted run and closure evidence recorded on issue #49 after that gate passes.

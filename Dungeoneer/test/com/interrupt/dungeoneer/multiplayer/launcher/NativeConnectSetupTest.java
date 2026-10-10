@@ -258,7 +258,7 @@ public class NativeConnectSetupTest {
         assertEquals(identity, LauncherIdentityStore.loadOrCreate());
     }
 
-    @Test public void failedPreferenceWriteClosesOpenedClientWithoutClaimingHostCapacity() throws Exception {
+    @Test public void failedPreferenceWriteCannotOpenClientOrClaimHostCapacity() throws Exception {
         LauncherIdentity identity = LauncherIdentityStore.loadOrCreate();
         LauncherPresentationStore.save(new SlotPresentation("Previous", "humanoid-4"));
         File preference = MultiplayerProfile.resolveWritableFile("settings/multiplayer-presentation.properties").file();
@@ -274,18 +274,23 @@ public class NativeConnectSetupTest {
                     DirectConnectClient client = DirectConnectClient.connect(request.getAddress(), request.getPort(), identity,
                             request.getPresentation(), 0, new ProfileReconnectTokenStore(), compatibility());
                     opened.set(client);
+                    // Pin the CI interleaving: Host admission completes before local preference persistence.
+                    try { awaitConnected(host, 2); }
+                    catch(Exception failure) { throw new IllegalStateException("Host admission did not complete", failure); }
                     return client;
                 });
                 fail("Failed preference write must remain on editable form.");
             }
             catch(RuntimeException expected) { assertNotNull(expected.getMessage()); }
             assertNull(flow.getPeer());
-            assertNotNull(opened.get());
-            assertEquals(DirectConnectPhase.CLOSED, opened.get().getStatus().getPhase());
             assertEquals(1, host.getRoster().getSlots().size());
+            assertNull("Local setup must finish before Host can admit a Client", opened.get());
+            assertEquals(1, host.getConnectedParticipantCount());
+            assertTrue(host.getPendingClaims().isEmpty());
+            assertNull(new ProfileReconnectTokenStore().load("friends"));
             assertEquals(identity, LauncherIdentityStore.loadOrCreate());
         }
-        finally { flow.leave(); host.close(); }
+        finally { if(opened.get() != null) opened.get().close(); flow.leave(); host.close(); }
     }
 
     private static void awaitConnected(DirectConnectHost host, int count) throws Exception {

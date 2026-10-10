@@ -124,16 +124,10 @@ public final class DirectConnectSessionFlow {
             peer = null;
         }
         request = () -> {
-            DirectConnectClient client = connect.apply(setup);
-            try {
-                LauncherEndpointStore.save(setup.getAddress(), setup.getPort());
-                LauncherPresentationStore.save(setup.getPresentation());
-                return client;
-            }
-            catch(RuntimeException failure) {
-                try { client.close(); } catch(RuntimeException closeFailure) { failure.addSuppressed(closeFailure); }
-                throw failure;
-            }
+            // Admission reserves a durable Campaign Slot; finish fallible local setup first.
+            LauncherEndpointStore.save(setup.getAddress(), setup.getPort());
+            LauncherPresentationStore.save(setup.getPresentation());
+            return connect.apply(setup);
         };
         try { peer = request.get(); }
         catch(RuntimeException failure) { throw failure; }
